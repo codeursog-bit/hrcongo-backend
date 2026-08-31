@@ -1,0 +1,67 @@
+# --- BUILD & DEPENDENCIES ---
+/dist
+/node_modules
+/build
+/package-lock.json
+# Note: On garde package-lock.json d'habitude, mais certains préfèrent l'ignorer. 
+# Pour la prod, il est CONSEILLÉ de le garder. Si tu veux l'ignorer, décommente la ligne du dessus.
+
+# --- PRISMA & DATABASE ---
+/prisma/*.db
+/prisma/*.db-journal
+
+# On garde les fichiers .sql des migrations mais on ignore les bases SQLite locales
+*.db
+*.db-journal
+
+# --- ENVIRONNEMENT & SECURE DATA (CRITIQUE) ---
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+.env.*
+!.env.example
+
+# --- LOGS ---
+logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+
+# --- TESTS & COVERAGE ---
+/coverage
+/.nyc_output
+/test/jest-e2e.json
+
+# --- IDE & EDITORS ---
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+.DS_Store
+
+# --- TEMP & RUNTIME ---
+/temp
+/tmp
+/uploads
+pids
+*.pid
+*.seed
+*.pid.lock
+report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
+
+# --- INFRA & CLOUD ---
+.netlify
+/terraform
+.serverless
