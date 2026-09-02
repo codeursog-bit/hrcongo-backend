@@ -101,7 +101,14 @@ export class LoansRequestsService {
 
     return this.prisma.loan.findMany({
       where: whereClause,
-      include: { employee: { select: this.common.employeeSelect } },
+      include: {
+        employee: { select: this.common.employeeSelect },
+        // ✅ Sans ça, le frontend (Suivi des dettes, Relevé, Vue d'ensemble)
+        // ne peut jamais calculer "remboursé ce mois-ci" — repaymentLogs
+        // restait toujours vide côté client, donc le total tombait à 0 peu
+        // importe les vrais remboursements en base.
+        repaymentLogs: { orderBy: [{ year: 'desc' }, { month: 'desc' }] },
+      },
       orderBy: { createdAt: 'desc' },
     });
   }
@@ -289,7 +296,10 @@ export class LoansRequestsService {
 
     return this.prisma.advance.findMany({
       where: whereClause,
-      include: { employee: { select: this.common.employeeSelect } },
+      include: {
+        employee: { select: this.common.employeeSelect },
+        repaymentLogs: { orderBy: [{ year: 'desc' }, { month: 'desc' }] },
+      },
       orderBy: { createdAt: 'desc' },
     });
   }

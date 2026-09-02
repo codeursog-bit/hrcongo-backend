@@ -599,17 +599,16 @@ export class PayrollGeneratorService {
     // 🆕 Charger les impacts congés pour tous les employés en parallèle
     const leaveBalancesByEmployee: Record<string, any> = {};
     await Promise.all(
-      // ✅ Snapshot solde congés — figé sur chaque bulletin au moment de la génération
-      // Modèle "cycle d'acquisition" (12 mois glissants par employé, plus l'année
-      // calendaire) : on prend le cycle le plus récent de l'employé, qui est
-      // toujours son cycle actuellement ouvert (voir LeavesService.getOrCreateLeaveBalance).
+      // ✅ CORRECTIF (bug trouvé) : snapshot solde congés — lisait
+      // seulement le cycle le PLUS RÉCENT de l'employé (findFirst orderBy
+      // desc), sous-évaluant le solde d'un employé avec plusieurs cycles
+      // non soldés (même correctif que Provision). Solde TOTAL réel
+      // désormais (somme de tous les cycles), figé sur chaque bulletin au
+      // moment de la génération.
       employeeIdsList.map(async (empId) => {
         try {
           leaveBalancesByEmployee[empId] =
-            await this.prisma.leaveBalance.findFirst({
-              where: { employeeId: empId },
-              orderBy: { cycleStartDate: 'desc' },
-            });
+            await this.leavesService.getTotalLeaveBalanceSummary(empId);
         } catch {
           leaveBalancesByEmployee[empId] = null;
         }

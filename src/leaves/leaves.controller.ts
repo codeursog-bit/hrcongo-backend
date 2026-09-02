@@ -182,6 +182,8 @@ export class LeavesController {
       startDate: string;
       endDate: string;
       reason?: string;
+      extraDaysGranted?: number;
+      resumptionNote?: string;
     },
     @Request() req,
     @Query('companyId') companyId?: string,

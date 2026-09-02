@@ -154,6 +154,14 @@ export class LeavesService {
     );
   }
 
+  // ✅ Solde TOTAL réel (somme de tous les cycles non soldés) — à utiliser
+  // partout où un solde doit être affiché/figé de façon fiable (bulletins,
+  // simulation, vérification avant congé). Voir LeavesBalanceService pour
+  // le détail du correctif.
+  async getTotalLeaveBalanceSummary(employeeId: string) {
+    return this.balanceService.getTotalLeaveBalanceSummary(employeeId);
+  }
+
   async getProjectedBalanceAsOf(employeeId: string, asOfDate: Date) {
     return this.balanceService.getProjectedBalanceAsOf(employeeId, asOfDate);
   }
@@ -953,6 +961,8 @@ export class LeavesService {
       startDate: string;
       endDate: string;
       reason?: string;
+      extraDaysGranted?: number;
+      resumptionNote?: string;
     },
     userId: string,
     overrideCompanyId?: string,
@@ -1074,6 +1084,15 @@ export class LeavesService {
         plannedPayrollMonth,
         plannedPayrollYear,
         payrollIndemnityDays,
+        // ✅ CORRECTIF (demande explicite) : cette route (planification
+        // directe RH, déjà APPROVED à la création) n'avait jamais ces 2
+        // champs — la lettre ne pouvait donc jamais afficher ni le motif de
+        // report, ni les jours d'ancienneté déjà reportés, pour un congé
+        // planifié directement (par opposition à approuvé depuis une
+        // demande employé, seul chemin qui les avait). Seulement pour
+        // ANNUAL — même règle que updateStatus (jamais pour un anticipé).
+        extraDaysGranted: dto.type === 'ANNUAL' ? dto.extraDaysGranted : undefined,
+        resumptionNote: dto.type === 'ANNUAL' ? dto.resumptionNote : undefined,
       },
       include: {
         employee: {

@@ -524,11 +524,14 @@ export class ManualPayrollService {
           baseSalary: effectiveBaseSalary,
         };
 
-        const lbSnap = await tx.leaveBalance
-          .findFirst({
-            where: { employeeId: employee.id },
-            orderBy: { cycleStartDate: 'desc' },
-          })
+        // ✅ CORRECTIF (bug trouvé) : solde TOTAL réel (tous cycles non
+        // soldés), pas seulement le dernier — même correctif que Provision.
+        // Avant : `tx.leaveBalance.findFirst(...)` sans passer par
+        // getOrCreateLeaveBalance — si aucune ligne n'existait encore pour
+        // l'employé (1er bulletin jamais généré), lbSnap valait null et
+        // droits/pris/solde retombaient tous à 0.
+        const lbSnap = await this.leavesService
+          .getTotalLeaveBalanceSummary(employee.id)
           .catch(() => null);
         const leaveSnapshot = {
           droits: dto.congesDroits ?? Number(lbSnap?.annualEntitled ?? 0),

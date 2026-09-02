@@ -39,6 +39,50 @@ export class LeavesBalanceService {
     private indemnityService: LeavesIndemnityService,
   ) {}
 
+  // ============================================================================
+  // ✅ CORRECTIF (bug récurrent trouvé à plusieurs endroits : bulletins,
+  //    simulation paie manuelle, vérification de solde à la création d'un
+  //    congé...) — toutes ces lectures ne prenaient que le cycle LE PLUS
+  //    RÉCENT (`findFirst` trié desc), exactement le même bug que celui
+  //    déjà corrigé sur la page Provision. Un employé qui n'a pas pris
+  //    congé depuis plusieurs cycles a plusieurs lignes LeaveBalance non
+  //    soldées en base — son vrai solde total est leur SOMME, pas
+  //    seulement la plus récente. Ce helper centralise le bon calcul, à
+  //    réutiliser partout où un solde "vrai" doit être affiché ou figé
+  //    (snapshot de bulletin, simulation, vérification avant congé...).
+  // ============================================================================
+  async getTotalLeaveBalanceSummary(employeeId: string) {
+    // S'assure que le cycle actuellement ouvert existe/est à jour avant de sommer.
+    await this.getOrCreateLeaveBalance(employeeId).catch(() => null);
+
+    const rows = await this.prisma.leaveBalance.findMany({
+      where: { employeeId },
+    });
+
+    const annualEntitled = rows.reduce((s, r) => s + Number(r.annualEntitled), 0);
+    const annualTaken = rows.reduce((s, r) => s + Number(r.annualTaken), 0);
+    const annualRemaining = rows.reduce((s, r) => s + Number(r.annualRemaining), 0);
+    const seniorityDays = rows.reduce((s, r) => s + Number(r.seniorityDays || 0), 0);
+    const carriedForward = rows.reduce((s, r) => s + Number(r.carriedForward || 0), 0);
+    // Cycle le plus récent — utile pour l'affichage de la date de fin de cycle en cours.
+    const latest = [...rows].sort(
+      (a, b) =>
+        (b.cycleStartDate ? new Date(b.cycleStartDate).getTime() : 0) -
+        (a.cycleStartDate ? new Date(a.cycleStartDate).getTime() : 0),
+    )[0];
+
+    return {
+      annualEntitled: Math.round(annualEntitled * 10) / 10,
+      annualTaken: Math.round(annualTaken * 10) / 10,
+      annualRemaining: Math.round(annualRemaining * 10) / 10,
+      seniorityDays: Math.round(seniorityDays * 10) / 10,
+      carriedForward: Math.round(carriedForward * 10) / 10,
+      cyclesCount: rows.length,
+      cycleEndDate: latest?.cycleEndDate ?? null,
+      canTakeAnnualLeave: !!latest && annualEntitled > 0,
+    };
+  }
+
   /**
    * Solde de congé annuel — moteur basé sur le CYCLE D'ACQUISITION propre à
    * chaque employé (12 mois glissants depuis l'embauche ou le dernier retour

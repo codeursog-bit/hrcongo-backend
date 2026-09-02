@@ -1527,14 +1527,12 @@ export class PayrollsService {
       this.leavesService
         .getLeaveImpactForPayroll(employeeId, monthNum, year, prelimCalc.grossSalary)
         .catch(() => null),
-      // ✅ Snapshot solde congés AU MOMENT de la génération (figé sur le bulletin)
-      // — cycle en cours de l'employé, pas l'année calendaire du bulletin
-      this.prisma.leaveBalance
-        .findFirst({
-          where: { employeeId },
-          orderBy: { cycleStartDate: 'desc' },
-        })
-        .catch(() => null),
+      // ✅ CORRECTIF (bug trouvé) : snapshot solde congés AU MOMENT de la
+      // génération — lisait seulement le cycle le PLUS RÉCENT
+      // (findFirst orderBy desc), donc sous-évalué pour un employé avec
+      // plusieurs cycles non soldés (même correctif que Provision). Solde
+      // TOTAL réel désormais (somme de tous les cycles).
+      this.leavesService.getTotalLeaveBalanceSummary(employeeId).catch(() => null),
     ]);
 
     const leaveIndemnity = leaveImpact?.leaveIndemnity ?? 0;
@@ -1962,14 +1960,16 @@ export class PayrollsService {
         leaveInfoItems.find((i: any) => i.code === 'LEAVE_SOLDE')?.amount ?? 0,
       );
     } else {
-      // Fallback : bulletins anciens sans snapshot — on lit le live (peut être inexact)
-      const leaveBalance = await this.prisma.leaveBalance.findFirst({
-        where: { employeeId: payroll.employeeId },
-        orderBy: { cycleStartDate: 'desc' },
-      });
-      droitsConge = Number(leaveBalance?.annualEntitled ?? 0);
-      priseConge = Number(leaveBalance?.annualTaken ?? 0);
-      soldeConge = Number(leaveBalance?.annualRemaining ?? 0);
+      // ✅ CORRECTIF (bug trouvé) : fallback pour bulletins anciens sans
+      // snapshot — lisait seulement le cycle le PLUS RÉCENT (findFirst
+      // orderBy desc), sous-évalué pour un employé avec plusieurs cycles
+      // non soldés (même correctif que Provision). Solde TOTAL réel désormais.
+      const leaveBalanceTotal = await this.leavesService
+        .getTotalLeaveBalanceSummary(payroll.employeeId)
+        .catch(() => null);
+      droitsConge = Number(leaveBalanceTotal?.annualEntitled ?? 0);
+      priseConge = Number(leaveBalanceTotal?.annualTaken ?? 0);
+      soldeConge = Number(leaveBalanceTotal?.annualRemaining ?? 0);
     }
 
     return {
@@ -2754,13 +2754,19 @@ export class PayrollsService {
       companyTaxes,
     );
 
-    const [loans, advances, leaveImpact] = await Promise.all([
+    const [loans, advances, leaveImpact, leaveBalanceSummary] = await Promise.all([
       this.deductionsService.getActiveLoans(employeeId),
       this.deductionsService.getApprovedAdvances(employeeId, monthNum, year),
       // ✅ Charger l'impact congé — cohérence avec la génération batch
       this.leavesService
         .getLeaveImpactForPayroll(employeeId, monthNum, year, prelimCalcForLeave.grossSalary)
         .catch(() => null),
+      // ✅ CORRECTIF (bug trouvé) : cette simulation ne renvoyait jamais
+      // droitsConge/priseConge/soldeConge — la bannière congé de la paie
+      // manuelle (front) lisait sim.ytd.soldeConge, qui restait toujours
+      // undefined→0. Solde TOTAL réel (tous cycles non soldés, pas
+      // seulement le dernier — même correctif que Provision).
+      this.leavesService.getTotalLeaveBalanceSummary(employeeId).catch(() => null),
     ]);
 
     const leaveIndemnity = leaveImpact?.leaveIndemnity ?? 0;
@@ -2903,7 +2909,16 @@ export class PayrollsService {
       },
       simulationMode,
       // ✅ Base congé = brut annuel M-1 / 12 (méthode 1/12e Congo)
-      ytd: { baseConge, grossSalary: ytdPrevGross },
+      // ✅ CORRECTIF (bug trouvé) : droitsConge/priseConge/soldeConge
+      // ajoutés — manquaient entièrement, la bannière congé de la paie
+      // manuelle ne se déclenchait donc jamais correctement.
+      ytd: {
+        baseConge,
+        grossSalary: ytdPrevGross,
+        droitsConge: leaveBalanceSummary?.annualEntitled ?? 0,
+        priseConge: leaveBalanceSummary?.annualTaken ?? 0,
+        soldeConge: leaveBalanceSummary?.annualRemaining ?? 0,
+      },
     };
   }
 
