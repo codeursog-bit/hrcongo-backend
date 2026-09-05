@@ -73,7 +73,7 @@ export class PayrollItemsService {
     const salaryLabel = isStagiaire
       ? 'Gratification de stage'
       : isBncWorker
-        ? 'Honoraires / Prestation (montant HT)'
+        ? 'Honoraires / Prestation '
         : 'Salaire de base';
 
     // ✅ Le montant affiché est TOUJOURS le vrai salaire de base stocké

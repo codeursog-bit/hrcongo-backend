@@ -183,7 +183,10 @@ export class LoansOrcaExportService {
     await this.stampLogo(workbook, ws);
 
     if (['ACTIVE', 'PAID'].includes(loan.status) && company.cachetUrl) {
-      await this.stampCachet(workbook, ws, company.cachetUrl, 'K40');
+      // ✅ K44 = case du DG (croix DG posée en N45, colonne K juste à
+      // gauche) — avant, 'K40' correspondait à la zone "Signature de
+      // l'Agent", pas du tout à la case Avis/Signature DRH-DG.
+      await this.stampCachet(workbook, ws, company.cachetUrl, 'K44');
     }
 
     return { workbook, ws, employee, loan, company };
@@ -295,7 +298,9 @@ export class LoansOrcaExportService {
       ['APPROVED', 'PAID', 'DEDUCTED'].includes(advance.status) &&
       company.cachetUrl
     ) {
-      await this.stampCachet(workbook, ws, company.cachetUrl, 'K40');
+      // ✅ K48 = case du Chef de Service (croix déjà posée à cet endroit
+      // juste au-dessus, voir ws.getCell('K48') pour APPROVED/PAID/DEDUCTED).
+      await this.stampCachet(workbook, ws, company.cachetUrl, 'K48');
     }
 
     return { workbook, ws, employee, advance, company };
@@ -310,18 +315,33 @@ export class LoansOrcaExportService {
   // dépendance serveur.
 
   async exportLoanHtml(loanId: string, userId: string): Promise<string> {
-    const { ws, company } = await this.buildLoanWorkbook(loanId, userId);
-    return this.renderWorksheetToHtml(ws, company);
+    const { ws, company, loan } = await this.buildLoanWorkbook(loanId, userId);
+    // ✅ Case du DG (croix DG posée en colonne N, voir buildLoanWorkbook plus
+    // haut) — le cachet vient remplacer visuellement cette croix, donc il
+    // doit être sur la même ligne (45), colonne K juste à gauche de la case.
+    // ✅ Le cachet ne doit apparaître que si le prêt a réellement été
+    // approuvé — avant, le HTML l'affichait dès que l'entreprise avait un
+    // cachet configuré, peu importe le statut du prêt (même en attente/refusé).
+    return this.renderWorksheetToHtml(ws, company, {
+      cachetAnchor: 'K44',
+      showCachet: ['ACTIVE', 'PAID'].includes(loan.status),
+    });
   }
 
   async exportAdvanceHtml(advanceId: string, userId: string): Promise<string> {
-    const { ws, company } = await this.buildAdvanceWorkbook(advanceId, userId);
-    return this.renderWorksheetToHtml(ws, company);
+    const { ws, company, advance } = await this.buildAdvanceWorkbook(advanceId, userId);
+    // ✅ La croix d'approbation de l'avance est posée en K48 (voir
+    // buildAdvanceWorkbook) — le cachet doit être sur cette même case.
+    return this.renderWorksheetToHtml(ws, company, {
+      cachetAnchor: 'K48',
+      showCachet: ['APPROVED', 'PAID', 'DEDUCTED'].includes(advance.status),
+    });
   }
 
   private async renderWorksheetToHtml(
     ws: ExcelJS.Worksheet,
     company: { cachetUrl: string | null },
+    cachetOptions?: { cachetAnchor: string; showCachet: boolean },
   ): Promise<string> {
     const colCount = ws.columnCount;
     const rowCount = ws.rowCount;
@@ -380,7 +400,13 @@ export class LoansOrcaExportService {
       return `${width}px ${style} ${argb(b.color) ?? '#000'}`;
     };
 
-    let tableHtml = `<table style="border-collapse:collapse;table-layout:fixed;width:${colLeft[colCount]}px;font-family:Calibri,Arial,sans-serif;">`;
+    // ✅ background/color explicites par défaut : sans ça, une cellule Excel
+    // sans remplissage/police définis n'a NI background NI color en HTML —
+    // elle hérite donc du thème de la page qui affiche cet aperçu (fond
+    // sombre de l'app, texte clair) au lieu de rester blanche avec du texte
+    // noir comme un vrai document. C'est ce qui donnait un aperçu "sombre"
+    // et un texte illisible à l'impression.
+    let tableHtml = `<table style="border-collapse:collapse;table-layout:fixed;width:${colLeft[colCount]}px;font-family:Calibri,Arial,sans-serif;background:#ffffff;color:#000000;">`;
     tableHtml += `<colgroup>${Array.from({ length: colCount }, (_, i) => `<col style="width:${colPx[i + 1]}px">`).join('')}</colgroup>`;
 
     for (let r = 1; r <= rowCount; r++) {
@@ -415,11 +441,11 @@ export class LoansOrcaExportService {
           `border-bottom:${borderCss(border.bottom)}`,
           `border-left:${borderCss(border.left)}`,
           `border-right:${borderCss(border.right)}`,
-          bg ? `background:${bg}` : '',
+          bg ? `background:${bg}` : 'background:#ffffff',
           `font-weight:${font.bold ? 'bold' : 'normal'}`,
           font.italic ? 'font-style:italic' : '',
           `font-size:${font.size ?? 11}pt`,
-          font.color ? `color:${argb(font.color as any)}` : '',
+          `color:${font.color ? argb(font.color as any) : '#000000'}`,
           `text-align:${align.horizontal ?? (typeof value === 'number' ? 'right' : 'left')}`,
           `vertical-align:${align.vertical === 'middle' ? 'middle' : align.vertical === 'bottom' ? 'bottom' : 'top'}`,
           `white-space:${align.wrapText ? 'normal' : 'nowrap'}`,
@@ -447,7 +473,7 @@ export class LoansOrcaExportService {
       /* logo cosmétique, on continue sans lui si illisible */
     }
 
-    if (company.cachetUrl) {
+    if (company.cachetUrl && cachetOptions?.showCachet) {
       try {
         const response = await fetch(company.cachetUrl);
         if (response.ok) {
@@ -456,8 +482,16 @@ export class LoansOrcaExportService {
           const ext = company.cachetUrl.toLowerCase().endsWith('.png')
             ? 'png'
             : 'jpeg';
-          const left = colLeft[this.colLetterToIndex('K') + 1] ?? 0;
-          const top = rowTop[40] ?? 0;
+          // ✅ Ancre passée par l'appelant (K44 pour un prêt = case du DG,
+          // K48 pour une avance = case Chef de Service) — avant, c'était
+          // "K40" en dur ici, indépendant de ce qui était utilisé pour le
+          // vrai fichier Excel (voir stampCachet plus haut), donc les deux
+          // pouvaient diverger. Même ancre partout maintenant.
+          const anchorMatch = cachetOptions.cachetAnchor.match(/^([A-Z]+)(\d+)$/);
+          const anchorCol = anchorMatch ? anchorMatch[1] : 'K';
+          const anchorRow = anchorMatch ? Number(anchorMatch[2]) : 40;
+          const left = colLeft[this.colLetterToIndex(anchorCol) + 1] ?? 0;
+          const top = rowTop[anchorRow] ?? 0;
           imagesHtml += `<img src="data:image/${ext};base64,${base64}" style="position:absolute;left:${left}px;top:${top}px;width:110px;height:110px;" />`;
         }
       } catch {
@@ -465,7 +499,7 @@ export class LoansOrcaExportService {
       }
     }
 
-    return `<div style="position:relative;width:${colLeft[colCount]}px;">${tableHtml}${imagesHtml}</div>`;
+    return `<div style="position:relative;width:${colLeft[colCount]}px;background:#ffffff;">${tableHtml}${imagesHtml}</div>`;
   }
 
   // ── Helpers ──────────────────────────────────────────────────────────────

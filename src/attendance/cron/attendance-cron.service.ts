@@ -7,12 +7,33 @@ import { Injectable, Logger } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { PrismaService } from '../../prisma/prisma.service';
 import { PushNotificationsService } from '../../notifications/push-notifications.service';
+import { NotificationsService } from '../../notifications/notifications.service';
 import { NotificationType } from '@prisma/client';
 import {
   AttendanceUtilsService,
   WEEKLY_NORMAL_HOURS,
   WEEKLY_OT10_CAP,
 } from '../services/attendance-utils.service';
+
+// ─── Messages : rappel AVANT le début du shift ───────────────────────────────
+// Rappel envoyé X min AVANT le début réel du shift (valeur fixe, pas de
+// config par entreprise — cf. décision produit du 05/09/2026)
+const PRE_SHIFT_REMINDER_MINUTES = 20;
+
+const PRE_SHIFT_MESSAGES: Array<{ title: string; body: (mins: number) => string }> = [
+  {
+    title: '⏳ Votre shift approche',
+    body: (m) => `Votre shift commence dans ${m} min. Préparez-vous à pointer votre arrivée.`,
+  },
+  {
+    title: '🔔 Rappel de shift',
+    body: (m) => `Encore ${m} min avant le début de votre shift. À tout de suite sur Konza RH !`,
+  },
+  {
+    title: '📅 Bientôt l’heure',
+    body: (m) => `Votre shift débute dans ${m} min. N'oubliez pas de pointer à l'heure.`,
+  },
+];
 
 // ─── Messages : tous typés string (pas de fonction) ──────────────────────────
 
@@ -95,8 +116,155 @@ export class AttendanceCronService {
   constructor(
     private prisma: PrismaService,
     private pushService: PushNotificationsService,
+    private notificationsService: NotificationsService,
     private utils: AttendanceUtilsService,
   ) {}
+
+  // ============================================================================
+  // CRON 0 — Rappels AVANT le shift (toutes les 5 min)
+  // But : si l'employé est "connecté" (abonné aux push sur son appareil),
+  // on le prévient 20-30 min avant le début réel de son shift, avant même
+  // l'heure de début (contrairement aux crons 1/2 ci-dessous qui gèrent
+  // les rappels APRÈS le début — retard / oubli de sortie).
+  // ============================================================================
+  @Cron('*/5 * * * *', { timeZone: 'Africa/Brazzaville' })
+  async handlePreShiftReminders(): Promise<void> {
+    const now = new Date();
+    const today = this.today();
+    try {
+      const holidays = await this.prisma.publicHoliday.findMany({
+        where: { date: today },
+        select: { companyId: true },
+      });
+      const holidayCompanyIds = new Set(holidays.map((h) => h.companyId));
+
+      const companies = await this.prisma.company.findMany({
+        where: { isActive: true },
+        include: {
+          payrollSettings: { orderBy: { effectiveDate: 'desc' }, take: 1 },
+        },
+      });
+
+      for (const company of companies) {
+        const settings = company.payrollSettings[0];
+        if (!settings) continue;
+        const officialStartHour = settings.officialStartHour ?? 8;
+        const preShiftMinutes = PRE_SHIFT_REMINDER_MINUTES;
+        const workDays = (settings.workDays as number[]) || [1, 2, 3, 4, 5];
+        const nowMin = now.getHours() * 60 + now.getMinutes();
+        const TOTAL = 24 * 60;
+
+        if (holidayCompanyIds.has(company.id)) continue;
+
+        // Uniquement les employés "connectés" (abonnés aux notifications
+        // push) et pas encore pointés aujourd'hui — inutile de les prévenir
+        // s'ils ont déjà pointé.
+        const employees = await this.prisma.employee.findMany({
+          where: {
+            companyId: company.id,
+            status: 'ACTIVE',
+            attendances: { none: { date: today } },
+            leaves: {
+              none: {
+                status: 'APPROVED',
+                startDate: { lte: new Date(today) },
+                endDate: { gte: new Date(today) },
+              },
+            },
+            user: { pushNotifEnabled: true, pushToken: { not: null } },
+          },
+          include: {
+            user: {
+              select: { id: true, pushToken: true, pushNotifEnabled: true },
+            },
+          },
+        });
+
+        for (const emp of employees) {
+          if (!emp.user?.id) continue;
+
+          const sa = await this.prisma.employeeShiftAssignment.findFirst({
+            where: {
+              employeeId: emp.id,
+              OR: [
+                { specificDate: today },
+                {
+                  dayOfWeek: now.getDay(),
+                  specificDate: null,
+                  OR: [
+                    { validFrom: null },
+                    { validFrom: { lte: new Date(today) } },
+                  ],
+                  AND: [
+                    {
+                      OR: [
+                        { validUntil: null },
+                        { validUntil: { gte: new Date(today) } },
+                      ],
+                    },
+                  ],
+                },
+              ],
+            },
+            include: { shift: true },
+            orderBy: { specificDate: 'desc' },
+          });
+
+          const shift = sa?.shift;
+          if (!shift && !workDays.includes(now.getDay())) continue;
+
+          const startH = shift?.startHour ?? officialStartHour;
+          const startMin = shift?.startMinute ?? 0;
+          const shiftStartTotal = startH * 60 + startMin;
+          const target = ((shiftStartTotal - preShiftMinutes) % TOTAL + TOTAL) % TOTAL;
+
+          // Fenêtre de 5 min correspondant au pas du cron
+          const withinTick =
+            nowMin >= target && nowMin < target + 5;
+          if (!withinTick) continue;
+
+          // Idempotence : une seule notification "pré-shift" par employé/jour,
+          // même si le cron tourne plusieurs fois dans la fenêtre ou sur
+          // plusieurs instances backend en parallèle.
+          const dedupKey = `pre-shift:${emp.id}:${today}`;
+          const canNotify = await this.notificationsService.tryClaim(dedupKey);
+          if (!canNotify) continue;
+
+          const msg = randomItem(PRE_SHIFT_MESSAGES);
+          const title = msg.title;
+          const body = msg.body(preShiftMinutes);
+
+          await this.notif({
+            userId: emp.user.id,
+            type: 'PRE_SHIFT_REMINDER' as NotificationType,
+            title,
+            message: body,
+            link: '/presences/pointage',
+            metadata: {
+              employeeId: emp.id,
+              companyId: company.id,
+              date: today,
+              shiftStart: `${startH}h${String(startMin).padStart(2, '0')}`,
+              preShiftMinutes,
+            },
+          });
+
+          await this.pushService.sendPushToUser(emp.user.id, {
+            title,
+            body,
+            url: '/presences/pointage',
+            tag: 'pre-shift-reminder',
+          });
+
+          this.logger.log(
+            `📲 Pré-shift (${preShiftMinutes}min) → ${emp.firstName} ${emp.lastName} (shift ${startH}h${String(startMin).padStart(2, '0')})`,
+          );
+        }
+      }
+    } catch (err) {
+      this.logger.error('❌ Cron pré-shift:', err);
+    }
+  }
 
   // ============================================================================
   // CRON 1 — Rappels check-in H24 (toutes les 10 min)

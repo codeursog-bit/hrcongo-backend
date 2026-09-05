@@ -95,13 +95,34 @@ export async function getManagerDepartmentId(
  *    ceux qui ont un `leaveCycleStartDate` à jour (mis à jour à chaque retour
  *    de congé validé via `updateStatus()`) ont déjà un cycle courant ou futur,
  *    donc la boucle ci-dessous ne s'exécute jamais pour eux.
+ *
+ * 🆕 `cycleMode` (Company.leaveCycleMode) :
+ *  - 'ROLLING' (défaut, comportement historique inchangé) : le cycle redémarre
+ *    à la date de RETOUR réelle du dernier congé (`leaveCycleStartDate`),
+ *    donc toujours 12 mois de présence réelle avant le prochain départ.
+ *  - 'ANNIVERSARY' : le cycle est TOUJOURS ancré sur le mois d'embauche
+ *    (`hireDate`), peu importe la date réelle de retour — `leaveCycleStartDate`
+ *    est ignoré. Un employé embauché en février part toujours en février,
+ *    chaque année, sans dérive. Voir la conversation produit : le cycle
+ *    suivant le premier ne totalise alors que 11 mois réels de présence (le
+ *    12e étant le mois de départ lui-même), compensé côté indemnité par la
+ *    substitution `paidIndemnityAmount` (voir leaves-indemnity.service.ts) —
+ *    jamais par un prorata du solde (26j+ancienneté restent pleins, décision
+ *    produit confirmée).
  */
 export function resolveCycleWindow(
   hireDate: Date,
   leaveCycleStartDate: Date | null,
   referenceDate: Date = new Date(),
+  cycleMode: 'ROLLING' | 'ANNIVERSARY' = 'ROLLING',
 ) {
-  let cycleStartDate = new Date(leaveCycleStartDate ?? hireDate);
+  let cycleStartDate: Date;
+  if (cycleMode === 'ANNIVERSARY') {
+    // Toujours ancré sur hireDate — le retour réel n'a jamais d'influence.
+    cycleStartDate = new Date(hireDate);
+  } else {
+    cycleStartDate = new Date(leaveCycleStartDate ?? hireDate);
+  }
   let cycleEndDate = new Date(cycleStartDate);
   cycleEndDate.setMonth(cycleEndDate.getMonth() + 12);
 

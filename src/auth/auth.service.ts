@@ -510,8 +510,8 @@ export class AuthService {
       { sub: user.id, purpose: 'password-reset' },
       { expiresIn: '30m' },
     );
-    const appUrl = process.env.APP_URL || 'http://localhost:3000';
-    const resetUrl = `${appUrl}/auth/reset-password?token=${resetToken}`;
+    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+    const resetUrl = `${frontendUrl}/auth/reset-password?token=${resetToken}`;
     await this.mailService.sendPasswordReset({
       to: user.email,
       firstName: user.firstName,

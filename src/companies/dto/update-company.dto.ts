@@ -80,6 +80,15 @@ export class UpdateCompanyDto extends PartialType(CreateCompanyDto) {
   @IsString()
   leaveIndemnityMethod?: 'AVERAGE_12M' | 'CURRENT_SALARY';
 
+  // 🆕 CONGÉS — mode de cycle de départ : 'ROLLING' (glissant, défaut) |
+  // 'ANNIVERSARY' (toujours calé sur le mois d'embauche). Distinct de
+  // l'ancien `leaveReferenceCycle` (JANUARY/HIRE_DATE/JUNE) ci-dessous,
+  // qui reste en base mais n'est plus lu par aucun service — dead field,
+  // à retirer du schema dans une prochaine migration de nettoyage.
+  @IsOptional()
+  @IsString()
+  leaveCycleMode?: 'ROLLING' | 'ANNIVERSARY';
+
   // 🆕 CONGÉS — cycle de référence
   @IsOptional()
   @IsString()

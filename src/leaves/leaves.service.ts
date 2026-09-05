@@ -885,6 +885,23 @@ export class LeavesService {
         );
       }
 
+      // ✅ CORRECTIF (demande explicite) : un congé ANNUAL (départ normal,
+      // clôture de cycle) qui prend MOINS que le solde réellement dû
+      // (26j + ancienneté) doit obligatoirement porter un motif — sinon le
+      // reliquat non pris disparaît silencieusement sans trace explicable
+      // sur la lettre de départ. Ne s'applique jamais à ANNUAL_ANTICIPATED
+      // (partiel par nature, l'employé anticipe volontairement une partie
+      // seulement de son solde avant la fin du cycle).
+      if (
+        createLeaveDto.type === 'ANNUAL' &&
+        workingDays < Number(balance.annualRemaining) &&
+        !createLeaveDto.reason?.trim()
+      ) {
+        throw new BadRequestException(
+          `Ce congé (${workingDays}j) est inférieur au solde dû (${Math.round(Number(balance.annualRemaining))}j) — merci de préciser le motif de cette réduction (il apparaîtra sur la lettre de départ).`,
+        );
+      }
+
       const leave = await this.prisma.leave.create({
         data: {
           employeeId: createLeaveDto.employeeId,
@@ -1046,6 +1063,22 @@ export class LeavesService {
     // d'accumuler) — on récupère/persiste la bonne ligne de solde pour
     // décompter dessus, pas celle du cycle courant au jour de la saisie.
     const balance = await this.getOrCreateLeaveBalance(dto.employeeId, start);
+
+    // ✅ CORRECTIF (demande explicite) : même règle que create() — un congé
+    // ANNUAL planifié directement par le RH pour MOINS que le solde dû doit
+    // porter un motif explicite (jamais le fallback générique "Planifié
+    // directement par le RH/Admin" ci-dessous, qui ne dit rien du POURQUOI
+    // du reliquat non pris). On teste dto.reason AVANT que le fallback ne
+    // s'applique.
+    if (
+      dto.type === 'ANNUAL' &&
+      workingDays < Number(balance.annualRemaining) &&
+      !dto.reason?.trim()
+    ) {
+      throw new BadRequestException(
+        `Ce congé (${workingDays}j) est inférieur au solde dû (${Math.round(Number(balance.annualRemaining))}j) — merci de préciser le motif de cette réduction (il apparaîtra sur la lettre de départ).`,
+      );
+    }
 
     // ✅ Règle métier : l'indemnité d'un congé ANNUAL est payée le mois qui
     // PRÉCÈDE le départ (déc. pour un départ en jan.), jamais le mois des
@@ -2079,6 +2112,16 @@ export class LeavesService {
       isManual: boolean;
     }>
   > {
+    // 🆕 Un seul fetch pour toute l'entreprise (pas par employé) — le mode
+    // de cycle est une config entreprise, pas individuelle.
+    const companyForMode = await this.prisma.company.findUnique({
+      where: { id: companyId },
+      select: { leaveCycleMode: true },
+    });
+    const cycleMode =
+      (companyForMode?.leaveCycleMode as 'ROLLING' | 'ANNIVERSARY') ??
+      'ROLLING';
+
     const employeeSelect = {
       firstName: true,
       lastName: true,
@@ -2148,6 +2191,7 @@ export class LeavesService {
         new Date(emp.hireDate),
         emp.leaveCycleStartDate ? new Date(emp.leaveCycleStartDate) : null,
         periodStart, // ✅ résout le cycle par rapport au mois filtré, pas à "aujourd'hui"
+        cycleMode,
       );
       if (cycleEndDate < periodStart || cycleEndDate > periodEnd) continue;
 
@@ -2208,6 +2252,101 @@ export class LeavesService {
     );
 
     return rows;
+  }
+
+  // ============================================================================
+  // 🆕 ALERTE RH AVANT PAIE — appelée uniquement par le cron (voir
+  //    LeaveAccrualCron), jamais par une route HTTP : pas de contexte
+  //    utilisateur ici, on balaie TOUTES les entreprises actives.
+  //    2 temps, valeurs fixes (pas de config par entreprise pour l'instant) :
+  //    - HEADS_UP (J-10, jour 15 du mois) : tous les départs prévus le mois
+  //      suivant (théoriques + déjà réellement posés), une seule notif
+  //      groupée par entreprise.
+  //    - FOLLOWUP (J-3, jour 22 du mois) : uniquement ceux encore
+  //      théoriques (aucun Leave réel créé) — pas de bruit pour ce qui est
+  //      déjà traité.
+  //    Ancré sur le mois SUIVANT le mois courant : l'indemnité d'un départ
+  //    de janvier se paie sur le bulletin de décembre (voir
+  //    getLeaveImpactForPayroll), donc l'alerte doit arriver AVANT cette
+  //    clôture, pas le mois du départ lui-même.
+  // ============================================================================
+  async sendDepartureAlerts(mode: 'HEADS_UP' | 'FOLLOWUP'): Promise<void> {
+    const now = new Date();
+    const nextMonthDate = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+    const month = nextMonthDate.getMonth() + 1;
+    const year = nextMonthDate.getFullYear();
+    const periodStart = new Date(year, month - 1, 1);
+    const periodEnd = new Date(year, month, 0, 23, 59, 59);
+    const monthLabel = nextMonthDate.toLocaleDateString('fr-FR', {
+      month: 'long',
+      year: 'numeric',
+    });
+
+    const companies = await this.prisma.company.findMany({
+      select: { id: true },
+    });
+
+    let notified = 0;
+    for (const company of companies) {
+      try {
+        await this.subscriptionGuard.checkFeatureAccess(
+          company.id,
+          'hasLeaveManagement',
+        );
+
+        let rows = await this.buildDepartureRows(
+          company.id,
+          periodStart,
+          periodEnd,
+        );
+        if (mode === 'FOLLOWUP') {
+          rows = rows.filter((r) => r.isTheoretical);
+        }
+        if (rows.length === 0) continue;
+
+        const names = rows
+          .map((r) =>
+            `${r.employee?.firstName ?? ''} ${r.employee?.lastName ?? ''}`.trim(),
+          )
+          .filter(Boolean);
+        const totalDays = rows.reduce(
+          (s, r) => s + Number(r.daysCount || 0),
+          0,
+        );
+
+        const title =
+          mode === 'HEADS_UP'
+            ? `📅 ${rows.length} départ(s) en congé prévu(s) en ${monthLabel}`
+            : `⚠️ ${rows.length} départ(s) de ${monthLabel} pas encore planifié(s)`;
+        const message =
+          mode === 'HEADS_UP'
+            ? `${names.join(', ')} — ${totalDays}j au total. Préparez leurs indemnités sur la paie de ce mois-ci et planifiez officiellement leur départ.`
+            : `${names.join(', ')} n'ont toujours pas de congé réellement planifié pour ${monthLabel} — la clôture de paie approche.`;
+
+        await this.notificationsService.createForGroup(
+          company.id,
+          ['ADMIN', 'HR_MANAGER'],
+          {
+            type: 'LEAVE_REQUEST' as NotificationType,
+            title,
+            message,
+            link: '/conges/planning',
+            metadata: { month, year, count: rows.length, mode },
+          },
+        );
+        notified++;
+      } catch (err: any) {
+        // Entreprise sans le module congé, sans abonnement actif, ou erreur
+        // isolée — ne doit jamais bloquer l'alerte des AUTRES entreprises.
+        this.logger.warn(
+          `⚠️ Alerte départs ignorée pour l'entreprise ${company.id}: ${err?.message ?? err}`,
+        );
+      }
+    }
+
+    this.logger.log(
+      `✅ [${mode}] Alertes départs ${monthLabel} envoyées à ${notified} entreprise(s)`,
+    );
   }
 
   async getDepartureProgram(

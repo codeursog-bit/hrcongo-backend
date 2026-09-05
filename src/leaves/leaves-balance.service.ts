@@ -121,6 +121,7 @@ export class LeavesBalanceService {
           select: {
             appliesSeniorityLeaveBonus: true,
             leaveConventionKey: true,
+            leaveCycleMode: true,
           },
         },
       },
@@ -138,6 +139,8 @@ export class LeavesBalanceService {
       //    `new Date()` par défaut pour tous les appels existants qui ne le
       //    précisent pas, donc leur comportement est inchangé.
       referenceDate,
+      (employee.company?.leaveCycleMode as 'ROLLING' | 'ANNIVERSARY') ??
+        'ROLLING',
     );
 
     let balance = await this.prisma.leaveBalance.findUnique({
@@ -282,6 +285,7 @@ export class LeavesBalanceService {
           select: {
             appliesSeniorityLeaveBonus: true,
             leaveConventionKey: true,
+            leaveCycleMode: true,
           },
         },
       },
@@ -294,6 +298,8 @@ export class LeavesBalanceService {
         ? new Date(employee.leaveCycleStartDate)
         : null,
       asOfDate,
+      (employee.company?.leaveCycleMode as 'ROLLING' | 'ANNIVERSARY') ??
+        'ROLLING',
     );
 
     const existing = await this.prisma.leaveBalance.findUnique({
@@ -361,7 +367,11 @@ export class LeavesBalanceService {
   async getEmployeeBalanceDetails(employeeId: string) {
     const employee = await this.prisma.employee.findUnique({
       where: { id: employeeId },
-      select: { hireDate: true, leaveCycleStartDate: true },
+      select: {
+        hireDate: true,
+        leaveCycleStartDate: true,
+        company: { select: { leaveCycleMode: true } },
+      },
     });
     if (!employee) throw new EmployeeNotFoundException(employeeId);
 
@@ -372,6 +382,9 @@ export class LeavesBalanceService {
       employee.leaveCycleStartDate
         ? new Date(employee.leaveCycleStartDate)
         : null,
+      undefined,
+      (employee.company?.leaveCycleMode as 'ROLLING' | 'ANNIVERSARY') ??
+        'ROLLING',
     );
     const now = new Date();
     const monthsWorked =
@@ -561,7 +574,11 @@ export class LeavesBalanceService {
   ) {
     const employee = await this.prisma.employee.findUnique({
       where: { id: employeeId },
-      select: { hireDate: true, leaveCycleStartDate: true },
+      select: {
+        hireDate: true,
+        leaveCycleStartDate: true,
+        company: { select: { leaveCycleMode: true } },
+      },
     });
     if (!employee) throw new EmployeeNotFoundException(employeeId);
     if (annualEntitled < 0 || annualTaken < 0) {
@@ -575,6 +592,9 @@ export class LeavesBalanceService {
       employee.leaveCycleStartDate
         ? new Date(employee.leaveCycleStartDate)
         : null,
+      undefined,
+      (employee.company?.leaveCycleMode as 'ROLLING' | 'ANNIVERSARY') ??
+        'ROLLING',
     );
     const annualRemaining = Math.max(0, annualEntitled - annualTaken);
     const cyclesCount = await this.prisma.leaveBalance.count({
@@ -691,6 +711,7 @@ export class LeavesBalanceService {
         status: true,
         firstName: true,
         lastName: true,
+        company: { select: { leaveCycleMode: true } },
       },
     });
     if (!employee || employee.status !== 'ACTIVE') return;
@@ -700,6 +721,9 @@ export class LeavesBalanceService {
       employee.leaveCycleStartDate
         ? new Date(employee.leaveCycleStartDate)
         : null,
+      undefined,
+      (employee.company?.leaveCycleMode as 'ROLLING' | 'ANNIVERSARY') ??
+        'ROLLING',
     );
 
     const targetDate = new Date(year, month - 1, 1);
@@ -798,6 +822,7 @@ export class LeavesBalanceService {
         companyId: true,
         hireDate: true,
         leaveCycleStartDate: true,
+        company: { select: { leaveCycleMode: true } },
       },
     });
     if (!employee) return;
@@ -813,12 +838,19 @@ export class LeavesBalanceService {
       employee.leaveCycleStartDate
         ? new Date(employee.leaveCycleStartDate)
         : null,
+      undefined,
+      (employee.company?.leaveCycleMode as 'ROLLING' | 'ANNIVERSARY') ??
+        'ROLLING',
     );
     const now = new Date();
     const monthsWorked =
       (now.getTime() - cycleStartDate.getTime()) /
       (1000 * 60 * 60 * 24 * 30.44);
     const remaining = Number(balance.annualRemaining);
+    // 🆕 Affichage : jours arrondis à l'entier dans les messages de
+    // notification (26, pas 25.9) — le calcul du ratio/provision juste
+    // en dessous continue d'utiliser la valeur précise `remaining`.
+    const remainingDisplay = Math.round(remaining);
     const { basedOnAverage } =
       await this.indemnityService.calculateLeaveIndemnity(
         employeeId,
@@ -839,7 +871,7 @@ export class LeavesBalanceService {
         {
           type: 'SYSTEM_ALERT',
           title: '🎉 Employé éligible aux congés annuels',
-          message: `${employee.firstName} ${employee.lastName} vient de compléter 12 mois de service. Il/Elle dispose de ${remaining} jours de congés annuels à planifier.`,
+          message: `${employee.firstName} ${employee.lastName} vient de compléter 12 mois de service. Il/Elle dispose de ${remainingDisplay} jours de congés annuels à planifier.`,
           link: `/employes/${employeeId}/conges`,
           metadata: { employeeId, remainingDays: remaining, provision },
         },
@@ -848,6 +880,7 @@ export class LeavesBalanceService {
 
     const cycleMax =
       CONGO_LEAVE.ANNUAL_DAYS + Number(balance.seniorityDays ?? 0);
+    const cycleMaxDisplay = Math.round(cycleMax);
     const ratio = cycleMax > 0 ? remaining / cycleMax : 0;
     if (
       ratio >= CONGO_LEAVE.ALERT_THRESHOLD_WARNING &&
@@ -859,7 +892,7 @@ export class LeavesBalanceService {
         {
           type: 'SYSTEM_ALERT',
           title: '⚠️ Congés non pris — Provision importante',
-          message: `${employee.firstName} ${employee.lastName} a ${remaining} jours de congés non pris. Provision : ${provision.toLocaleString('fr-FR')} F CFA.`,
+          message: `${employee.firstName} ${employee.lastName} a ${remainingDisplay} jours de congés non pris. Provision : ${provision.toLocaleString('fr-FR')} F CFA.`,
           link: `/employes/${employeeId}/conges`,
           metadata: {
             employeeId,
@@ -878,7 +911,7 @@ export class LeavesBalanceService {
         {
           type: 'SYSTEM_ALERT',
           title: '🚨 URGENT — Plafond légal de congés approché',
-          message: `${employee.firstName} ${employee.lastName} approche le plafond du cycle (${remaining}/${cycleMax} jours). Départ en congé OBLIGATOIRE. Provision : ${provision.toLocaleString('fr-FR')} F CFA.`,
+          message: `${employee.firstName} ${employee.lastName} approche le plafond du cycle (${remainingDisplay}/${cycleMaxDisplay} jours). Départ en congé OBLIGATOIRE. Provision : ${provision.toLocaleString('fr-FR')} F CFA.`,
           link: `/employes/${employeeId}/conges`,
           metadata: {
             employeeId,

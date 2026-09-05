@@ -36,6 +36,12 @@ export interface LeaveImpactForPayroll {
   shouldClearOpeningCumulative?: boolean;
   indemnifiedDays?: number;
   indemnifiedSeniorityDays?: number;
+  // 🆕 Mode ANNIVERSARY — id du Leave ANNUAL dont CE bulletin paie
+  // l'indemnité (= payrollAnchoredLeave.id), pour que le générateur de
+  // paie puisse y écrire paidIndemnityAmount une fois le montant final
+  // connu (voir payroll-generator.service.ts). undefined si aucun congé
+  // ANNUAL n'est payé sur ce bulletin.
+  leaveId?: string;
 }
 
 export interface LeaveProvisionResult {

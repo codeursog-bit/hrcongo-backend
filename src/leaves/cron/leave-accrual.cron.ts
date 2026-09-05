@@ -60,10 +60,10 @@ export class LeaveAccrualCron {
             year,
           );
           success++;
-        } catch (err) {
+        } catch (err: any) {
           errors++;
           this.logger.error(
-            `❌ Erreur acquisition pour ${emp.firstName} ${emp.lastName}: ${err.message}`,
+            `❌ Erreur acquisition pour ${emp.firstName} ${emp.lastName}: ${err?.message ?? err}`,
           );
         }
       }
@@ -102,9 +102,9 @@ export class LeaveAccrualCron {
         try {
           await this.leavesService.checkAndSendLeaveAlerts(emp.id);
           alertsSent++;
-        } catch (err) {
+        } catch (err: any) {
           this.logger.error(
-            `❌ Erreur alerte pour employé ${emp.id}: ${err.message}`,
+            `❌ Erreur alerte pour employé ${emp.id}: ${err?.message ?? err}`,
           );
         }
       }
@@ -142,6 +142,29 @@ export class LeaveAccrualCron {
       await this.leavesService.checkLeaveReturnReminders();
     } catch (err) {
       this.logger.error('❌ [CRON] Erreur rappels retour congé:', err);
+    }
+  }
+
+  // ============================================================================
+  // ⏰ CRON 5 — Alerte RH avant paie (tous les jours à 7h30 Brazzaville)
+  // ✅ Valeurs fixes (pas de config par entreprise pour l'instant) :
+  //    - le 15 du mois (J-10 avant clôture supposée le 25) : alerte
+  //      "chauffe" groupée sur tous les départs du mois SUIVANT.
+  //    - le 22 du mois (J-3) : relance, uniquement les départs encore
+  //      théoriques (pas de congé réellement planifié).
+  // ============================================================================
+
+  @Cron('30 7 * * *', { timeZone: 'Africa/Brazzaville' })
+  async handleDepartureAlerts(): Promise<void> {
+    const day = new Date().getDate();
+    if (day !== 15 && day !== 22) return;
+
+    const mode = day === 15 ? 'HEADS_UP' : 'FOLLOWUP';
+    this.logger.log(`⏰ [CRON] Alerte départs RH (${mode}, jour ${day})...`);
+    try {
+      await this.leavesService.sendDepartureAlerts(mode);
+    } catch (err) {
+      this.logger.error('❌ [CRON] Erreur alerte départs RH:', err);
     }
   }
 }

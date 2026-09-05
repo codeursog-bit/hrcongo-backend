@@ -331,6 +331,7 @@ import { SubscriptionGuard } from '../../subscriptions/guards/subscription.guard
 import { PayrollBonusesService } from './payroll-bonuses.service';
 import { CompanyTaxService } from '../../company-taxes/company-tax.service';
 import { LeavesService } from '../../leaves/leaves.service'; // 🆕
+import { YtdCheckpointService } from './ytd-checkpoint.service';
 
 // 🆕 Interface pour les données congé passées au calculator
 export interface LeaveCalculationOptions {
@@ -362,6 +363,10 @@ interface PayrollData {
   leaveIndemnity: number;
   leaveIndemnityBase?: number;
   leaveIndemnitySeniority?: number;
+  // 🆕 Mode ANNIVERSARY : id du Leave ANNUAL dont ce bulletin paie
+  // l'indemnité — sert à figer paidIndemnityAmount sur ce Leave une fois
+  // le bulletin réellement créé (voir plus bas, après createPayrollTransaction).
+  leaveId?: string;
   absenceDeduction: number;
   isPaidLeave: boolean;
   leaveDays: number;
@@ -442,6 +447,7 @@ export class PayrollGeneratorService {
     private bonusesService: PayrollBonusesService,
     private companyTaxService: CompanyTaxService,
     private leavesService: LeavesService, // 🆕
+    private ytdCheckpointService: YtdCheckpointService,
   ) {}
 
   async generate(
@@ -826,6 +832,7 @@ export class PayrollGeneratorService {
           leaveIndemnity,
           leaveIndemnityBase,
           leaveIndemnitySeniority,
+          leaveId: leaveImpact?.leaveId,
           absenceDeduction,
           isPaidLeave,
           leaveDays,
@@ -868,6 +875,41 @@ export class PayrollGeneratorService {
           await this.leavesService.clearOpeningCumulativeAfterUse(
             data.emp.id,
           );
+        }
+        // 🆕 Mode ANNIVERSARY : on fige le montant réellement versé sur le
+        // Leave lui-même — c'est cette valeur qui servira de substitut au
+        // brut du mois de départ (sinon à 0) quand on calculera la moyenne
+        // 12 mois du PROCHAIN cycle (voir leaves-indemnity.service.ts,
+        // buildMonthlyGrossHistory). Uniquement si une indemnité a
+        // effectivement été versée sur CE bulletin (leaveId présent et
+        // montant > 0) — jamais écrasé par 0 sur un mois sans rapport.
+        if (data.leaveId && data.leaveIndemnity > 0) {
+          await this.prisma.leave
+            .update({
+              where: { id: data.leaveId },
+              data: { paidIndemnityAmount: data.leaveIndemnity },
+            })
+            .catch((err: any) =>
+              this.logger.warn(
+                `⚠️ paidIndemnityAmount non enregistré pour le congé ${data.leaveId}: ${err?.message ?? err}`,
+              ),
+            );
+
+          // ✅ CORRECTIF (bug cumuls confirmé) : jusqu'ici seule la paie
+          // MANUELLE posait le YtdCheckpoint de reset post-congé — la paie
+          // automatique (individuelle ET batch) ne le faisait jamais,
+          // laissant `getYtdWindow` retomber sur le 1er janvier par défaut
+          // (cumul annuel qui ne repart jamais au bon moment). On réutilise
+          // ici le MÊME signal fiable que ci-dessus (leaveId + montant réel
+          // versé) — contrairement au manuel qui devine depuis un texte de
+          // prime, ce signal-ci est structurel, jamais de faux positif.
+          await this.ytdCheckpointService
+            .reconcile(this.prisma, data.emp.id, data.monthNum, data.year, true)
+            .catch((err: any) =>
+              this.logger.warn(
+                `⚠️ YtdCheckpoint non posé pour ${data.emp.id}: ${err?.message ?? err}`,
+              ),
+            );
         }
         const loanDeduction = data.loansToUpdate.reduce(
           (s, l) => s + Number(l.deduction || 0),

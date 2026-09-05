@@ -118,6 +118,11 @@ export class CreateCompanyDto {
   @IsString()
   leaveIndemnityMethod?: 'AVERAGE_12M' | 'CURRENT_SALARY';
 
+  // 🆕 CONGÉS — mode de cycle de départ (voir update-company.dto.ts)
+  @IsOptional()
+  @IsString()
+  leaveCycleMode?: 'ROLLING' | 'ANNIVERSARY';
+
   @IsOptional()
   @IsString()
   leaveReferenceCycle?: 'JANUARY' | 'HIRE_DATE' | 'JUNE';

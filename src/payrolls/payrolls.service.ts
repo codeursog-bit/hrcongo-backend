@@ -1144,6 +1144,7 @@ import { SubscriptionGuard } from '../subscriptions/guards/subscription.guard';
 import { PayrollBonusesService } from './services/payroll-bonuses.service';
 import { CompanyTaxService } from '../company-taxes/company-tax.service'; // ✅
 import { LeavesService } from '../leaves/leaves.service';
+import { resolveCycleWindow } from '../leaves/leaves-common.util';
 import { LoansService } from '../loans/loans.service';
 import { AttendanceSummaryService } from '../attendance/attendance-summary.service';
 import { PayrollSettingsService } from '../payroll/settings/settings.service';
@@ -1745,6 +1746,35 @@ export class PayrollsService {
     // bulletin qui l'a réellement consommé — jamais avant.
     if ((leaveImpact as any)?.shouldClearOpeningCumulative) {
       await this.leavesService.clearOpeningCumulativeAfterUse(employeeId);
+    }
+
+    // 🆕 Mode ANNIVERSARY — même règle que payroll-generator.service.ts :
+    // on fige le montant réellement versé sur le Leave lui-même, il servira
+    // de substitut au brut du mois de départ pour la moyenne 12 mois du
+    // PROCHAIN cycle (voir leaves-indemnity.service.ts).
+    if ((leaveImpact as any)?.leaveId && leaveIndemnity > 0) {
+      await this.prisma.leave
+        .update({
+          where: { id: (leaveImpact as any).leaveId },
+          data: { paidIndemnityAmount: leaveIndemnity },
+        })
+        .catch((err: any) =>
+          this.logger.warn(
+            `⚠️ paidIndemnityAmount non enregistré pour le congé ${(leaveImpact as any).leaveId}: ${err?.message ?? err}`,
+          ),
+        );
+
+      // ✅ CORRECTIF (bug cumuls confirmé) : même raisonnement que le batch
+      // — poser le YtdCheckpoint ici aussi, pas seulement depuis la paie
+      // manuelle, pour que `getYtdWindow` reset bien au retour de congé au
+      // lieu de retomber sur le 1er janvier par défaut.
+      await this.ytdCheckpointService
+        .reconcile(this.prisma, employeeId, monthNum, year, true)
+        .catch((err: any) =>
+          this.logger.warn(
+            `⚠️ YtdCheckpoint non posé pour ${employeeId}: ${err?.message ?? err}`,
+          ),
+        );
     }
 
     return createdPayroll;
@@ -2381,15 +2411,27 @@ export class PayrollsService {
 
           // ✅ Résoudre le cycle en cours de l'employé (dans la même transaction)
           // plutôt que l'année calendaire du bulletin — c'est le cycle qui fait foi.
+          // 🆕 CORRECTIF : lit désormais company.leaveCycleMode (au lieu d'un
+          // calcul ROLLING codé en dur qui ignorait le mode ANNIVERSARY —
+          // même bug que celui déjà corrigé dans manual-payroll.service.ts).
           const empForCycle = await tx.employee.findUnique({
             where: { id: payroll.employeeId },
-            select: { hireDate: true, leaveCycleStartDate: true },
+            select: {
+              hireDate: true,
+              leaveCycleStartDate: true,
+              company: { select: { leaveCycleMode: true } },
+            },
           });
-          const cycleStartDate = new Date(
-            empForCycle!.leaveCycleStartDate ?? empForCycle!.hireDate,
+          const { cycleStartDate, cycleEndDate } = resolveCycleWindow(
+            new Date(empForCycle!.hireDate),
+            empForCycle!.leaveCycleStartDate
+              ? new Date(empForCycle!.leaveCycleStartDate)
+              : null,
+            undefined,
+            ((empForCycle as any)?.company?.leaveCycleMode as
+              | 'ROLLING'
+              | 'ANNIVERSARY') ?? 'ROLLING',
           );
-          const cycleEndDate = new Date(cycleStartDate);
-          cycleEndDate.setMonth(cycleEndDate.getMonth() + 12);
           const cyclesCount = await tx.leaveBalance.count({
             where: { employeeId: payroll.employeeId },
           });
@@ -2423,9 +2465,15 @@ export class PayrollsService {
         // ✅ Réconcilie le YtdCheckpoint — pose-le si le bulletin (après
         // édition) contient une prime congé, le retire s'il en existait un
         // orphelin d'une version précédente qui n'a plus de congé.
-        const hasCongesPaies = calculatedBonuses.some((b: any) =>
-          /cong[eé]/i.test(b.bonusType ?? ''),
-        );
+        // ✅ CORRECTIF (même bug que manual-payroll.service.ts) : flag
+        // explicite `overrides.isLeaveDeparture` plutôt que deviner depuis
+        // le texte d'une prime — repli sur l'ancienne détection tant que
+        // l'appelant ne fournit pas encore ce champ.
+        const hasCongesPaies =
+          overrides?.isLeaveDeparture ??
+          calculatedBonuses.some((b: any) =>
+            /cong[eé]/i.test(b.bonusType ?? ''),
+          );
         await this.ytdCheckpointService.reconcile(
           tx,
           payroll.employeeId,

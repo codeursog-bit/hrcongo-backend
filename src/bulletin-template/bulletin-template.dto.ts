@@ -1,5 +1,5 @@
 // src/bulletin-template/bulletin-template.dto.ts
-import { IsOptional, IsString, IsArray, ValidateNested } from 'class-validator';
+import { IsOptional, IsString, IsArray, IsIn, ValidateNested } from 'class-validator';
 import { Type } from 'class-transformer';
 
 // DTO pour chaque bloc — déclare tous les champs pour que whitelist les garde
@@ -50,4 +50,9 @@ export class UpsertBulletinTemplateDto {
   blocks?: BlockConfigDto[];
 
   @IsOptional() canvasLayout?: Record<string, any>;
+
+  // 🆕 Choix du modèle de FACTURE pour les contrats prestataire/consultant/
+  // intérim/stagiaire (cf. FACTURE_CONTRACT_TYPES côté front). Stocké dans
+  // le même config Json que le bulletin — aucune colonne/table ajoutée.
+  @IsOptional() @IsIn(['forfait', 'detaillee']) factureTemplateId?: string;
 }

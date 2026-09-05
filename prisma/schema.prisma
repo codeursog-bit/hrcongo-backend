@@ -223,6 +223,7 @@ model Company {
   leaveIndemnityMethod String @default("AVERAGE_12M") @db.VarChar(20)
   // Congés — cycle de référence : JANUARY (défaut) / HIRE_DATE / JUNE
   leaveReferenceCycle String @default("JANUARY") @db.VarChar(20)
+  leaveCycleMode String @default("ROLLING") @db.VarChar(20) // "ROLLING" | "ANNIVERSARY"
   // 🆕 RELATION ABONNEMENT (One-to-One)
  subscription Subscription?
  bulletinTemplate BulletinTemplate?
@@ -834,6 +835,7 @@ model Leave {
   returnConfirmedAt DateTime?
   returnConfirmedBy String?   @db.Uuid
   isMigrated Boolean @default(false)
+  paidIndemnityAmount Decimal? @db.Decimal(15, 2)
 
   actualReturnDate DateTime? @db.Date
   forfeitedDays    Decimal?  @db.Decimal(5, 2)
@@ -2303,6 +2305,7 @@ enum NotificationType {
 
   CHECKOUT_REMINDER       // Rappel de pointer la sortie
   CHECKIN_REMINDER        // Rappel de pointer l'entrée
+  PRE_SHIFT_REMINDER      // Rappel 20 min AVANT le début du shift
   OVERTIME_REQUEST        // Employé déclare heures sup → patron
   OVERTIME_APPROVED       // Patron approuve → employé
   OVERTIME_REJECTED       // Patron refuse → employé
