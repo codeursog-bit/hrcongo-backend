@@ -387,6 +387,32 @@ export class CabinetSubscriptionService {
     }
 
     const cfg = PLAN_CONFIG[plan];
+
+    // 🐛 CORRECTIF (même bug que côté PME, voir SubscriptionsService.activateUpgrade) :
+    // si le cabinet renouvelle son plan AVANT la fin de la période payée en
+    // cours, on ne doit pas repartir de "maintenant" (ça ferait perdre les
+    // jours restants déjà payés). La nouvelle période démarre à la fin de
+    // l'ancienne si elle court encore ; sinon, elle démarre maintenant.
+    const now = new Date();
+    const existing = await this.prisma.cabinetSubscription.findUnique({
+      where: { cabinetId },
+      select: { plan: true, status: true, currentPeriodEnd: true },
+    });
+
+    const isTimelyRenewalOfSamePlan =
+      !!existing &&
+      existing.plan === plan &&
+      existing.status === 'ACTIVE' &&
+      existing.currentPeriodEnd &&
+      existing.currentPeriodEnd.getTime() > now.getTime();
+
+    const periodStart = isTimelyRenewalOfSamePlan
+      ? existing!.currentPeriodEnd
+      : now;
+    const periodEnd = new Date(
+      periodStart.getTime() + months * 30 * 86_400_000,
+    );
+
     await this.prisma.cabinetSubscription.update({
       where: { cabinetId },
       data: {
@@ -396,12 +422,12 @@ export class CabinetSubscriptionService {
         maxEmployees: cfg.maxEmployees,
         pricePerMonth: cfg.priceMonthly,
         trialEndsAt: null,
-        currentPeriodStart: new Date(),
-        currentPeriodEnd: new Date(Date.now() + months * 30 * 86_400_000),
+        currentPeriodStart: periodStart,
+        currentPeriodEnd: periodEnd,
       },
     });
     this.logger.log(
-      `✅ Cabinet ${cabinetId} → Plan ${plan} activé (${months} mois)`,
+      `✅ Cabinet ${cabinetId} → Plan ${plan} activé (${months} mois, période ${periodStart.toISOString()} → ${periodEnd.toISOString()})`,
     );
   }
 

@@ -7,6 +7,7 @@ import { Module } from '@nestjs/common';
 import { AdminController } from './admin.controller';
 import { DashboardService } from './services/dashboard.service';
 import { AdminCompaniesService } from './services/companies.service';
+import { AdminSubscriptionsService } from './services/subscriptions.service';
 import { BillingService } from './services/billing.service';
 import { AnalyticsService } from './services/analytics.service';
 import { MonitoringService } from './services/monitoring.service';
@@ -23,6 +24,7 @@ import { UltraAdminGuard } from './guards/ultra-admin.guard';
     // Services
     DashboardService,
     AdminCompaniesService,
+    AdminSubscriptionsService,
     BillingService,
     AnalyticsService,
     MonitoringService,
@@ -35,6 +37,7 @@ import { UltraAdminGuard } from './guards/ultra-admin.guard';
     // Exporter les services si d'autres modules en ont besoin
     DashboardService,
     AdminCompaniesService,
+    AdminSubscriptionsService,
     BillingService,
     AnalyticsService,
     MonitoringService,

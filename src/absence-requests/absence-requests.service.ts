@@ -18,6 +18,7 @@ import { CreateAbsenceRequestDto, SUBTYPES_BY_ABSENCE_TYPE } from './dto/create-
 import { EmployeeNotFoundException, CompanyNotFoundException } from '../exceptions/business.exceptions';
 import { NotificationType } from '@prisma/client';
 import { NotificationsService } from '../notifications/notifications.service';
+import { SubscriptionGuard } from '../subscriptions/guards/subscription.guard';
 import { resolveResponsableName } from '../common/resolve-responsable.util';
 import * as WorkingDays from '../common/working-days.util';
 import {
@@ -39,6 +40,7 @@ export class AbsenceRequestsService {
   constructor(
     private prisma: PrismaService,
     private notificationsService: NotificationsService,
+    private subscriptionGuard: SubscriptionGuard,
   ) {}
 
   // ============================================================================
@@ -112,6 +114,7 @@ private async getUserWithCompany(userId: string): Promise<{
 
   async create(dto: CreateAbsenceRequestDto, userId: string) {
     const user = await this.getUserWithCompany(userId);
+    await this.subscriptionGuard.assertActionAllowed(user.companyId, user.role);
 
     let employee: {
       id: string; companyId: string; firstName: string; lastName: string; email: string | null;

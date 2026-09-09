@@ -36,6 +36,7 @@ export class LoansRequestsService {
 
   async createLoan(data: CreateLoanDto, userId: string) {
     const user = await this.common.getVerifiedUser(userId);
+    await this.subscriptionGuard.assertActionAllowed(user.companyId, user.role);
     await this.subscriptionGuard.checkFeatureAccess(user.companyId, 'hasLoansAndAdvances');
 
     const { employee, isOnBehalf } = await this.common.resolveTargetEmployee(data.employeeId, user);
@@ -249,6 +250,7 @@ export class LoansRequestsService {
 
   async createAdvance(data: CreateAdvanceDto, userId: string) {
     const user = await this.common.getVerifiedUser(userId);
+    await this.subscriptionGuard.assertActionAllowed(user.companyId, user.role);
     await this.subscriptionGuard.checkFeatureAccess(user.companyId, 'hasLoansAndAdvances');
 
     const { employee, isOnBehalf } = await this.common.resolveTargetEmployee(data.employeeId, user);

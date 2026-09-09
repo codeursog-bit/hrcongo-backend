@@ -122,6 +122,7 @@ export class LoansOrcaExportService {
         tradeName: true,
         documentTemplate: true,
         cachetUrl: true,
+        city: true,
       },
     });
     if (company?.documentTemplate !== 'ORCA') {
@@ -153,7 +154,10 @@ export class LoansOrcaExportService {
     ws.getCell('B10').value = `${employee.lastName}`.toUpperCase();
     ws.getCell('E12').value = employee.firstName;
     ws.getCell('C15').value = employee.position ?? '';
-    ws.getCell('M15').value = employee.phone ?? '';
+    // ✅ Le tél. sort désormais en N15 (au lieu de M15) : M15 doit rester
+    // vide pour que le libellé "TEL:" (L15) garde la place de déborder
+    // dessus — sinon "TEL:" est tronqué en "TE" à l'affichage/impression.
+    ws.getCell('N15').value = employee.phone ?? '';
     ws.getCell('D17').value = employee.department?.name ?? '';
     ws.getCell('H21').value = Number(loan.amount);
     ws.getCell('B23').value = new Date(loan.startDate).toLocaleDateString(
@@ -171,6 +175,17 @@ export class LoansOrcaExportService {
     ws.getCell('H32').value = previousLoansTotal;
     ws.getCell('N32').value = previousLoansTotal + Number(loan.amount);
 
+    // "Fait à ___, le ___" : ville de l'entreprise + date de la décision
+    // RH/DG (drhDecidedAt et dgDecidedAt sont posées ensemble au moment de
+    // la 1re décision — cf. loans-decision.service.ts). Tant que la fiche
+    // n'est pas encore décidée, ces deux zones restent vides.
+    if (company.city) ws.getCell('H37').value = company.city;
+    const decidedAt = loan.drhDecidedAt ?? loan.dgDecidedAt;
+    if (decidedAt)
+      ws.getCell('L37').value = new Date(decidedAt).toLocaleDateString(
+        'fr-FR',
+      );
+
     // Décision DRH (case OUI/NON juste après le libellé — cf. note de mapping en tête de fichier)
     if (loan.drhDecision)
       ws.getCell('C45').value = loan.drhDecision === 'OUI' ? 'X' : '';
@@ -180,16 +195,69 @@ export class LoansOrcaExportService {
       ws.getCell('N45').value = loan.dgDecision === 'OUI' ? 'X' : '';
     if (loan.dgDecision === 'NON') ws.getCell('N48').value = 'X';
 
+    this.applyMarchandiseLayoutFixes(ws);
     await this.stampLogo(workbook, ws);
 
     if (['ACTIVE', 'PAID'].includes(loan.status) && company.cachetUrl) {
-      // ✅ K44 = case du DG (croix DG posée en N45, colonne K juste à
-      // gauche) — avant, 'K40' correspondait à la zone "Signature de
-      // l'Agent", pas du tout à la case Avis/Signature DRH-DG.
-      await this.stampCachet(workbook, ws, company.cachetUrl, 'K44');
+      // ✅ L45 = bien à l'intérieur de la case Avis/signature DG (colonnes
+      // L à N) — avant, 'K44' débordait sur la colonne-séparateur et
+      // empiétait visuellement sur la case DRH voisine. Cachet aussi agrandi
+      // (110 → 130px) pour rester lisible une fois correctement recadré.
+      await this.stampCachet(workbook, ws, company.cachetUrl, 'L45', 130);
     }
 
     return { workbook, ws, employee, loan, company };
+  }
+
+  // ── Mise en forme (corrige le bug d'affichage "####" + centre les valeurs) ──
+  //
+  // Le fichier fourni par Orca a des colonnes de saisie très étroites
+  // (ex. H ≈ 4.8, F ≈ 3.0), pensées pour du texte court qui déborde
+  // naturellement dans les cellules vides voisines. Pour des NOMBRES, Excel
+  // n'autorise jamais ce débordement : dès que le nombre ne tient pas dans
+  // la largeur de la colonne, il affiche '####' (ou '##' selon l'app) quel
+  // que soit le format appliqué — largeur insuffisante, pas un problème de
+  // format. On fusionne donc chaque cellule de valeur avec ses voisines
+  // vides (jusqu'au prochain libellé) pour lui donner la place d'afficher
+  // sa valeur, centrée, sans toucher à la largeur des colonnes (qui servent
+  // aussi à d'autres lignes de la fiche).
+  private applyMarchandiseLayoutFixes(ws: ExcelJS.Worksheet) {
+    const center: Partial<ExcelJS.Alignment> = {
+      horizontal: 'center',
+      vertical: 'middle',
+    };
+    const centerBottom: Partial<ExcelJS.Alignment> = {
+      horizontal: 'center',
+      vertical: 'bottom',
+    };
+
+    const mergeAndCenter = (
+      range: string,
+      anchorCell: string,
+      alignment: Partial<ExcelJS.Alignment> = center,
+    ) => {
+      ws.mergeCells(range);
+      ws.getCell(anchorCell).alignment = alignment;
+    };
+
+    // Identité (Nom / Prénoms / Poste / Service) — centrées sur leur ligne.
+    mergeAndCenter('B10:F10', 'B10');
+    mergeAndCenter('E12:J12', 'E12');
+    mergeAndCenter('C15:K15', 'C15');
+    ws.getCell('N15').alignment = center; // Tél. — N seule suffit, pas de fusion nécessaire
+    mergeAndCenter('D17:K17', 'D17');
+
+    // Montants / dates — fusionnées pour éliminer le '####' et centrées.
+    mergeAndCenter('H21:M21', 'H21');
+    mergeAndCenter('B23:F23', 'B23');
+    mergeAndCenter('F26:H26', 'F26');
+    ws.getCell('H29').alignment = center;
+    mergeAndCenter('H32:J32', 'H32');
+    ws.getCell('N32').alignment = center;
+
+    // "Fait à" / "le" — centrées sur leur ligne de saisie.
+    mergeAndCenter('H37:I37', 'H37', centerBottom);
+    mergeAndCenter('L37:N37', 'L37', centerBottom);
   }
 
   // ── Avances sur salaire ──────────────────────────────────────────────────
@@ -540,6 +608,7 @@ export class LoansOrcaExportService {
     ws: ExcelJS.Worksheet,
     cachetUrl: string,
     anchorCell: string,
+    size = 110,
   ) {
     try {
       const response = await fetch(cachetUrl);
@@ -557,7 +626,7 @@ export class LoansOrcaExportService {
       const row = Number(anchorCell.match(/\d+/)![0]);
       ws.addImage(imageId, {
         tl: { col: this.colLetterToIndex(col), row: row - 1 },
-        ext: { width: 110, height: 110 },
+        ext: { width: size, height: size },
       });
     } catch {
       // Le cachet est un plus, pas un bloquant — la fiche sort quand même sans cachet en cas d'échec réseau.

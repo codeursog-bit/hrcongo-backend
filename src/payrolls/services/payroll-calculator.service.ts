@@ -215,18 +215,17 @@ export class PayrollCalculatorService {
 
     // 9. ITS / IRPP
     //    CDI/CDD → barème progressif ou forfait
-    //    STAGE   → seulement si gratification > SMIG (50 400 FCFA/mois)
+    //    STAGE   → jamais d'ITS (le stagiaire ne cotise pas à l'ITS)
     //    CONSULTANT/PRESTATAIRE → BNC retenu à la source (pas d'ITS salarié)
     //    INTERIM → géré par l'agence
     let its = 0,
       irppResult: any = null;
-    const smigCongo = 50_400; // SMIG Congo Brazzaville
     const canApplyIts =
       isSalaried &&
+      !isStagiaire &&
       !isBncWorker &&
       !isInterim &&
-      employee?.isSubjectToIrpp !== false &&
-      (!isStagiaire || grossSalary > smigCongo); // STAGE : ITS seulement si > SMIG
+      employee?.isSubjectToIrpp !== false;
 
     if (canApplyIts) {
       const forcedMode = settings?.fiscalMode as string | undefined;
@@ -284,7 +283,7 @@ export class PayrollCalculatorService {
         employee?.isResident !== false && employee?.isResident !== 'false';
       bncTaux = isResident ? BNC_RATE_CONGOLAIS : BNC_RATE_ETRANGER;
       bncAmount = Math.round(grossSalary * bncTaux);
-      bncLabel = `BNC ${bncTaux * 100}% retenu à la source (${isResident ? 'résident/congolais — CGI art. 47 ter' : 'non-résident/étranger — CGI art. 44'})`;
+      bncLabel = `BNC ${bncTaux * 100}% retenu à la source`;
       // Le BNC remplace l'ITS pour ces profils (déjà à 0 grâce à canApplyIts)
       its = bncAmount;
       this.logger.log(

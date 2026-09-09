@@ -22,6 +22,7 @@ import {
 } from '../exceptions/business.exceptions';
 import { NotificationType } from '@prisma/client';
 import { NotificationsService } from '../notifications/notifications.service';
+import { SubscriptionGuard } from '../subscriptions/guards/subscription.guard';
 
 const HR_ROLES = ['ADMIN', 'SUPER_ADMIN', 'HR_MANAGER'];
 const APPROVER_ROLES = ['ADMIN', 'SUPER_ADMIN', 'HR_MANAGER', 'MANAGER'];
@@ -34,6 +35,7 @@ export class PermissionTicketsService {
   constructor(
     private prisma: PrismaService,
     private notificationsService: NotificationsService,
+    private subscriptionGuard: SubscriptionGuard,
   ) {}
 
   private async getUserWithCompany(userId: string): Promise<{
@@ -88,6 +90,7 @@ export class PermissionTicketsService {
 
   async create(dto: CreatePermissionTicketDto, userId: string) {
     const user = await this.getUserWithCompany(userId);
+    await this.subscriptionGuard.assertActionAllowed(user.companyId, user.role);
     const isApprover = APPROVER_ROLES.includes(user.role);
 
     let targetEmployee;

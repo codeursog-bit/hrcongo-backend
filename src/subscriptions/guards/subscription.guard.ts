@@ -355,7 +355,12 @@ export class SubscriptionGuard {
 
     const subscription = await this.prisma.subscription.findUnique({
       where: { companyId },
-      select: { plan: true, status: true, trialEndsAt: true },
+      select: {
+        plan: true,
+        status: true,
+        trialEndsAt: true,
+        currentPeriodEnd: true,
+      },
     });
 
     if (!subscription) {
@@ -381,6 +386,22 @@ export class SubscriptionGuard {
           "Votre période d'essai est expirée. Veuillez upgrader votre abonnement.",
         );
       }
+    }
+
+    // 🐛 CORRECTIF : un abonnement payant ACTIVE dont la période est
+    // dépassée doit être traité comme expiré même si le cron quotidien de
+    // downgrade n'est pas encore passé (fenêtre de quelques heures max) —
+    // sans ce filet de sécurité, l'accès payant restait utilisable jusqu'au
+    // prochain passage du cron.
+    if (
+      subscription.status === 'ACTIVE' &&
+      subscription.plan !== 'FREE' &&
+      subscription.currentPeriodEnd &&
+      new Date() > subscription.currentPeriodEnd
+    ) {
+      throw new ForbiddenException(
+        "Votre abonnement est arrivé à échéance. Veuillez le renouveler pour continuer à profiter de cette fonctionnalité.",
+      );
     }
 
     const hasAccess = canUseFeature(subscription.plan, feature);
@@ -417,7 +438,12 @@ export class SubscriptionGuard {
     return this.prisma.$transaction(async (tx) => {
       const subscription = await tx.subscription.findUnique({
         where: { companyId },
-        select: { plan: true, status: true, trialEndsAt: true },
+        select: {
+          plan: true,
+          status: true,
+          trialEndsAt: true,
+          currentPeriodEnd: true,
+        },
       });
 
       if (!subscription) {
@@ -437,6 +463,21 @@ export class SubscriptionGuard {
         if (new Date() > subscription.trialEndsAt) {
           throw new ForbiddenException("Votre période d'essai est expirée.");
         }
+      }
+
+      // 🐛 CORRECTIF : filet de sécurité identique à checkFeatureAccess —
+      // un abonnement payant ACTIVE mais dont currentPeriodEnd est dépassé
+      // ne doit pas laisser passer une action limitée avant le passage du
+      // cron de downgrade quotidien.
+      if (
+        subscription.status === 'ACTIVE' &&
+        subscription.plan !== 'FREE' &&
+        subscription.currentPeriodEnd &&
+        new Date() > subscription.currentPeriodEnd
+      ) {
+        throw new ForbiddenException(
+          "Votre abonnement est arrivé à échéance. Veuillez le renouveler.",
+        );
       }
 
       const planLimits = getPlanLimits(subscription.plan);
@@ -597,7 +638,12 @@ export class SubscriptionGuard {
     try {
       const subscription = await this.prisma.subscription.findUnique({
         where: { companyId },
-        select: { plan: true, status: true, trialEndsAt: true },
+        select: {
+          plan: true,
+          status: true,
+          trialEndsAt: true,
+          currentPeriodEnd: true,
+        },
       });
 
       if (!subscription) return false;
@@ -615,9 +661,105 @@ export class SubscriptionGuard {
         if (new Date() > subscription.trialEndsAt) return false;
       }
 
+      if (
+        subscription.status === 'ACTIVE' &&
+        subscription.plan !== 'FREE' &&
+        subscription.currentPeriodEnd &&
+        new Date() > subscription.currentPeriodEnd
+      ) {
+        return false;
+      }
+
       return canUseFeature(subscription.plan, feature);
     } catch {
       return false;
     }
+  }
+
+  // ==========================================================================
+  // 🚧 VÉRIFICATION GÉNÉRALE D'ACCÈS — POUR TOUTE ACTION UTILISATEUR
+  // ==========================================================================
+  //
+  // À appeler en tête de chaque action "métier" qu'un utilisateur (employé
+  // OU admin/RH) peut déclencher — pointage, demande de prêt/avance, demande
+  // de formation, demande de congé/absence, ticket de permission, etc.
+  // Contrairement à checkFeatureAccess/checkLimit (qui vérifient UNE feature
+  // ou UNE limite précise du plan), cette méthode répond à une question plus
+  // simple : "l'abonnement de cette entreprise est-il dans un état qui doit
+  // bloquer toute action ?" — essai/abonnement expiré, ou plan Gratuit
+  // dépassant son quota d'employés inclus suite à un non-renouvellement.
+  //
+  // Le message renvoyé s'adapte au rôle de l'auteur de l'action : un
+  // admin/RH est renvoyé vers le renouvellement, un employé (ou manager) ne
+  // voit qu'un message doux l'invitant à contacter son RH — jamais de détail
+  // de facturation côté employé.
+  // ==========================================================================
+
+  private static readonly HR_ROLES = ['ADMIN', 'SUPER_ADMIN', 'HR_MANAGER'];
+
+  async assertActionAllowed(companyId: string, role?: string): Promise<void> {
+    // ── PME gérée par cabinet → bypass total ──────────────────────────────
+    const company = await this.prisma.company.findUnique({
+      where: { id: companyId },
+      select: { managedByCabinet: true },
+    });
+    if (company?.managedByCabinet) return;
+    // ── fin bypass ─────────────────────────────────────────────────────────
+
+    const subscription = await this.prisma.subscription.findUnique({
+      where: { companyId },
+      select: {
+        plan: true,
+        status: true,
+        trialEndsAt: true,
+        currentPeriodEnd: true,
+      },
+    });
+
+    // Pas d'abonnement configuré pour cette entreprise (cas anormal /
+    // legacy) → on ne bloque pas par erreur d'intégration, checkFeatureAccess
+    // /checkLimit restent le filet de sécurité principal ailleurs.
+    if (!subscription) return;
+
+    const now = new Date();
+
+    const trialExpired =
+      subscription.status === 'TRIALING' &&
+      !!subscription.trialEndsAt &&
+      subscription.trialEndsAt < now;
+
+    const paidExpired =
+      subscription.plan !== 'FREE' &&
+      (subscription.status === 'CANCELED' ||
+        subscription.status === 'PAST_DUE' ||
+        (subscription.status === 'ACTIVE' &&
+          subscription.currentPeriodEnd < now));
+
+    let blocked = trialExpired || paidExpired;
+
+    // Plan Gratuit (choisi ou atteint suite à non-renouvellement) : au-delà
+    // du quota d'employés inclus, on bloque plutôt que de laisser deviner
+    // qui "compte" encore parmi les employés existants.
+    if (!blocked && subscription.plan === 'FREE') {
+      const maxEmployees = getPlanLimits('FREE').maxEmployees;
+      if (maxEmployees !== -1) {
+        const activeCount = await this.prisma.employee.count({
+          where: { companyId, status: 'ACTIVE' },
+        });
+        if (activeCount > maxEmployees) blocked = true;
+      }
+    }
+
+    if (!blocked) return;
+
+    if (role && SubscriptionGuard.HR_ROLES.includes(role)) {
+      throw new ForbiddenException(
+        "L'abonnement de votre entreprise est terminé et l'accès est désormais limité au plan Gratuit. Renouvelez votre abonnement pour redonner à votre équipe un accès complet.",
+      );
+    }
+
+    throw new ForbiddenException(
+      "Accès bloqué. Merci de contacter votre RH ou administrateur pour régulariser l'abonnement de votre entreprise.",
+    );
   }
 }

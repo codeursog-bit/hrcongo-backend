@@ -25,7 +25,6 @@ const CNSS_PENSION_CEILING = 1_200_000;
 const CNSS_SALARIAL_RATE = 0.04;
 const SALARIED_CONTRACTS = ['CDI', 'CDD', 'STAGE'];
 const TOL_CONTRACTS = ['CDI', 'CDD'];
-const SMIG_CONGO = 50_400;
 
 export interface SalaryEstimateResult {
   grossSalary: number;
@@ -132,10 +131,10 @@ export class SalaryEstimateService {
     let its = 0;
     const canApplyIts =
       isSalaried &&
+      !isStagiaire &&
       !isBncWorker &&
       !isInterim &&
-      employee.isSubjectToIrpp !== false &&
-      (!isStagiaire || grossSalary > SMIG_CONGO);
+      employee.isSubjectToIrpp !== false;
     if (canApplyIts) {
       const fiscalMode =
         new Date().getFullYear() < 2026

@@ -750,6 +750,10 @@ export class LeavesService {
   ) {
     try {
       const user = await this.getUserWithCompany(userId, overrideCompanyId);
+      await this.subscriptionGuard.assertActionAllowed(
+        user.companyId,
+        user.role,
+      );
       await this.subscriptionGuard.checkFeatureAccess(
         user.companyId,
         'hasLeaveManagement',
@@ -845,6 +849,13 @@ export class LeavesService {
       // Congé annuel "normal" : le Code du travail congolais exige 12 mois de
       // service continu. Le congé "anticipé" existe précisément pour déroger
       // à cette règle — plafonné plus bas au solde déjà accumulé.
+      // ✅ CORRECTIF (demande explicite) : ce blocage dur ne s'applique qu'à
+      // une demande faite par l'EMPLOYÉ lui-même (auto-service). Un RH/Admin
+      // qui planifie ce même congé pour quelqu'un sait ce qu'il fait — on ne
+      // le bloque jamais, on se contente d'un avertissement (loggé + visible
+      // côté frontend via `earlyDeparture` dans la réponse), la décision
+      // finale lui revient.
+      let earlyDepartureWarning: string | undefined;
       if (createLeaveDto.type === 'ANNUAL') {
         const monthsWorked =
           (today.getTime() - new Date(employee.hireDate).getTime()) /
@@ -853,8 +864,14 @@ export class LeavesService {
           const remaining = Math.ceil(
             CONGO_LEAVE.MIN_MONTHS_BEFORE_LEAVE - monthsWorked,
           );
-          throw new BadRequestException(
-            `Conformément au Code du travail congolais, les congés annuels ne sont accessibles qu'après 12 mois de service continu. Ancienneté actuelle : ${Math.floor(monthsWorked)} mois. Encore ${remaining} mois requis. Pour un départ avant ce délai, utilisez le congé annuel anticipé.`,
+          const noticeText = `Conformément au Code du travail congolais, les congés annuels ne sont normalement accessibles qu'après 12 mois de service continu. Ancienneté actuelle : ${Math.floor(monthsWorked)} mois. Il manque ${remaining} mois. Pour un départ avant ce délai, le congé annuel anticipé est recommandé.`;
+          if (user.role === 'EMPLOYEE') {
+            throw new BadRequestException(noticeText);
+          }
+          // RH/Admin/Manager/Cabinet : avertissement seulement, pas de blocage.
+          earlyDepartureWarning = noticeText;
+          this.logger.warn(
+            `⚠️ Congé ANNUAL créé avant 12 mois de service pour ${employee.firstName} ${employee.lastName} (${Math.floor(monthsWorked)} mois) — autorisé exceptionnellement par ${user.role} (${userId}).`,
           );
         }
       }
@@ -931,7 +948,7 @@ export class LeavesService {
         {
           type: 'LEAVE_REQUEST',
           title: '📅 Nouvelle demande de congé',
-          message: `${employee.firstName} ${employee.lastName} demande ${workingDays} jour(s) de ${this.leaveTypeLabel(createLeaveDto.type)} du ${start.toLocaleDateString('fr-FR')} au ${end.toLocaleDateString('fr-FR')}`,
+          message: `${employee.firstName} ${employee.lastName} demande ${Math.round(workingDays)} jour(s) de ${this.leaveTypeLabel(createLeaveDto.type)} du ${start.toLocaleDateString('fr-FR')} au ${end.toLocaleDateString('fr-FR')}`,
           link: '/conges',
           metadata: {
             leaveId: leave.id,
@@ -945,7 +962,9 @@ export class LeavesService {
         },
       );
 
-      return leave;
+      return earlyDepartureWarning
+        ? { ...leave, earlyDepartureWarning }
+        : leave;
     } catch (error) {
       if (
         error instanceof BadRequestException ||
@@ -1158,7 +1177,7 @@ export class LeavesService {
         userId: employeeUser.id,
         type: 'LEAVE_APPROVED' as NotificationType,
         title: '📅 Congé planifié par le RH',
-        message: `Un congé du ${start.toLocaleDateString('fr-FR')} au ${end.toLocaleDateString('fr-FR')} (${workingDays}j) a été planifié pour vous.`,
+        message: `Un congé du ${start.toLocaleDateString('fr-FR')} au ${end.toLocaleDateString('fr-FR')} (${Math.round(workingDays)}j) a été planifié pour vous.`,
         link: '/conges/mon-espace',
         metadata: {
           leaveId: leave.id,
@@ -2309,9 +2328,8 @@ export class LeavesService {
             `${r.employee?.firstName ?? ''} ${r.employee?.lastName ?? ''}`.trim(),
           )
           .filter(Boolean);
-        const totalDays = rows.reduce(
-          (s, r) => s + Number(r.daysCount || 0),
-          0,
+        const totalDays = Math.round(
+          rows.reduce((s, r) => s + Number(r.daysCount || 0), 0),
         );
 
         const title =

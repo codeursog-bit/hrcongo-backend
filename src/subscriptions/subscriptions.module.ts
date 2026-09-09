@@ -51,6 +51,7 @@ import { ScheduleModule } from '@nestjs/schedule';
 import { SubscriptionsService } from './subscriptions.service';
 import { SubscriptionsController } from './subscriptions.controller';
 import { WebhooksController } from './webhooks.controller';
+import { MotekiWebhooksController } from './moteki-webhooks.controller';
 import { SubscriptionGuard } from './guards/subscription.guard';
 import { AdminGuard } from '../auth/guards/admin.guard';
 import { SubscriptionCronService } from './cron/subscription.cron';
@@ -58,6 +59,7 @@ import { PrismaModule } from '../prisma/prisma.module';
 import { PaymentsModule } from '../payments/payments.module';
 import { AffiliateModule } from '../affiliate/affiliate.module';
 import { CabinetModule } from '../cabinet/cabinet.module';
+import { NotificationsModule } from '../notifications/notifications.module';
 
 @Module({
   imports: [
@@ -66,11 +68,13 @@ import { CabinetModule } from '../cabinet/cabinet.module';
     PaymentsModule,
     AffiliateModule,
     CabinetModule, // ← pour injecter CabinetSubscriptionService dans WebhooksController
+    NotificationsModule, // ← pour les rappels J-7/J-3/J-1 et l'alerte "abonnement expiré"
     ScheduleModule.forRoot(),
   ],
   controllers: [
     SubscriptionsController,
-    WebhooksController, // ← webhook unifié entreprise + cabinet
+    WebhooksController, // ← webhook YabetooPay : conservé pour l'historique + les versements affiliés (disbursement.completed)
+    MotekiWebhooksController, // ← webhook Moteki : nouveau prestataire de collecte
   ],
   providers: [
     SubscriptionsService,

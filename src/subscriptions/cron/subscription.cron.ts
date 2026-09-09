@@ -14,45 +14,71 @@ export class SubscriptionCronService {
   constructor(private subscriptionsService: SubscriptionsService) {}
 
   // ==========================================================================
-  // ⏰ VÉRIFIER LES ESSAIS EXPIRÉS (TOUS LES JOURS À 9H00)
+  // ⏰ VÉRIFIER LES ESSAIS + ABONNEMENTS PAYANTS EXPIRÉS (TOUS LES JOURS À 9H00)
   // ==========================================================================
 
   @Cron('0 9 * * *', {
-    name: 'check-expired-trials',
+    name: 'check-expired-subscriptions',
     timeZone: 'Africa/Brazzaville',
   })
-  async handleExpiredTrials() {
-    this.logger.log('🔄 Starting expired trials check...');
+  async handleExpiredSubscriptions() {
+    this.logger.log('🔄 Starting expired subscriptions check...');
 
     try {
-      const result = await this.subscriptionsService.checkExpiredTrials();
+      const result = await this.subscriptionsService.checkExpiredSubscriptions();
 
       this.logger.log(
-        `✅ Expired trials processed: ${result.downgraded} downgraded to FREE`,
+        `✅ Expired subscriptions processed: ${result.downgradedTrials} essai(s) + ${result.downgradedPaid} abonnement(s) payant(s) → FREE`,
       );
     } catch (error) {
-      this.logger.error('❌ Error processing expired trials:', error);
+      this.logger.error('❌ Error processing expired subscriptions:', error);
     }
   }
 
   // ==========================================================================
-  // 🔔 ENVOYER ALERTES EXPIRATION (TOUS LES JOURS À 10H00)
+  // 🔔 ENVOYER LES RAPPELS J-7 / J-3 / J-1 (TOUS LES JOURS À 10H00)
   // ==========================================================================
 
   @Cron('0 10 * * *', {
-    name: 'send-trial-alerts',
+    name: 'send-renewal-reminders',
     timeZone: 'Africa/Brazzaville',
   })
-  async handleTrialAlerts() {
-    this.logger.log('📧 Sending trial expiration alerts...');
+  async handleRenewalReminders() {
+    this.logger.log("📧 Sending renewal reminders (J-7/J-3/J-1)...");
 
     try {
-      const result =
-        await this.subscriptionsService.sendTrialExpirationAlerts();
+      const result = await this.subscriptionsService.sendRenewalReminders();
 
       this.logger.log(`✅ Alerts sent: ${result.alerts} companies notified`);
     } catch (error) {
       this.logger.error('❌ Error sending alerts:', error);
+    }
+  }
+
+  // ==========================================================================
+  // 🔎 MOTEKI — VÉRIFIER LES COMMANDES EN ATTENTE (TOUTES LES 5 MINUTES)
+  // ==========================================================================
+  //
+  // Filet de sécurité : active l'abonnement dès qu'une commande Moteki
+  // PENDING passe payée, même si le client n'est jamais revenu sur
+  // /success (qui déclenche déjà une vérification immédiate à l'arrivée —
+  // voir GET /subscriptions/moteki/check-order/:paymentId).
+  // ==========================================================================
+
+  @Cron('*/5 * * * *', {
+    name: 'check-pending-moteki-orders',
+    timeZone: 'Africa/Brazzaville',
+  })
+  async handlePendingMotekiOrders() {
+    try {
+      const result = await this.subscriptionsService.checkPendingMotekiOrders();
+      if (result.checked > 0 || result.expired > 0) {
+        this.logger.log(
+          `🔎 [Moteki] ${result.checked} commande(s) vérifiée(s), ${result.activated} activée(s), ${result.expired} expirée(s)`,
+        );
+      }
+    } catch (error) {
+      this.logger.error('❌ Error checking pending Moteki orders:', error);
     }
   }
 

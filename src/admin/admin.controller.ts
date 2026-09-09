@@ -19,12 +19,21 @@ import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { UltraAdminGuard } from './guards/ultra-admin.guard';
 import { DashboardService } from './services/dashboard.service';
 import { AdminCompaniesService } from './services/companies.service';
+import { AdminSubscriptionsService } from './services/subscriptions.service';
 import { BillingService } from './services/billing.service';
 import { AnalyticsService } from './services/analytics.service';
 import { MonitoringService } from './services/monitoring.service';
 import { ErrorTrackingService } from './services/error-tracking.service';
 import { CleanupService } from '../cleanup/cleanup.service';
 import { SettingsService } from './services/settings.service';
+import {
+  UpdateCompanyStatusDto,
+  ArchiveCompanyDto,
+  UpdateCompanyDto,
+  UpdateSubscriptionPlanDto,
+  SuspendSubscriptionDto,
+  ExtendSubscriptionDto,
+} from './dto/company-actions.dto';
 
 @Controller('admin')
 @UseGuards(JwtAuthGuard, UltraAdminGuard) // ✅ Protection SUPER_ADMIN globale
@@ -32,6 +41,7 @@ export class AdminController {
   constructor(
     private readonly dashboardService: DashboardService,
     private readonly companiesService: AdminCompaniesService,
+    private readonly subscriptionsService: AdminSubscriptionsService,
     private readonly billingService: BillingService,
     private readonly analyticsService: AnalyticsService,
     private readonly monitoringService: MonitoringService,
@@ -58,13 +68,87 @@ export class AdminController {
     @Query('status') status?: string,
     @Query('plan') plan?: string,
     @Query('search') search?: string,
+    @Query('includeArchived') includeArchived?: string,
   ) {
-    return this.companiesService.getAllCompanies({ status, plan, search });
+    return this.companiesService.getAllCompanies({
+      status,
+      plan,
+      search,
+      includeArchived: includeArchived === 'true',
+    });
   }
 
   @Get('companies/:id')
   async getCompanyDetails(@Param('id') id: string) {
     return this.companiesService.getCompanyDetails(id);
+  }
+
+  @Patch('companies/:id')
+  async updateCompany(
+    @Param('id') id: string,
+    @Body() dto: UpdateCompanyDto,
+    @Request() req: any,
+  ) {
+    return this.companiesService.updateCompany(id, dto, req.user.userId);
+  }
+
+  @Patch('companies/:id/status')
+  async updateCompanyStatus(
+    @Param('id') id: string,
+    @Body() dto: UpdateCompanyStatusDto,
+    @Request() req: any,
+  ) {
+    return this.companiesService.updateCompanyStatus(id, dto, req.user.userId);
+  }
+
+  @Post('companies/:id/archive')
+  async archiveCompany(
+    @Param('id') id: string,
+    @Body() dto: ArchiveCompanyDto,
+    @Request() req: any,
+  ) {
+    return this.companiesService.archiveCompany(id, dto, req.user.userId);
+  }
+
+  @Post('companies/:id/unarchive')
+  async unarchiveCompany(@Param('id') id: string, @Request() req: any) {
+    return this.companiesService.unarchiveCompany(id, req.user.userId);
+  }
+
+  // ==========================================================================
+  // 💳 SECTION ABONNEMENTS
+  // ==========================================================================
+
+  @Patch('companies/:id/subscription/activate')
+  async activateSubscription(@Param('id') id: string, @Request() req: any) {
+    return this.subscriptionsService.activate(id, req.user.userId);
+  }
+
+  @Patch('companies/:id/subscription/suspend')
+  async suspendSubscription(
+    @Param('id') id: string,
+    @Body() dto: SuspendSubscriptionDto,
+    @Request() req: any,
+  ) {
+    return this.subscriptionsService.suspend(id, dto, req.user.userId);
+  }
+
+  @Patch('companies/:id/subscription/plan')
+  async changeSubscriptionPlan(
+    @Param('id') id: string,
+    @Body() dto: UpdateSubscriptionPlanDto,
+    @Request() req: any,
+  ) {
+    return this.subscriptionsService.changePlan(id, dto, req.user.userId);
+  }
+
+  @Patch('companies/:id/subscription/extend')
+  async extendSubscription(
+    @Param('id') id: string,
+    @Body() dto: ExtendSubscriptionDto,
+    @Request() req: any,
+  ) {
+    return this.subscriptionsService.extend(id, dto, req.user.userId);
   }
 
   // ==========================================================================

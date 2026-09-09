@@ -132,9 +132,14 @@ export class AttendanceCheckService {
   async checkIn(dto: CreateAttendanceDto, userId: string) {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
-      select: { companyId: true },
+      select: { companyId: true, role: true },
     });
     if (!user?.companyId) throw new CompanyNotFoundException();
+
+    // 🚧 Abonnement/essai expiré (ou quota FREE dépassé) → on bloque le
+    // pointage avant toute autre vérification, avec un message adapté à
+    // l'auteur de l'action (RH/admin vs employé — voir assertActionAllowed).
+    await this.subscriptionGuard.assertActionAllowed(user.companyId, user.role);
 
     const { employeeId, notes, latitude, longitude } = dto;
     const confirmRestDay = (dto as any).confirmRestDay ?? false;
@@ -367,9 +372,15 @@ export class AttendanceCheckService {
 
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
-      select: { companyId: true },
+      select: { companyId: true, role: true },
     });
     if (!user?.companyId) throw new CompanyNotFoundException();
+
+    // ℹ️ Volontairement PAS de blocage abonnement ici : si l'accès a été
+    // coupé pendant qu'un employé était déjà en poste (check-in fait avant
+    // l'échéance), il doit pouvoir pointer sa sortie normalement — sinon on
+    // fabrique un pointage "oublié" et un calcul d'heures faux. Le blocage
+    // se fait à l'entrée (checkIn), pas à la sortie.
 
     const employee = await this.prisma.employee.findUnique({
       where: { id: employeeId },

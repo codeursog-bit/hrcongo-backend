@@ -215,6 +215,7 @@ export class TrainingService {
   // ══════════════════════════════════════════════════════════════════════════
   async createRequest(dto: CreateTrainingRequestDto, userId: string) {
     const user = await this.getUser(userId);
+    await this.subscriptionGuard.assertActionAllowed(user.companyId, user.role);
     const employee = await this.getEmployee(userId, user.companyId);
     if (!employee)
       throw new BadRequestException('Aucun profil employé associé.');

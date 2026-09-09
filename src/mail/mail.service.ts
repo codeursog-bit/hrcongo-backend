@@ -887,4 +887,93 @@ export class MailService {
       `Nouvel article : "${params.postTitle}" par ${params.authorName}. Lire : ${url}`,
     );
   }
+
+  // ──────────────────────────────────────────────────────────
+  // RAPPEL D'ÉCHÉANCE D'ABONNEMENT (J-7 / J-3 / J-1)
+  // ──────────────────────────────────────────────────────────
+  async sendSubscriptionReminder(params: {
+    to: string;
+    firstName?: string;
+    kind: 'essai' | 'abonnement';
+    planName?: string;
+    daysLeft: 7 | 3 | 1;
+  }): Promise<boolean> {
+    const subscriptionUrl = `${this.frontendUrl}/parametres/subscription`;
+    const isLastCall = params.daysLeft === 1;
+    const dayLabel = isLastCall ? '1 jour' : `${params.daysLeft} jours`;
+    const greeting = params.firstName ? `Bonjour ${params.firstName},` : 'Bonjour,';
+
+    const intro =
+      params.kind === 'essai'
+        ? `Votre essai gratuit se termine dans <strong style="color:#f59e0b;">${dayLabel}</strong>.`
+        : `Votre abonnement ${params.planName ? `<strong style="color:#e2e8f0;">${params.planName}</strong> ` : ''}se termine dans <strong style="color:#f59e0b;">${dayLabel}</strong>.`;
+
+    const body = isLastCall
+      ? `Sans renouvellement d'ici demain, votre entreprise repassera automatiquement sur le plan Gratuit : certaines actions (ajout d'employé, paie groupée, pointage des équipes...) seront alors limitées jusqu'au renouvellement.`
+      : `Pensez à renouveler dès maintenant pour éviter toute interruption de service.`;
+
+    const html = this.baseTemplate(
+      `
+      <p style="font-size:16px;margin:0 0 20px;">${greeting}</p>
+      <p style="color:#94a3b8;margin:0 0 20px;">${intro}</p>
+      <p style="color:#94a3b8;margin:0 0 24px;">${body}</p>
+      <div style="text-align:center;">
+        <a href="${subscriptionUrl}" style="display:inline-block;background:linear-gradient(135deg,#f59e0b,#ea580c);color:#fff;padding:14px 36px;text-decoration:none;border-radius:10px;font-weight:700;">
+          Renouveler mon abonnement
+        </a>
+      </div>
+    `,
+      isLastCall
+        ? 'linear-gradient(135deg,#ef4444,#dc2626)'
+        : 'linear-gradient(135deg,#f59e0b,#ea580c)',
+      isLastCall ? '⏰ Dernier jour avant échéance' : `⏰ Échéance dans ${dayLabel}`,
+    );
+
+    return this.send(
+      params.to,
+      isLastCall
+        ? `⏰ Dernier jour : votre ${params.kind} se termine demain`
+        : `⏰ Votre ${params.kind} se termine dans ${dayLabel}`,
+      html,
+      `${greeting}\n\nVotre ${params.kind} se termine dans ${dayLabel}. ${body}\n\nRenouveler : ${subscriptionUrl}`,
+    );
+  }
+
+  // ──────────────────────────────────────────────────────────
+  // ABONNEMENT/ESSAI TERMINÉ SANS RENOUVELLEMENT → REPASSÉ EN GRATUIT
+  // ──────────────────────────────────────────────────────────
+  async sendSubscriptionExpired(params: {
+    to: string;
+    firstName?: string;
+    planName?: string;
+  }): Promise<boolean> {
+    const subscriptionUrl = `${this.frontendUrl}/parametres/subscription`;
+    const greeting = params.firstName ? `Bonjour ${params.firstName},` : 'Bonjour,';
+
+    const html = this.baseTemplate(
+      `
+      <p style="font-size:16px;margin:0 0 20px;">${greeting}</p>
+      <p style="color:#94a3b8;margin:0 0 20px;">
+        ${params.planName ? `Votre forfait <strong style="color:#e2e8f0;">${params.planName}</strong> n'a` : "Votre abonnement n'a"} pas été renouvelé à temps. Votre entreprise est repassée automatiquement sur le plan <strong style="color:#f87171;">Gratuit</strong>.
+      </p>
+      <p style="color:#94a3b8;margin:0 0 24px;">
+        Certaines actions sont désormais limitées pour votre équipe (ajout d'employé, paie groupée, pointage au-delà du quota inclus...). Renouvelez à tout moment pour retrouver un accès complet, sans perdre vos données.
+      </p>
+      <div style="text-align:center;">
+        <a href="${subscriptionUrl}" style="display:inline-block;background:linear-gradient(135deg,#ef4444,#dc2626);color:#fff;padding:14px 36px;text-decoration:none;border-radius:10px;font-weight:700;">
+          Renouveler mon abonnement
+        </a>
+      </div>
+    `,
+      'linear-gradient(135deg,#ef4444,#dc2626)',
+      '⚠️ Abonnement terminé',
+    );
+
+    return this.send(
+      params.to,
+      '⚠️ Votre abonnement est terminé — accès limité au plan Gratuit',
+      html,
+      `${greeting}\n\nVotre abonnement n'a pas été renouvelé et votre entreprise est repassée sur le plan Gratuit. Renouveler : ${subscriptionUrl}`,
+    );
+  }
 }

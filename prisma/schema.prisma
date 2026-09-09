@@ -183,6 +183,11 @@ model Company {
   allowedRadius Int?     @default(100) @db.SmallInt
 
   isActive  Boolean  @default(true)
+
+  archivedAt       DateTime? @db.Timestamptz
+  archivedReason   String?   @db.Text
+  archivedByUserId String?   @db.Uuid
+
   managedByCabinet Boolean @default(false)
   cabinetId        String? @db.Uuid
   createdAt DateTime @default(now()) @db.Timestamptz
@@ -278,6 +283,7 @@ model Company {
   @@index([appliesCnssEmployer])
   @@index([rccmNumber])
   @@index([isActive])
+  @@index([archivedAt])
   @@map("companies")
 }
 
@@ -2323,6 +2329,9 @@ enum NotificationType {
   ADVANCE_APPROVED
   ADVANCE_REJECTED
 
+  SUBSCRIPTION_EXPIRING  // Rappel J-7 / J-3 / J-1 avant fin d'essai ou d'abonnement
+  SUBSCRIPTION_EXPIRED   // Abonnement/essai arrivé à échéance sans renouvellement
+
   @@map("notification_type")
 }
 
@@ -2513,7 +2522,12 @@ enum PaymentStatus {
 
   @@map("payment_status")
 }
+enum SubscriptionBillingCycle {
+  MONTHLY
+  YEARLY
 
+  @@map("subscription_billing_cycle")
+}
 model Subscription {
   id        String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   companyId String @unique @db.Uuid
@@ -2521,6 +2535,10 @@ model Subscription {
 
   plan   SubscriptionPlan   @default(FREE)
   status SubscriptionStatus @default(ACTIVE)
+  
+  // Cycle de facturation du paiement en cours (mensuel/annuel) — sert à
+  // calculer correctement la durée d'un renouvellement (voir SubscriptionsService.activateUpgrade)
+  billingCycle SubscriptionBillingCycle @default(MONTHLY)
 
   startDate          DateTime  @default(now()) @db.Timestamptz
   currentPeriodStart DateTime  @default(now()) @db.Timestamptz
@@ -2550,11 +2568,19 @@ model Payment {
   company   Company @relation("CompanyPayments", fields: [companyId], references: [id], onDelete: Cascade)
 
   // Informations YabetoPay
-  yabetooIntentId      String  @unique @db.VarChar(100)
+  provider PaymentProvider @default(YABETOOPAY)
+  yabetooIntentId      String? @unique @db.VarChar(100)
   yabetooChargeId      String? @unique @db.VarChar(100)
   yabetooTransactionId String? @db.VarChar(100)
   yabetooFinancialTxId String? @db.VarChar(100)
   clientSecret String? @db.VarChar(255)
+
+  
+  // Informations Moteki
+  motekiOrderId         String? @unique @db.VarChar(100) // "ord-uuid" retourné par /subscribe
+  motekiOrderNumber     String? @unique @db.VarChar(100) // "MOT-123456"
+  motekiSubscriptionId  String? @unique @db.VarChar(100) // connu seulement après le 1er paiement réussi (webhook)
+  motekiCustomerEmail   String? @db.VarChar(255)          // clé de corrélation de secours pour le webhook
 
   // Montant
   amount   Int    @db.Integer
@@ -2590,6 +2616,12 @@ model Payment {
   @@index([yabetooIntentId])
   @@index([createdAt])
   @@map("payments")
+}
+enum PaymentProvider {
+  YABETOOPAY
+  MOTEKI
+
+  @@map("payment_provider")
 }
 
 // ============================================================================

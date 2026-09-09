@@ -1015,7 +1015,7 @@ export class LeavesBalanceService {
         {
           type: 'SYSTEM_ALERT',
           title: '❓ Retour de congé à confirmer',
-          message: `${leave.employee.firstName} ${leave.employee.lastName} devait reprendre le travail le ${new Date(leave.endDate).toLocaleDateString('fr-FR')} (${daysOverdue}j) — merci de vérifier et confirmer son retour.`,
+          message: `${leave.employee.firstName} ${leave.employee.lastName} devait reprendre le travail le ${new Date(leave.endDate).toLocaleDateString('fr-FR')} (${Math.round(daysOverdue)}j) — merci de vérifier et confirmer son retour.`,
           link: `/conges/${leave.id}`,
           metadata: {
             leaveId: leave.id,

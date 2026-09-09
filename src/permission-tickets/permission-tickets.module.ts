@@ -7,9 +7,10 @@ import { PermissionTicketsController } from './permission-tickets.controller';
 import { PermissionTicketsService } from './permission-tickets.service';
 import { PrismaModule } from '../prisma/prisma.module';
 import { NotificationsModule } from '../notifications/notifications.module';
+import { SubscriptionsModule } from '../subscriptions/subscriptions.module';
 
 @Module({
-  imports: [PrismaModule, NotificationsModule],
+  imports: [PrismaModule, NotificationsModule, SubscriptionsModule],
   controllers: [PermissionTicketsController],
   providers: [PermissionTicketsService],
   exports: [PermissionTicketsService],
