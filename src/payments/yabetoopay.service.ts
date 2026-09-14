@@ -490,19 +490,24 @@ export class YabetooPayService {
   private readonly isSandbox: boolean;
 
   constructor(private configService: ConfigService) {
+    // 🐛 CORRECTIF (même bug que Moteki, voir moteki.service.ts) : avant,
+    // l'absence de YABETOOPAY_SECRET_KEY/ACCOUNT_ID faisait planter TOUT le
+    // serveur au démarrage. Pour que la bascule automatique de prestataire
+    // fonctionne dans les deux sens (Moteki OU YabetooPay peut être celui
+    // qui a un .env vide), il faut pouvoir démarrer sans ces clés — l'erreur
+    // ne doit remonter qu'au moment où on essaie VRAIMENT d'appeler l'API
+    // YabetooPay, pas avant.
     const secretKey = this.configService.get<string>('YABETOOPAY_SECRET_KEY');
-    if (!secretKey) {
-      this.logger.error('❌ YABETOOPAY_SECRET_KEY is not defined in .env');
-      throw new Error('YABETOOPAY_SECRET_KEY is required');
-    }
-    this.secretKey = secretKey;
-
     const accountId = this.configService.get<string>('YABETOOPAY_ACCOUNT_ID');
-    if (!accountId) {
-      this.logger.error('❌ YABETOOPAY_ACCOUNT_ID is not defined in .env');
-      throw new Error('YABETOOPAY_ACCOUNT_ID is required');
+
+    this.secretKey = secretKey ?? '';
+    this.accountId = accountId ?? '';
+
+    if (!secretKey || !accountId) {
+      this.logger.warn(
+        '⚠️  YABETOOPAY_SECRET_KEY ou YABETOOPAY_ACCOUNT_ID absent de la config (.env) — YabetooPayService inactif, Moteki prend le relais si configuré.',
+      );
     }
-    this.accountId = accountId;
 
     const nodeEnv = this.configService.get<string>('NODE_ENV') || 'development';
     this.isSandbox = nodeEnv !== 'production';
@@ -534,7 +539,20 @@ export class YabetooPayService {
     );
     this.logger.log(`🔗 Sessions URL : ${sessionsBaseURL}`);
     this.logger.log(`🔗 Intents URL  : ${intentsBaseURL}`);
-    this.logger.log(`🏢 Account ID   : ${this.accountId}`);
+    this.logger.log(`🏢 Account ID   : ${this.accountId || '(non configuré)'}`);
+  }
+
+  /** true si YabetooPay est vraiment configuré — utilisé par la bascule automatique de prestataire. */
+  isConfigured(): boolean {
+    return !!this.secretKey && !!this.accountId;
+  }
+
+  private assertConfigured() {
+    if (!this.secretKey || !this.accountId) {
+      throw new BadRequestException(
+        "YabetooPay n'est pas configuré sur ce serveur (YABETOOPAY_SECRET_KEY/YABETOOPAY_ACCOUNT_ID manquant).",
+      );
+    }
   }
 
   // ==========================================================================
@@ -545,6 +563,7 @@ export class YabetooPayService {
     dto: CreateCheckoutSessionDto,
   ): Promise<CheckoutSessionResponse & { url: string }> {
     try {
+      this.assertConfigured();
       this.logger.log(
         `💳 Creating checkout session: ${dto.amount} ${dto.currency.toUpperCase()}`,
       );
@@ -610,6 +629,7 @@ export class YabetooPayService {
 
   async getSessionStatus(sessionId: string): Promise<any> {
     try {
+      this.assertConfigured();
       this.logger.log(`🔍 Checking session status: ${sessionId}`);
       const response = await this.sessionsClient.get(`/sessions/${sessionId}`);
       this.logger.log(`📊 Session status: ${JSON.stringify(response.data)}`);
@@ -631,6 +651,7 @@ export class YabetooPayService {
     dto: CreatePaymentIntentDto,
   ): Promise<PaymentIntentResponse> {
     try {
+      this.assertConfigured();
       this.logger.log(
         `💳 Creating payment intent: ${dto.amount} ${dto.currency}`,
       );
@@ -675,6 +696,7 @@ export class YabetooPayService {
     dto: ConfirmPaymentIntentDto,
   ): Promise<PaymentConfirmationResponse> {
     try {
+      this.assertConfigured();
       this.logger.log(`✅ Confirming payment intent: ${dto.intentId}`);
       this.logger.log(
         `📱 Phone: ${dto.paymentMethod.phone} | Operator: ${dto.paymentMethod.operator}`,
@@ -725,6 +747,7 @@ export class YabetooPayService {
 
   async getPaymentStatus(intentId: string): Promise<PaymentIntentResponse> {
     try {
+      this.assertConfigured();
       this.logger.log(`🔍 Checking payment status: ${intentId}`);
       const response = await this.apiClient.get<PaymentIntentResponse>(
         `/payment-intents/${intentId}`,
@@ -800,6 +823,7 @@ export class YabetooPayService {
     dto: CreateDisbursementDto,
   ): Promise<DisbursementResponse> {
     try {
+      this.assertConfigured();
       const country = (dto.country ?? 'CG').toUpperCase();
       // msisdn SANS le "+", juste les chiffres avec l'indicatif pays
       const msisdn = this.formatMsisdnForDisbursement(dto.phone, country);
@@ -864,6 +888,7 @@ export class YabetooPayService {
 
   async getDisbursement(disbursementId: string): Promise<DisbursementResponse> {
     try {
+      this.assertConfigured();
       this.logger.log(`🔍 Getting disbursement: ${disbursementId}`);
       // Endpoint : GET /v1/disbursement/{id} (SINGULIER)
       const response = await this.apiClient.get<DisbursementResponse>(

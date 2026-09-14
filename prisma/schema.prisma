@@ -55,6 +55,7 @@ model User {
   // Sécurité
   lastLoginAt            DateTime? @db.Timestamptz
   lastLoginIp            String?   @db.Inet
+  lastActiveAt DateTime? @db.Timestamptz
   passwordChangedAt      DateTime  @default(now()) @db.Timestamptz
   mustChangePassword     Boolean   @default(false)
   firstLoginAt           DateTime? @db.Timestamptz
@@ -78,6 +79,7 @@ model User {
   // Relations inversées
   cabinetUsers CabinetUser[]
   activityLogs ActivityLog[]
+  dailyActivity DailyUserActivity[]
   sessions     UserSession[]  // ← AJOUTER
   notifications       Notification[]
   createdEmployees    Employee[]             @relation("EmployeeCreatedBy")
@@ -243,6 +245,7 @@ model Company {
   departments           Department[]
   payrolls              Payroll[]
   payrollSettings       PayrollSettings[]
+  systemLogs SystemLog[]
   leaves                Leave[]
   absenceRequests AbsenceRequest[]
   permissionTickets PermissionTicket[]
@@ -817,6 +820,12 @@ model Leave {
   status LeaveStatus @default(PENDING)
 
 
+// ✅ AJOUT — reliquat de retour anticipé
+  carriedFromLeaveId String? @db.Uuid
+  carriedFromLeave   Leave?  @relation("LeaveCarryover", fields: [carriedFromLeaveId], references: [id], onDelete: SetNull)
+  carryoverChildren  Leave[] @relation("LeaveCarryover")
+
+
   plannedPayrollMonth  Int?
   plannedPayrollYear   Int?
   payrollIndemnityDays Decimal? @db.Decimal(5,2)
@@ -1085,6 +1094,14 @@ model Attendance {
   checkInLon  Decimal? @db.Decimal(11, 8)
   checkOutLat Decimal? @db.Decimal(10, 8)
   checkOutLon Decimal? @db.Decimal(11, 8)
+
+
+  checkInSiteId     String?  @db.Uuid
+  checkInSiteName   String?  @db.VarChar(100)
+  checkInDistance   Int?
+  checkOutSiteId    String?  @db.Uuid
+  checkOutSiteName  String?  @db.VarChar(100)
+  checkOutDistance  Int?
 
   // ✅ HEURES RÉELLES
  totalHours   Decimal? @db.Decimal(6, 2)
@@ -2546,6 +2563,8 @@ model Subscription {
   canceledAt         DateTime? @db.Timestamptz
   trialEndsAt        DateTime? @db.Timestamptz
 
+  downgradedAt       DateTime? @db.Timestamptz
+
   pricePerMonth Int    @default(0) @db.Integer
   currency      String @default("XAF") @db.Char(3)
 
@@ -2582,6 +2601,11 @@ model Payment {
   motekiSubscriptionId  String? @unique @db.VarChar(100) // connu seulement après le 1er paiement réussi (webhook)
   motekiCustomerEmail   String? @db.VarChar(255)          // clé de corrélation de secours pour le webhook
 
+
+  chariowSaleId        String? @unique @db.VarChar(100)
+  chariowProductId     String? @db.VarChar(100)
+  chariowCustomerEmail String? @db.VarChar(255)
+  chariowDiscountCode  String? @db.VarChar(100)
   // Montant
   amount   Int    @db.Integer
   currency String @default("XAF") @db.Char(3)
@@ -2619,7 +2643,9 @@ model Payment {
 }
 enum PaymentProvider {
   YABETOOPAY
+  CHARIOW
   MOTEKI
+  MANUAL
 
   @@map("payment_provider")
 }
@@ -4100,4 +4126,62 @@ enum EchelonSuggestionStatus {
   REJECTED
 
   @@map("echelon_suggestion_status")
+}
+
+
+
+enum SystemLogLevel {
+  INFO
+  WARNING
+  ERROR
+  ALERT
+  @@map("system_log_level")
+}
+
+model SystemLog {
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  source String @db.VarChar(100)
+  level  SystemLogLevel @default(INFO)
+  message String @db.Text
+  details Json?
+  companyId String?  @db.Uuid
+  company   Company? @relation(fields: [companyId], references: [id], onDelete: SetNull)
+  durationMs Int?
+  createdAt DateTime @default(now()) @db.Timestamptz
+
+  @@index([source])
+  @@index([level])
+  @@index([companyId])
+  @@index([createdAt])
+  @@map("system_logs")
+}
+model CronLock {
+  name      String   @id @db.VarChar(100)
+  lockedAt  DateTime @default(now()) @db.Timestamptz
+  expiresAt DateTime @db.Timestamptz
+  @@map("cron_locks")
+}
+model PlatformSettings {
+  id Int @id @default(1)
+  preShiftReminderMinutes Int @default(20)
+  updatedAt       DateTime @updatedAt @db.Timestamptz
+  updatedByUserId String?  @db.Uuid
+  @@map("platform_settings")
+}
+
+
+model DailyUserActivity {
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId String @db.Uuid
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  companyId String? @db.Uuid
+  date String @db.VarChar(10)
+  firstSeenAt DateTime @db.Timestamptz
+  lastSeenAt  DateTime @db.Timestamptz
+  activeMinutes Int @default(0)
+  requestCount  Int @default(0)
+  @@unique([userId, date])
+  @@index([date])
+  @@index([companyId])
+  @@map("daily_user_activity")
 }

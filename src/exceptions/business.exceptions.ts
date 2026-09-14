@@ -544,3 +544,34 @@ export class AttendanceAlreadyCheckedOutException extends ConflictException {
     });
   }
 }
+
+// ✅ Rejet géofencing : position hors du rayon autorisé de tous les sites.
+// Remplace l'ancien comportement "on note SUSPICIOUS_LOCATION mais on
+// accepte quand même" — désormais le backend est la seule autorité, il
+// bloque réellement le pointage.
+export class OutOfGeofenceException extends BadRequestException {
+  constructor(distance: number, nearestSiteName: string | null) {
+    super({
+      statusCode: 400,
+      message: nearestSiteName
+        ? `Vous êtes à ${distance}m de "${nearestSiteName}", hors de la zone autorisée. Rapprochez-vous ou utilisez le pointage manuel.`
+        : `Vous êtes à ${distance}m du lieu autorisé. Rapprochez-vous ou utilisez le pointage manuel.`,
+      error: 'OUT_OF_GEOFENCE',
+      distance,
+      nearestSiteName,
+    });
+  }
+}
+
+// ✅ Position GPS requise mais absente (géolocalisation activée pour
+// l'entreprise, mais le navigateur/l'appareil n'a fourni aucune position).
+export class LocationRequiredException extends BadRequestException {
+  constructor() {
+    super({
+      statusCode: 400,
+      message:
+        "Position GPS requise pour pointer. Activez la géolocalisation, ou utilisez le pointage manuel.",
+      error: 'LOCATION_REQUIRED',
+    });
+  }
+}

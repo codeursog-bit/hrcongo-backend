@@ -11,6 +11,7 @@ import {
 } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
 import { CompanySiteService } from './company-site.service';
+import { SubscriptionGuard } from '../subscriptions/guards/subscription.guard';
 import {
   CreateCompanySiteDto,
   UpdateCompanySiteDto,
@@ -19,7 +20,10 @@ import {
 @UseGuards(AuthGuard('jwt'))
 @Controller('companies/:companyId/sites')
 export class CompanySiteController {
-  constructor(private readonly companySiteService: CompanySiteService) {}
+  constructor(
+    private readonly companySiteService: CompanySiteService,
+    private readonly subscriptionGuard: SubscriptionGuard,
+  ) {}
 
   // GET /companies/:companyId/sites
   @Get()
@@ -29,10 +33,16 @@ export class CompanySiteController {
 
   // POST /companies/:companyId/sites
   @Post()
-  create(
+  async create(
     @Param('companyId') companyId: string,
     @Body() dto: CreateCompanySiteDto,
   ) {
+    // ✅ Le multi-sites GPS est une feature d'abonnement — avant ce
+    // correctif, n'importe quel plan pouvait créer des sites ici.
+    await this.subscriptionGuard.checkFeatureAccess(
+      companyId,
+      'hasAttendanceGPS',
+    );
     return this.companySiteService.create(companyId, dto);
   }
 

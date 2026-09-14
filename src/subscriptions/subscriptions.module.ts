@@ -52,6 +52,7 @@ import { SubscriptionsService } from './subscriptions.service';
 import { SubscriptionsController } from './subscriptions.controller';
 import { WebhooksController } from './webhooks.controller';
 import { MotekiWebhooksController } from './moteki-webhooks.controller';
+import { ChariowWebhooksController } from './chariow-webhooks.controller';
 import { SubscriptionGuard } from './guards/subscription.guard';
 import { AdminGuard } from '../auth/guards/admin.guard';
 import { SubscriptionCronService } from './cron/subscription.cron';
@@ -74,7 +75,8 @@ import { NotificationsModule } from '../notifications/notifications.module';
   controllers: [
     SubscriptionsController,
     WebhooksController, // ← webhook YabetooPay : conservé pour l'historique + les versements affiliés (disbursement.completed)
-    MotekiWebhooksController, // ← webhook Moteki : nouveau prestataire de collecte
+    MotekiWebhooksController, // ← webhook Moteki
+    ChariowWebhooksController, // ← webhook Chariow (Pulse) : 3e prestataire, redondance de Moteki
   ],
   providers: [
     SubscriptionsService,

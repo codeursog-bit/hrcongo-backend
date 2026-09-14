@@ -16,12 +16,17 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import * as webpush from 'web-push';
+import { SystemLogsService } from '../system-logs/system-logs.service';
 
 @Injectable()
 export class PushNotificationsService implements OnModuleInit {
   private readonly logger = new Logger(PushNotificationsService.name);
+  private vapidConfigured = false;
 
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private prisma: PrismaService,
+    private systemLogs: SystemLogsService,
+  ) {}
 
   // ─── Initialisation VAPID au démarrage du module ──────────────────────────
   onModuleInit() {
@@ -36,10 +41,18 @@ export class PushNotificationsService implements OnModuleInit {
       this.logger.warn(
         '   Génère tes clés avec : npx web-push generate-vapid-keys',
       );
+      // 🆕 Panne plateforme entière (personne ne reçoit de push) → doit être
+      // visible en prod, pas juste dans un stdout que personne ne regarde.
+      this.systemLogs.log({
+        source: 'push-notifications:startup',
+        level: 'ALERT',
+        message: 'Clés VAPID manquantes au démarrage — AUCUN push ne peut être envoyé sur toute la plateforme',
+      });
       return;
     }
 
     webpush.setVapidDetails(mailto, publicKey, privateKey);
+    this.vapidConfigured = true;
     this.logger.log('✅ Web Push initialisé (VAPID configuré)');
   }
 
@@ -102,6 +115,12 @@ export class PushNotificationsService implements OnModuleInit {
       actionUrls?: Record<string, string>;
     },
   ): Promise<void> {
+    if (!this.vapidConfigured) {
+      // Déjà loggé en ALERT au démarrage — pas la peine de spammer les logs
+      // à chaque tentative d'envoi, juste sortir proprement.
+      return;
+    }
+
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
       select: { pushToken: true, pushNotifEnabled: true },
@@ -114,6 +133,11 @@ export class PushNotificationsService implements OnModuleInit {
       subscription = JSON.parse(user.pushToken) as webpush.PushSubscription;
     } catch {
       this.logger.warn(`⚠️  Token push invalide pour userId: ${userId}`);
+      await this.systemLogs.log({
+        source: 'push-notifications:send',
+        level: 'WARNING',
+        message: `Token push illisible (JSON invalide) pour userId ${userId}`,
+      });
       return;
     }
 
@@ -142,11 +166,23 @@ export class PushNotificationsService implements OnModuleInit {
           `🗑️  Token push expiré pour userId: ${userId} — suppression`,
         );
         await this.unregisterToken(userId);
+        await this.systemLogs.log({
+          source: 'push-notifications:send',
+          level: 'WARNING',
+          message: `Abonnement push expiré (${err.statusCode}) pour userId ${userId} — token supprimé, l'employé doit se réabonner`,
+          details: { evaluated: 1, skipped: [{ employeeId: userId, reason: `Abonnement expiré (HTTP ${err.statusCode})` }] },
+        });
       } else {
         this.logger.error(
           `❌ Erreur push pour userId: ${userId}:`,
           err.message,
         );
+        await this.systemLogs.log({
+          source: 'push-notifications:send',
+          level: 'ERROR',
+          message: `Échec d'envoi push pour userId ${userId} : ${err.message}`,
+          details: { errors: [String(err?.stack ?? err)] },
+        });
       }
     }
   }

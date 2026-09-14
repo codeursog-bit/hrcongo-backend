@@ -544,10 +544,13 @@ import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
 import { YabetooPayService } from '../payments/yabetoopay.service';
 import { MotekiService } from '../payments/moteki.service';
+import { ChariowService } from '../payments/chariow.service';
 import { PLANS, getPlanPrice } from './config/plans.config';
 import { getMotekiPlanRef } from './config/moteki.config';
+import { getChariowProductId } from './config/chariow.config';
 import { UpgradeCheckoutDto } from './dto/upgrade-checkout.dto';
 import { MotekiCheckoutDto } from './dto/moteki-checkout.dto';
+import { ChariowCheckoutDto } from './dto/chariow-checkout.dto';
 import { AffiliateService } from '../affiliate/affiliate.service'; // ← AJOUT
 import { NotificationsService } from '../notifications/notifications.service';
 import { MailService } from '../mail/mail.service';
@@ -559,7 +562,8 @@ export class SubscriptionsService {
   constructor(
     private prisma: PrismaService,
     private yabetooPayService: YabetooPayService, // ← conservé UNIQUEMENT pour l'historique + les versements affiliés
-    private motekiService: MotekiService, // ← nouveau prestataire pour la collecte des paiements d'abonnement
+    private motekiService: MotekiService, // ← prestataire de collecte des paiements d'abonnement
+    private chariowService: ChariowService, // ← 3e prestataire de collecte, en redondance de Moteki
     private configService: ConfigService,
     private affiliateService: AffiliateService, // ← AJOUT
     private notificationsService: NotificationsService, // ← rappels J-7/J-3/J-1
@@ -631,6 +635,7 @@ export class SubscriptionsService {
           status: 'ACTIVE',
           pricePerMonth: 0,
           trialEndsAt: null,
+          downgradedAt: now,
         },
       });
       this.logger.log(
@@ -653,7 +658,7 @@ export class SubscriptionsService {
     for (const sub of expiredPaid) {
       await this.prisma.subscription.update({
         where: { id: sub.id },
-        data: { plan: 'FREE', status: 'ACTIVE', pricePerMonth: 0 },
+        data: { plan: 'FREE', status: 'ACTIVE', pricePerMonth: 0, downgradedAt: now },
       });
       this.logger.log(
         `📉 Abonnement ${sub.plan} non renouvelé : company ${sub.companyId} → FREE`,
@@ -1153,7 +1158,7 @@ export class SubscriptionsService {
       where: { id: paymentId },
     });
 
-    if (!payment || payment.provider !== 'MOTEKI' || !payment.motekiOrderId) {
+    if (!payment || payment.provider !== 'MOTEKI' || !payment.motekiOrderNumber) {
       throw new NotFoundException('Paiement Moteki introuvable');
     }
 
@@ -1165,17 +1170,23 @@ export class SubscriptionsService {
       return { activated: false, status: 'already_failed' };
     }
 
-    const order = await this.motekiService.getOrderStatus(payment.motekiOrderId);
+    // 🐛 CORRECTIF : on interroge par order_number ("MOT-xxx"), pas par
+    // l'UUID interne — voir GET /storefront/orders/{order_number} dans
+    // MotekiService.getOrderStatus.
+    const order = await this.motekiService.getOrderStatus(payment.motekiOrderNumber);
 
-    // Les valeurs exactes de payment_status/status ne sont pas garanties à
-    // 100% tant que la plateforme est en construction — on couvre les
-    // libellés les plus probables plutôt que de se fier à un seul mot.
-    const isPaid = ['paid', 'completed', 'succeeded'].includes(
-      (order.payment_status || order.status || '').toLowerCase(),
-    );
-    const isFailed = ['failed', 'cancelled', 'canceled', 'expired'].includes(
-      (order.payment_status || order.status || '').toLowerCase(),
-    );
+    // Valeurs officielles (doc "Statut des commandes") :
+    //   status         : pending | processing | completed | cancelled | refunded
+    //   payment_status : pending | awaiting_payment | paid | failed | refunded
+    // On vérifie les deux champs indépendamment plutôt qu'en cascade — un
+    // statut "cancelled" ne doit jamais être masqué par un payment_status
+    // resté à "pending".
+    const isPaid = order.payment_status === 'paid' || order.status === 'completed';
+    const isFailed =
+      order.payment_status === 'failed' ||
+      order.payment_status === 'refunded' ||
+      order.status === 'cancelled' ||
+      order.status === 'refunded';
 
     if (isPaid) {
       const { plan, billingPeriod } = (payment.metadata as any) ?? {};
@@ -1202,7 +1213,7 @@ export class SubscriptionsService {
       }
 
       this.logger.log(
-        `🎉 [Moteki] Commande ${payment.motekiOrderId} confirmée payée → abonnement activé pour company ${payment.companyId}`,
+        `🎉 [Moteki] Commande ${payment.motekiOrderNumber} confirmée payée → abonnement activé pour company ${payment.companyId}`,
       );
       return { activated: true, status: 'activated' };
     }
@@ -1212,7 +1223,7 @@ export class SubscriptionsService {
         where: { id: payment.id },
         data: { status: 'FAILED', failedAt: new Date() },
       });
-      this.logger.warn(`❌ [Moteki] Commande ${payment.motekiOrderId} échouée/annulée`);
+      this.logger.warn(`❌ [Moteki] Commande ${payment.motekiOrderNumber} échouée/annulée`);
       return { activated: false, status: 'failed' };
     }
 
@@ -1235,7 +1246,7 @@ export class SubscriptionsService {
       where: {
         provider: 'MOTEKI',
         status: 'PENDING',
-        motekiOrderId: { not: null },
+        motekiOrderNumber: { not: null },
         createdAt: { gte: cutoff },
       },
     });
@@ -1300,6 +1311,231 @@ export class SubscriptionsService {
       data: { status: 'FAILED', failedAt: new Date() },
     });
     this.logger.warn(`❌ [Moteki] Paiement ${paymentId} marqué FAILED (webhook)`);
+  }
+
+  // ==========================================================================
+  // 🛒 CHARIOW — INITIER UN CHECKOUT D'ABONNEMENT (achat d'une licence)
+  // ==========================================================================
+
+  async createChariowCheckout(companyId: string, dto: ChariowCheckoutDto) {
+    this.logger.log(
+      `🛒 [Chariow] Initiation checkout — company: ${companyId} — plan: ${dto.plan} (${dto.billingPeriod})`,
+    );
+
+    const currentSubscription = await this.prisma.subscription.findUnique({
+      where: { companyId },
+    });
+    if (!currentSubscription) {
+      throw new NotFoundException('Aucun abonnement trouvé');
+    }
+
+    const productId = getChariowProductId(dto.plan, dto.billingPeriod);
+    const expectedAmount = getPlanPrice(dto.plan, dto.billingPeriod);
+    const planConfig = PLANS[dto.plan];
+
+    const checkout = await this.chariowService.initiateCheckout({
+      productId,
+      customerEmail: dto.customerEmail,
+      customerFirstName: dto.customerFirstName,
+      customerLastName: dto.customerLastName,
+      customerPhoneNumber: dto.customerPhoneNumber,
+      customerPhoneCountryCode: dto.customerPhoneCountryCode ?? 'CG',
+      discountCode: dto.discountCode,
+      customMetadata: {
+        companyId,
+        plan: dto.plan,
+        billingPeriod: dto.billingPeriod,
+      },
+    });
+
+    if (!checkout.payment?.checkout_url) {
+      // Un produit "license" payant ne devrait jamais retourner step="completed"
+      // directement (ça, c'est réservé aux produits gratuits) — si ça arrive,
+      // mieux vaut le savoir tout de suite plutôt que de perdre le paiement.
+      this.logger.warn(
+        `⚠️ [Chariow] Checkout sans checkout_url pour la vente ${checkout.purchase?.id} — step reçu: ${checkout.step}`,
+      );
+    }
+
+    const payment = await this.prisma.payment.create({
+      data: {
+        subscriptionId: currentSubscription.id,
+        companyId,
+        provider: 'CHARIOW',
+        chariowSaleId: checkout.purchase.id,
+        chariowProductId: productId,
+        chariowCustomerEmail: dto.customerEmail,
+        chariowDiscountCode: dto.discountCode,
+        amount: expectedAmount,
+        currency: 'XAF',
+        status: 'PENDING',
+        description: `Abonnement ${planConfig.name} - ${dto.billingPeriod === 'yearly' ? 'Annuel' : 'Mensuel'} (Chariow)`,
+        metadata: {
+          plan: dto.plan,
+          billingPeriod: dto.billingPeriod,
+          chariowSaleId: checkout.purchase.id,
+          discountCode: dto.discountCode,
+        },
+      },
+    });
+
+    this.logger.log(
+      `💾 [Chariow] Payment record créé: ${payment.id} — vente ${checkout.purchase.id}`,
+    );
+
+    return {
+      paymentId: payment.id,
+      saleId: checkout.purchase.id,
+      status: checkout.purchase.status,
+      checkoutUrl: checkout.payment?.checkout_url,
+      plan: dto.plan,
+      billingPeriod: dto.billingPeriod,
+      amount: expectedAmount,
+    };
+  }
+
+  // ==========================================================================
+  // 🔎 CHARIOW — VÉRIFIER + ACTIVER UNE VENTE EN ATTENTE (POLLING)
+  // ==========================================================================
+  //
+  // Même principe que checkAndActivateMotekiOrder : Chariow ne prélève pas
+  // automatiquement le client (voir note en tête de chariow.service.ts), donc
+  // on ne fait confiance qu'à notre propre appel API pour savoir si la vente
+  // est payée — jamais au webhook seul, ni à license.expires_at.
+  // ==========================================================================
+
+  async checkAndActivateChariowSale(paymentId: string): Promise<{
+    activated: boolean;
+    status: string;
+  }> {
+    const payment = await this.prisma.payment.findUnique({
+      where: { id: paymentId },
+    });
+
+    if (!payment || payment.provider !== 'CHARIOW' || !payment.chariowSaleId) {
+      throw new NotFoundException('Paiement Chariow introuvable');
+    }
+
+    // Idempotence : déjà traité, on ne refait rien.
+    if (payment.status === 'SUCCEEDED') {
+      return { activated: true, status: 'already_succeeded' };
+    }
+    if (payment.status === 'FAILED') {
+      return { activated: false, status: 'already_failed' };
+    }
+
+    const sale = await this.chariowService.getSale(payment.chariowSaleId);
+
+    if (this.chariowService.isSalePaid(sale)) {
+      const { plan, billingPeriod } = (payment.metadata as any) ?? {};
+      if (!plan || !billingPeriod) {
+        this.logger.error(
+          `❌ [Chariow] Payment ${payment.id} sans plan/billingPeriod en metadata — activation manuelle requise.`,
+        );
+        return { activated: false, status: 'missing_metadata' };
+      }
+
+      // ℹ️ GET /sales/{id} ne renvoie pas la licence (contrairement à List
+      // Sales, qui a bien un post_purchase.licences) — on n'a donc pas la clé
+      // de licence ici. Ce n'est pas bloquant : elle ne sert qu'au suivi/
+      // révocation manuelle côté Chariow, jamais à l'accès app. On enregistre
+      // simplement le montant réellement encaissé (après réduction) et la
+      // référence de transaction pour la traçabilité comptable.
+      const actualAmount = Math.round(sale.amount?.value ?? Number(payment.amount));
+
+      await this.prisma.payment.update({
+        where: { id: payment.id },
+        data: {
+          status: 'SUCCEEDED',
+          paidAt: new Date(),
+          amount: actualAmount,
+          chariowDiscountCode: sale.discount?.code ?? payment.chariowDiscountCode,
+          metadata: {
+            ...((payment.metadata as any) ?? {}),
+            chariowTransactionId: sale.payment?.transaction_id ?? null,
+            chariowGateway: sale.payment?.gateway ?? null,
+            originalAmount: sale.original_amount?.value ?? null,
+            discountAmount: sale.discount_amount?.value ?? null,
+          },
+        },
+      });
+
+      // ✅ Même logique d'ancrage de date que Moteki/YabetooPay — un
+      // paiement Chariow est un paiement ponctuel comme un autre, la date
+      // d'expiration réelle vient de notre propre calcul, pas de Chariow.
+      await this.activateUpgrade(payment.companyId, plan, billingPeriod);
+
+      try {
+        await this.affiliateService.handleSuccessfulPayment(payment.id);
+      } catch (err) {
+        this.logger.error('[Affiliate] Erreur calcul commission (Chariow):', err);
+      }
+
+      this.logger.log(
+        `🎉 [Chariow] Vente ${payment.chariowSaleId} confirmée payée → abonnement activé pour company ${payment.companyId}`,
+      );
+      return { activated: true, status: 'activated' };
+    }
+
+    if (this.chariowService.isSaleFailed(sale)) {
+      await this.prisma.payment.update({
+        where: { id: payment.id },
+        data: { status: 'FAILED', failedAt: new Date() },
+      });
+      this.logger.warn(`❌ [Chariow] Vente ${payment.chariowSaleId} échouée/annulée`);
+      return { activated: false, status: 'failed' };
+    }
+
+    // Toujours en attente — rien à faire, le prochain passage du cron
+    // (ou le prochain appel depuis /success) retentera.
+    return { activated: false, status: 'pending' };
+  }
+
+  // ==========================================================================
+  // ⏰ CHARIOW — CRON : VÉRIFIER TOUTES LES VENTES EN ATTENTE
+  // (filet de sécurité — tourne même si le client ne revient jamais sur
+  // /success après avoir payé)
+  // ==========================================================================
+
+  async checkPendingChariowSales() {
+    const cutoff = new Date();
+    cutoff.setHours(cutoff.getHours() - 48); // au-delà, on arrête de sonder (probablement abandonné)
+
+    const pending = await this.prisma.payment.findMany({
+      where: {
+        provider: 'CHARIOW',
+        status: 'PENDING',
+        chariowSaleId: { not: null },
+        createdAt: { gte: cutoff },
+      },
+    });
+
+    let activated = 0;
+    for (const payment of pending) {
+      try {
+        const result = await this.checkAndActivateChariowSale(payment.id);
+        if (result.activated) activated++;
+      } catch (err) {
+        this.logger.error(`Erreur vérification vente Chariow ${payment.id}:`, err);
+      }
+    }
+
+    const stale = await this.prisma.payment.updateMany({
+      where: {
+        provider: 'CHARIOW',
+        status: 'PENDING',
+        createdAt: { lt: cutoff },
+      },
+      data: { status: 'FAILED', failedAt: new Date() },
+    });
+
+    if (pending.length > 0 || stale.count > 0) {
+      this.logger.log(
+        `🔎 [Chariow] Polling ventes en attente : ${pending.length} vérifiée(s), ${activated} activée(s), ${stale.count} expirée(s) sans réponse.`,
+      );
+    }
+
+    return { checked: pending.length, activated, expired: stale.count };
   }
 
   // ==========================================================================
@@ -1377,6 +1613,7 @@ export class SubscriptionsService {
         currentPeriodStart: periodStart,
         currentPeriodEnd: periodEnd,
         canceledAt: null,
+        downgradedAt: null, // ré-abonnement confirmé → on efface le marqueur "rétrogradé"
       },
     });
 

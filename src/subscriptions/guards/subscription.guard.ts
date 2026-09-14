@@ -327,6 +327,30 @@ export class SubscriptionGuard {
   constructor(private prisma: PrismaService) {}
 
   // ==========================================================================
+  // 🔔 HELPER : blocage lié à l'abonnement — reconnaissable côté frontend
+  // ==========================================================================
+  //
+  // Toute exception liée à un abonnement expiré/inactif/limite dépassée
+  // passe par ici plutôt que par un simple `new ForbiddenException(message)`
+  // — le corps structuré (`error: 'SUBSCRIPTION_BLOCKED'`) permet au client
+  // HTTP (voir utils/services/api.ts) de détecter CE cas précis, quelle que
+  // soit l'action bloquée (ajout employé, formation, congé, pointage...), et
+  // d'afficher une vraie modale au lieu d'un message générique.
+  // ==========================================================================
+
+  private throwSubscriptionBlocked(
+    message: string,
+    audience: 'ADMIN' | 'EMPLOYEE' = 'ADMIN',
+  ): never {
+    throw new ForbiddenException({
+      statusCode: 403,
+      error: 'SUBSCRIPTION_BLOCKED',
+      audience,
+      message,
+    });
+  }
+
+  // ==========================================================================
   // ✅ VÉRIFIER SI UNE FEATURE EST DISPONIBLE
   // ==========================================================================
 
@@ -374,7 +398,7 @@ export class SubscriptionGuard {
       subscription.status !== 'ACTIVE' &&
       subscription.status !== 'TRIALING'
     ) {
-      throw new ForbiddenException(
+      this.throwSubscriptionBlocked(
         "Votre abonnement n'est pas actif. Veuillez renouveler votre abonnement.",
       );
     }
@@ -382,7 +406,7 @@ export class SubscriptionGuard {
     // ✅ Si TRIALING, vérifier que l'essai n'est pas expiré
     if (subscription.status === 'TRIALING' && subscription.trialEndsAt) {
       if (new Date() > subscription.trialEndsAt) {
-        throw new ForbiddenException(
+        this.throwSubscriptionBlocked(
           "Votre période d'essai est expirée. Veuillez upgrader votre abonnement.",
         );
       }
@@ -399,7 +423,7 @@ export class SubscriptionGuard {
       subscription.currentPeriodEnd &&
       new Date() > subscription.currentPeriodEnd
     ) {
-      throw new ForbiddenException(
+      this.throwSubscriptionBlocked(
         "Votre abonnement est arrivé à échéance. Veuillez le renouveler pour continuer à profiter de cette fonctionnalité.",
       );
     }
@@ -407,7 +431,7 @@ export class SubscriptionGuard {
     const hasAccess = canUseFeature(subscription.plan, feature);
 
     if (!hasAccess) {
-      throw new ForbiddenException(
+      this.throwSubscriptionBlocked(
         `Cette fonctionnalité n'est pas disponible avec le plan ${subscription.plan}. ` +
           `Veuillez upgrader votre abonnement pour y accéder.`,
       );
@@ -455,13 +479,13 @@ export class SubscriptionGuard {
         subscription.status !== 'ACTIVE' &&
         subscription.status !== 'TRIALING'
       ) {
-        throw new ForbiddenException('Abonnement invalide ou inactif');
+        this.throwSubscriptionBlocked('Abonnement invalide ou inactif');
       }
 
       // ✅ Vérifier expiration essai
       if (subscription.status === 'TRIALING' && subscription.trialEndsAt) {
         if (new Date() > subscription.trialEndsAt) {
-          throw new ForbiddenException("Votre période d'essai est expirée.");
+          this.throwSubscriptionBlocked("Votre période d'essai est expirée.");
         }
       }
 
@@ -475,7 +499,7 @@ export class SubscriptionGuard {
         subscription.currentPeriodEnd &&
         new Date() > subscription.currentPeriodEnd
       ) {
-        throw new ForbiddenException(
+        this.throwSubscriptionBlocked(
           "Votre abonnement est arrivé à échéance. Veuillez le renouveler.",
         );
       }
@@ -521,7 +545,7 @@ export class SubscriptionGuard {
         const defaultMessage =
           `Limite atteinte : ${currentCount}/${maxLimit} ${this.getLimitLabel(limitType)}. ` +
           `Veuillez upgrader votre abonnement.`;
-        throw new ForbiddenException(errorMessage || defaultMessage);
+        this.throwSubscriptionBlocked(errorMessage || defaultMessage);
       }
     });
   }
@@ -753,13 +777,15 @@ export class SubscriptionGuard {
     if (!blocked) return;
 
     if (role && SubscriptionGuard.HR_ROLES.includes(role)) {
-      throw new ForbiddenException(
+      this.throwSubscriptionBlocked(
         "L'abonnement de votre entreprise est terminé et l'accès est désormais limité au plan Gratuit. Renouvelez votre abonnement pour redonner à votre équipe un accès complet.",
+        'ADMIN',
       );
     }
 
-    throw new ForbiddenException(
+    this.throwSubscriptionBlocked(
       "Accès bloqué. Merci de contacter votre RH ou administrateur pour régulariser l'abonnement de votre entreprise.",
+      'EMPLOYEE',
     );
   }
 }

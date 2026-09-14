@@ -188,25 +188,30 @@ export class MotekiService {
   // ==========================================================================
   // 🔍 STATUT D'UNE COMMANDE (pour le polling — remplace la dépendance au
   // webhook tant qu'il n'est pas encore fiable côté Moteki)
-  // GET /orders/{uuid} — scope read:store (qu'on a déjà)
+  //
+  // 🐛 CORRECTIF : l'ancien code appelait GET /orders/{id}, qui n'existe pas
+  // dans la doc Moteki — d'où l'échec silencieux systématique du polling.
+  // Le vrai endpoint (doc "Statut des commandes") est GET
+  // /storefront/orders/{order_number}, avec le NUMÉRO de commande
+  // ("MOT-xxx"/"ORD-xxx"), pas l'UUID interne — scope read:store, qu'on a déjà.
   // ==========================================================================
 
-  async getOrderStatus(orderId: string): Promise<{
+  async getOrderStatus(orderNumber: string): Promise<{
     id: string;
     order_number: string;
-    status: string;
-    payment_status: string;
+    status: string; // pending | processing | completed | cancelled | refunded
+    payment_status: string; // pending | awaiting_payment | paid | failed | refunded
     payment_method: string;
     total_amount: number;
     created_at: string;
   }> {
     try {
       this.assertConfigured();
-      const response = await this.client.get(`/orders/${orderId}`);
+      const response = await this.client.get(`/storefront/orders/${orderNumber}`);
       return response.data;
     } catch (error: any) {
       this.logger.error(
-        `❌ Échec récupération statut commande Moteki ${orderId}:`,
+        `❌ Échec récupération statut commande Moteki ${orderNumber}:`,
         error.response?.data || error.message,
       );
       throw new BadRequestException(

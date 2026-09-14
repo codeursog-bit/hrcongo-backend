@@ -16,6 +16,8 @@ import {
   AttendanceAlreadyExistsException,
   AttendanceCheckOutMissingException,
   AttendanceAlreadyCheckedOutException,
+  OutOfGeofenceException,
+  LocationRequiredException,
 } from '../../exceptions/business.exceptions';
 import {
   AttendanceUtilsService,
@@ -248,10 +250,28 @@ export class AttendanceCheckService {
     const startMinute = shift?.startMinute ?? 0;
 
     // ── GPS multi-sites ────────────────────────────────────────────────────
-    let statusNote = notes;
-    let isSuspicious = false;
+    // ✅ Le backend est désormais la SEULE autorité : si la géolocalisation
+    // est activée pour l'entreprise (hasAttendanceGPS), une position est
+    // exigée et réellement vérifiée. Fini le "Forcer" côté client qui
+    // laissait passer n'importe quoi (notamment les PC, dont la précision
+    // GPS/Wi-Fi est presque toujours mauvaise) — ici on rejette pour de bon.
+    const geofencingConfigured = await this.companySiteService.isGeofencingConfigured(
+      user.companyId,
+    );
 
-    if (latitude && longitude) {
+    let statusNote = notes;
+    let matchedSiteId: string | null = null;
+    let matchedSiteName: string | null = null;
+    let matchedDistance: number | null = null;
+
+    if (geofencingConfigured) {
+      // Un site (ou la position principale) est configuré → la position est
+      // OBLIGATOIRE et VÉRIFIÉE ici, côté serveur, quoi qu'ait décidé le
+      // frontend. Plus de bypass "Forcer" possible.
+      if (latitude == null || longitude == null) {
+        throw new LocationRequiredException();
+      }
+
       const siteCheck = await this.companySiteService.checkPositionInAnySite(
         user.companyId,
         latitude,
@@ -259,11 +279,20 @@ export class AttendanceCheckService {
         (la1, lo1, la2, lo2) =>
           this.utils.getDistanceFromLatLonInMeters(la1, lo1, la2, lo2),
       );
+
       if (!siteCheck.matched) {
-        isSuspicious = true;
-        statusNote = 'SUSPICIOUS_LOCATION';
+        throw new OutOfGeofenceException(
+          siteCheck.distance ?? 0,
+          siteCheck.siteName,
+        );
       }
+
+      matchedSiteId = siteCheck.siteId;
+      matchedSiteName = siteCheck.siteName;
+      matchedDistance = siteCheck.distance;
     }
+    // Si rien n'est configuré pour l'entreprise, le pointage reste possible
+    // sans position (comportement legacy) — rien à vérifier ici.
 
     // ── Retard ─────────────────────────────────────────────────────────────
     const tolerance = shift
@@ -290,9 +319,12 @@ export class AttendanceCheckService {
       checkIn: now,
       checkInLat: latitude ?? null,
       checkInLon: longitude ?? null,
+      checkInSiteId: matchedSiteId,
+      checkInSiteName: matchedSiteName,
+      checkInDistance: matchedDistance,
       status: attendanceStatus,
       notes: statusNote ?? null,
-    };
+    } as any;
 
     // ── Créer ou mettre à jour ─────────────────────────────────────────────
     const attendance = existing
@@ -311,14 +343,12 @@ export class AttendanceCheckService {
 
     // ── Notification admin ─────────────────────────────────────────────────
     this.gateway.sendAdminNotification({
-      type: isSuspicious ? 'ALERT' : 'CHECK_IN',
+      type: isLate ? 'ALERT' : 'CHECK_IN',
       employeeId,
-      title: isSuspicious
-        ? '🚨 Alerte GPS'
-        : isLate
-          ? '⏰ Retard'
-          : '✅ Pointage',
-      message: `${employee.firstName} ${employee.lastName} — ${now.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })}`,
+      title: isLate ? '⏰ Retard' : '✅ Pointage',
+      message:
+        `${employee.firstName} ${employee.lastName} — ${now.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })}` +
+        (matchedSiteName ? ` (${matchedSiteName})` : ''),
       avatar: employee.photoUrl ?? undefined,
     });
 
@@ -387,6 +417,36 @@ export class AttendanceCheckService {
       select: { firstName: true, lastName: true, photoUrl: true },
     });
     if (!employee) throw new EmployeeNotFoundException(employeeId);
+
+    // ── GPS multi-sites (même règle qu'au checkIn) ───────────────────────────
+    let checkOutSiteId: string | null = null;
+    let checkOutSiteName: string | null = null;
+    let checkOutDistance: number | null = null;
+
+    const geofencingConfiguredOut =
+      await this.companySiteService.isGeofencingConfigured(user.companyId);
+
+    if (geofencingConfiguredOut) {
+      if (latitude == null || longitude == null) {
+        throw new LocationRequiredException();
+      }
+      const siteCheckOut = await this.companySiteService.checkPositionInAnySite(
+        user.companyId,
+        latitude,
+        longitude,
+        (la1, lo1, la2, lo2) =>
+          this.utils.getDistanceFromLatLonInMeters(la1, lo1, la2, lo2),
+      );
+      if (!siteCheckOut.matched) {
+        throw new OutOfGeofenceException(
+          siteCheckOut.distance ?? 0,
+          siteCheckOut.siteName,
+        );
+      }
+      checkOutSiteId = siteCheckOut.siteId;
+      checkOutSiteName = siteCheckOut.siteName;
+      checkOutDistance = siteCheckOut.distance;
+    }
 
     // ── Settings ───────────────────────────────────────────────────────────
     const ps = await this.prisma.payrollSettings.findFirst({
@@ -489,6 +549,9 @@ export class AttendanceCheckService {
         checkOut: now,
         checkOutLat: latitude ?? null,
         checkOutLon: longitude ?? null,
+        checkOutSiteId,
+        checkOutSiteName,
+        checkOutDistance,
         totalHours,
         normalHours: ot.normalHours,
         overtime10: ot.overtime10,

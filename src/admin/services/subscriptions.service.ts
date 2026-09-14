@@ -4,8 +4,11 @@
 // ============================================================================
 
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import type { Payment } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import {
+  ActivateSubscriptionDto,
+  SetSubscriptionPeriodDto,
   UpdateSubscriptionPlanDto,
   SuspendSubscriptionDto,
   ExtendSubscriptionDto,
@@ -25,9 +28,63 @@ export class AdminSubscriptionsService {
   constructor(private prisma: PrismaService) {}
 
   /**
-   * Réactive l'abonnement d'une entreprise (statut → ACTIVE).
+   * Liste tous les abonnements avec leur échéance, pour repérer ceux qui
+   * expirent bientôt ou qui sont déjà expirés. Un abonnement expiré garde
+   * toujours son plan/statut actuel affiché — rien n'est masqué.
    */
-  async activate(companyId: string, actorUserId: string, reason?: string) {
+  async getAll(filters?: { expiringInDays?: number; expired?: boolean; status?: string }) {
+    const where: any = {};
+    const now = new Date();
+
+    if (filters?.status) {
+      where.status = filters.status;
+    }
+
+    if (filters?.expired) {
+      where.currentPeriodEnd = { lt: now };
+    } else if (filters?.expiringInDays !== undefined) {
+      const limit = new Date(now.getTime() + filters.expiringInDays * 24 * 60 * 60 * 1000);
+      where.currentPeriodEnd = { gte: now, lte: limit };
+    }
+
+    const subscriptions = await this.prisma.subscription.findMany({
+      where,
+      include: {
+        company: {
+          select: { id: true, legalName: true, tradeName: true, archivedAt: true },
+        },
+      },
+      orderBy: { currentPeriodEnd: 'asc' },
+    });
+
+    return subscriptions
+      // Les entreprises archivées sont déjà traitées par l'archivage
+      // (abonnement annulé) — pas utile de les remonter dans ce triage.
+      .filter((s) => !s.company.archivedAt)
+      .map((s) => {
+        const daysRemaining = Math.ceil(
+          (s.currentPeriodEnd.getTime() - now.getTime()) / (24 * 60 * 60 * 1000),
+        );
+        return {
+          companyId: s.companyId,
+          companyName: s.company.tradeName || s.company.legalName,
+          plan: s.plan,
+          status: s.status,
+          pricePerMonth: s.pricePerMonth,
+          currentPeriodEnd: s.currentPeriodEnd,
+          daysRemaining,
+          isExpired: daysRemaining < 0,
+        };
+      });
+  }
+
+  /**
+   * Réactive l'abonnement d'une entreprise (statut → ACTIVE).
+   * Si `amount` est fourni, enregistre aussi le paiement manuel encaissé
+   * hors plateforme (virement, cash, mobile money) — il apparaît alors
+   * dans le CA (/admin/billing) comme n'importe quel paiement YabetooPay.
+   */
+  async activate(companyId: string, dto: ActivateSubscriptionDto, actorUserId: string) {
     const subscription = await this.getRawOrThrow(companyId);
 
     const updated = await this.prisma.subscription.update({
@@ -38,14 +95,84 @@ export class AdminSubscriptionsService {
       },
     });
 
+    let payment: Payment | null = null;
+    if (dto.amount && dto.amount > 0) {
+      payment = await this.recordManualPayment(companyId, subscription.id, {
+        amount: dto.amount,
+        paymentMethod: dto.paymentMethod,
+        description: `Réactivation manuelle par le super admin${dto.reason ? ' — ' + dto.reason : ''}`,
+      });
+    }
+
     await this.logAction(actorUserId, companyId, {
       action: 'SUBSCRIPTION_ACTIVATED',
       description: `Abonnement de l'entreprise ${companyId} réactivé par le super admin`,
       changes: { before: { status: subscription.status }, after: { status: updated.status } },
-      metadata: reason ? { reason } : undefined,
+      metadata: {
+        ...(dto.reason ? { reason: dto.reason } : {}),
+        paymentRecorded: !!payment,
+        paymentId: payment?.id,
+      },
     });
 
-    return updated;
+    return { subscription: updated, payment };
+  }
+
+  /**
+   * Définit une période précise (date de début optionnelle → date de fin
+   * obligatoire) et le cycle de facturation (mensuel/annuel), au lieu de
+   * juste "prolonger de N jours". Utile pour coller exactement à ce que
+   * le client a réellement payé (ex: du 1er janvier au 31 décembre).
+   */
+  async setPeriod(companyId: string, dto: SetSubscriptionPeriodDto, actorUserId: string) {
+    const subscription = await this.getRawOrThrow(companyId);
+
+    const endDate = new Date(dto.endDate);
+    const startDate = dto.startDate ? new Date(dto.startDate) : subscription.currentPeriodStart;
+
+    const updated = await this.prisma.subscription.update({
+      where: { companyId },
+      data: {
+        status: 'ACTIVE',
+        canceledAt: null,
+        currentPeriodStart: startDate,
+        currentPeriodEnd: endDate,
+        billingCycle: dto.billingCycle ?? subscription.billingCycle,
+      },
+    });
+
+    let payment: Payment | null = null;
+    if (dto.amount && dto.amount > 0) {
+      payment = await this.recordManualPayment(companyId, subscription.id, {
+        amount: dto.amount,
+        paymentMethod: dto.paymentMethod,
+        description: `Période définie manuellement (${startDate.toLocaleDateString('fr-FR')} → ${endDate.toLocaleDateString('fr-FR')}) par le super admin${dto.reason ? ' — ' + dto.reason : ''}`,
+      });
+    }
+
+    await this.logAction(actorUserId, companyId, {
+      action: 'SUBSCRIPTION_PERIOD_SET',
+      description: `Période de l'abonnement de l'entreprise ${companyId} définie du ${startDate.toLocaleDateString('fr-FR')} au ${endDate.toLocaleDateString('fr-FR')} par le super admin`,
+      changes: {
+        before: {
+          currentPeriodStart: subscription.currentPeriodStart,
+          currentPeriodEnd: subscription.currentPeriodEnd,
+          billingCycle: subscription.billingCycle,
+        },
+        after: {
+          currentPeriodStart: updated.currentPeriodStart,
+          currentPeriodEnd: updated.currentPeriodEnd,
+          billingCycle: updated.billingCycle,
+        },
+      },
+      metadata: {
+        ...(dto.reason ? { reason: dto.reason } : {}),
+        paymentRecorded: !!payment,
+        paymentId: payment?.id,
+      },
+    });
+
+    return { subscription: updated, payment };
   }
 
   /**
@@ -104,8 +231,10 @@ export class AdminSubscriptionsService {
   }
 
   /**
-   * Prolonge la période courante d'un abonnement de N jours
-   * (paiement manuel/hors ligne, geste commercial, etc.)
+   * Prolonge la période courante d'un abonnement de N jours.
+   * Même logique que `activate` pour le paiement manuel optionnel : si
+   * `amount` est fourni, c'est un renouvellement payé hors plateforme et
+   * ça compte dans le CA ; sinon c'est un geste gratuit, rien n'est facturé.
    */
   async extend(companyId: string, dto: ExtendSubscriptionDto, actorUserId: string) {
     const subscription = await this.getRawOrThrow(companyId);
@@ -125,6 +254,15 @@ export class AdminSubscriptionsService {
       },
     });
 
+    let payment: Payment | null = null;
+    if (dto.amount && dto.amount > 0) {
+      payment = await this.recordManualPayment(companyId, subscription.id, {
+        amount: dto.amount,
+        paymentMethod: dto.paymentMethod,
+        description: `Prolongation manuelle de ${dto.days} jour(s) par le super admin${dto.reason ? ' — ' + dto.reason : ''}`,
+      });
+    }
+
     await this.logAction(actorUserId, companyId, {
       action: 'SUBSCRIPTION_EXTENDED',
       description: `Abonnement de l'entreprise ${companyId} prolongé de ${dto.days} jour(s) par le super admin`,
@@ -132,15 +270,44 @@ export class AdminSubscriptionsService {
         before: { currentPeriodEnd: subscription.currentPeriodEnd },
         after: { currentPeriodEnd: updated.currentPeriodEnd },
       },
-      metadata: dto.reason ? { reason: dto.reason } : undefined,
+      metadata: {
+        ...(dto.reason ? { reason: dto.reason } : {}),
+        paymentRecorded: !!payment,
+        paymentId: payment?.id,
+      },
     });
 
-    return updated;
+    return { subscription: updated, payment };
   }
 
   // ==========================================================================
   // 🔧 Helpers privés
   // ==========================================================================
+
+  /**
+   * Enregistre un paiement encaissé hors plateforme (virement, cash, mobile
+   * money) directement en SUCCEEDED — il n'y a pas de webhook à attendre
+   * puisque l'argent a déjà été reçu au moment où le super admin clique.
+   */
+  private async recordManualPayment(
+    companyId: string,
+    subscriptionId: string,
+    data: { amount: number; paymentMethod?: string; description: string },
+  ) {
+    return this.prisma.payment.create({
+      data: {
+        subscriptionId,
+        companyId,
+        provider: 'MANUAL',
+        amount: data.amount,
+        currency: 'XAF',
+        status: 'SUCCEEDED',
+        paymentMethod: data.paymentMethod ?? 'Autre',
+        description: data.description,
+        paidAt: new Date(),
+      },
+    });
+  }
 
   private async getRawOrThrow(companyId: string) {
     const subscription = await this.prisma.subscription.findUnique({

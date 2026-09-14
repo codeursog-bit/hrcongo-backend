@@ -179,6 +179,7 @@ import helmet from 'helmet';
 import cookieParser from 'cookie-parser';
 import * as bodyParser from 'body-parser';
 import { PrismaService } from './prisma/prisma.service';
+import { ActivityTrackingInterceptor } from './user-activity/activity-tracking.interceptor';
 import { GlobalExceptionFilter } from './filters/global-exception.filter';
 
 async function bootstrap() {
@@ -342,6 +343,11 @@ async function bootstrap() {
     // ════════════════════════════════════════════════════════════════════════
     const prismaForFilter = app.get(PrismaService);
     app.useGlobalFilters(new GlobalExceptionFilter(prismaForFilter));
+
+    // ════════════════════════════════════════════════════════════════════════
+    // 👀 TRACKING PRÉSENCE / TEMPS ACTIF (super admin → "en ligne maintenant")
+    // ════════════════════════════════════════════════════════════════════════
+    app.useGlobalInterceptors(app.get(ActivityTrackingInterceptor));
 
     // ════════════════════════════════════════════════════════════════════════
     // 🚀 DÉMARRAGE

@@ -42,6 +42,7 @@ import { PayrollSettingsModule } from './payroll/settings/settings.module';
 import { FiscalModule } from './payroll/fiscal/fiscal.module';
 import { PayrollsModule } from './payrolls/payrolls.module';
 import { AdminModule } from './admin/admin.module';
+import { UserActivityModule } from './user-activity/user-activity.module';
 import { BonusTemplatesModule } from './bonus-templates/bonus-templates.module';
 import { CompanyTaxModule } from './company-taxes/company-tax.module';
 import { CabinetModule } from './cabinet/cabinet.module';
@@ -120,6 +121,7 @@ import { AbsenceTrackingModule } from './absence-tracking/absence-tracking.modul
 
     // ── SAAS / CABINET ───────────────────────────────────────────────────────
     AdminModule,
+    UserActivityModule,
     CabinetModule,
 
     // ── GESTION ──────────────────────────────────────────────────────────────

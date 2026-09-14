@@ -19,10 +19,13 @@ import { AuthGuard } from '@nestjs/passport';
 import { SubscriptionsService } from './subscriptions.service';
 import { UpgradeCheckoutDto } from './dto/upgrade-checkout.dto';
 import { MotekiCheckoutDto } from './dto/moteki-checkout.dto';
+import { ChariowCheckoutDto } from './dto/chariow-checkout.dto';
 import { SubscriptionGuard } from './guards/subscription.guard';
 import { AdminGuard } from '../auth/guards/admin.guard';
 import { PLANS } from './config/plans.config';
 import { MotekiService } from '../payments/moteki.service';
+import { YabetooPayService } from '../payments/yabetoopay.service';
+import { ChariowService } from '../payments/chariow.service';
 
 @Controller('subscriptions')
 @UseGuards(AuthGuard('jwt'))
@@ -31,6 +34,8 @@ export class SubscriptionsController {
     private readonly subscriptionsService: SubscriptionsService,
     private readonly subscriptionGuard: SubscriptionGuard,
     private readonly motekiService: MotekiService,
+    private readonly yabetooPayService: YabetooPayService,
+    private readonly chariowService: ChariowService,
   ) {}
 
   // ==========================================================================
@@ -134,8 +139,21 @@ export class SubscriptionsController {
 
   @Get('payment-provider')
   getActivePaymentProvider() {
-    const provider = this.motekiService.isConfigured() ? 'MOTEKI' : 'YABETOOPAY';
-    return { provider };
+    // Priorité (bascule automatique, redondance à 3 prestataires) :
+    // Moteki → Chariow → YabetooPay. Si aucun n'est configuré, on le dit
+    // clairement plutôt que de planter — le frontend peut afficher un
+    // message adapté au lieu d'un checkout cassé.
+    //
+    // ⚠️ Cette bascule ne couvre que "quel prestataire est CONFIGURÉ au
+    // démarrage" (clé API présente en env) — pas un vrai failover à chaud si
+    // Moteki répond mais échoue en cours de requête (ex: 500 ponctuel). Pour
+    // ça, il faudrait détecter l'échec runtime et rebasculer dynamiquement —
+    // pas encore implémenté, à ajouter si les pannes Moteki sont fréquentes
+    // en cours de checkout plutôt qu'au démarrage.
+    if (this.motekiService.isConfigured()) return { provider: 'MOTEKI' as const };
+    if (this.chariowService.isConfigured()) return { provider: 'CHARIOW' as const };
+    if (this.yabetooPayService.isConfigured()) return { provider: 'YABETOOPAY' as const };
+    return { provider: 'NONE' as const };
   }
 
   @Get('moteki/payment-methods')
@@ -199,6 +217,52 @@ export class SubscriptionsController {
     }
 
     return this.subscriptionsService.checkAndActivateMotekiOrder(paymentId);
+  }
+
+  // ==========================================================================
+  // 🛒 CHARIOW — INITIER UN CHECKOUT D'ABONNEMENT (3e prestataire, redondance)
+  // ==========================================================================
+
+  @Post('upgrade/chariow')
+  @HttpCode(HttpStatus.OK)
+  @UseGuards(AdminGuard)
+  async upgradeSubscriptionViaChariow(
+    @Body() dto: ChariowCheckoutDto,
+    @Request() req,
+  ) {
+    const user = req.user;
+    if (!user.companyId)
+      throw new ForbiddenException('Aucune entreprise associée');
+
+    return this.subscriptionsService.createChariowCheckout(
+      user.companyId,
+      dto,
+    );
+  }
+
+  // ==========================================================================
+  // 🔎 CHARIOW — VÉRIFIER À LA DEMANDE SI UNE VENTE EST PAYÉE
+  // ==========================================================================
+
+  @Post('chariow/check-sale/:paymentId')
+  @HttpCode(HttpStatus.OK)
+  async checkChariowSale(
+    @Param('paymentId') paymentId: string,
+    @Request() req,
+  ) {
+    const user = req.user;
+    if (!user.companyId)
+      throw new ForbiddenException('Aucune entreprise associée');
+
+    const payment = await this.subscriptionsService.getPaymentOwnedByCompany(
+      paymentId,
+      user.companyId,
+    );
+    if (!payment) {
+      throw new ForbiddenException('Paiement introuvable pour votre entreprise');
+    }
+
+    return this.subscriptionsService.checkAndActivateChariowSale(paymentId);
   }
 
   // ==========================================================================

@@ -50,4 +50,12 @@ export class CreateLeaveDto {
   @IsString()
   @IsOptional()
   attachmentUrl?: string;
+
+  // ✅ Demande de rattrapage d'un reliquat de retour anticipé — id du congé
+  // source (celui qui a un forfeitedDays > 0). Voir createCarryoverLeave().
+  // Passe par le circuit normal PENDING → validation RH, mais ne touche
+  // jamais le solde/cycle en cours ni l'indemnité (voir leaves.service.ts).
+  @IsUUID()
+  @IsOptional()
+  carriedFromLeaveId?: string;
 }

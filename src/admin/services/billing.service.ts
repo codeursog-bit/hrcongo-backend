@@ -14,17 +14,19 @@ export class BillingService {
   async getBillingStats() {
     this.logger.log('💰 Récupération stats billing...');
 
-    const [totalRevenue, recentTransactions, subscriptionEvents] =
+    const [totalRevenue, recentTransactions, subscriptionEvents, revenueHistory] =
       await Promise.all([
         this.getTotalRevenue(),
         this.getRecentTransactions(),
         this.getSubscriptionEvents(),
+        this.getRevenueHistory(),
       ]);
 
     return {
       totalRevenue,
       recentTransactions,
       subscriptionEvents,
+      revenueHistory,
     };
   }
 
@@ -35,6 +37,33 @@ export class BillingService {
     });
 
     return Number(result._sum.amount) || 0;
+  }
+
+  /**
+   * Revenu encaissé (paiements SUCCEEDED) mois par mois, sur les 6 derniers
+   * mois — alimente le graphique d'évolution qui était vide jusqu'ici (le
+   * champ n'existait tout simplement pas côté backend).
+   */
+  private async getRevenueHistory() {
+    const months: { month: string; value: number }[] = [];
+    const now = new Date();
+
+    for (let i = 5; i >= 0; i--) {
+      const start = new Date(now.getFullYear(), now.getMonth() - i, 1);
+      const end = new Date(now.getFullYear(), now.getMonth() - i + 1, 1);
+
+      const result = await this.prisma.payment.aggregate({
+        where: { status: 'SUCCEEDED', createdAt: { gte: start, lt: end } },
+        _sum: { amount: true },
+      });
+
+      months.push({
+        month: start.toLocaleDateString('fr-FR', { month: 'short', year: '2-digit' }),
+        value: Number(result._sum.amount) || 0,
+      });
+    }
+
+    return months;
   }
 
   private async getRecentTransactions() {
@@ -56,18 +85,26 @@ export class BillingService {
       },
     });
 
+    // ⚠️ Forme alignée sur ce que consomme réellement billing/page.tsx —
+    // avant, les champs s'appelaient différemment (`date` au lieu de
+    // `createdAt`, `companyName` au lieu de `company.legalName`), donc la
+    // date et le nom de l'entreprise affichaient toujours "—" dans le
+    // tableau, silencieusement, depuis le début.
     return transactions.map((t) => ({
       id: t.id,
-      invoiceId:
-        t.yabetooIntentId || t.clientSecret || `INV-${t.id.slice(0, 8)}`,
+      invoiceId: t.yabetooIntentId || t.clientSecret || `INV-${t.id.slice(0, 8)}`,
       companyId: t.companyId,
-      companyName: t.company.tradeName || t.company.legalName,
-      companyLogo: this.generateInitials(t.company.legalName),
-      plan: t.subscription.plan,
+      company: {
+        legalName: t.company.legalName,
+        tradeName: t.company.tradeName,
+      },
+      subscription: {
+        plan: t.subscription?.plan ?? null,
+      },
       amount: Number(t.amount),
-      date: t.createdAt.toISOString(),
-      method: t.paymentMethod || 'Bank Transfer',
-      status: this.mapPaymentStatus(t.status),
+      createdAt: t.createdAt.toISOString(),
+      paymentMethod: t.paymentMethod || 'Bank Transfer',
+      status: t.status, // brut (SUCCEEDED/FAILED/...) — le mapping d'affichage se fait côté front
     }));
   }
 
@@ -100,24 +137,13 @@ export class BillingService {
       id: p.id,
       type: 'upgrade',
       companyName: p.company.tradeName || p.company.legalName,
-      details: `Paiement ${p.subscription.plan}`,
+      details: `Paiement ${p.subscription?.plan ?? ''}`,
       impact: Number(p.amount),
       date: p.createdAt.toLocaleDateString('fr-FR', {
         month: 'short',
         day: 'numeric',
       }),
     }));
-  }
-
-  private mapPaymentStatus(status: string): string {
-    const statusMap: Record<string, string> = {
-      SUCCEEDED: 'Success',
-      FAILED: 'Failed',
-      PENDING: 'Pending',
-      PROCESSING: 'Pending',
-      REFUNDED: 'Refunded',
-    };
-    return statusMap[status] || 'Unknown';
   }
 
   private generateInitials(name: string): string {

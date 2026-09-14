@@ -480,7 +480,18 @@ export class LeavesService {
         endDate: l.endDate,
         daysCount: Number(l.daysCount),
         status: l.status,
-        isPaid: true,
+        // ✅ Un rattrapage de reliquat (carriedFromLeaveId) n'est jamais payé
+        // — voir createCarryoverLeave().
+        isPaid: !l.carriedFromLeaveId,
+        // ✅ Retour anticipé — exposé ici pour que la page Gestion puisse
+        // signaler directement dans la liste (sans ouvrir le détail) qu'un
+        // congé s'est terminé plus tôt que prévu et que des jours posés
+        // n'ont pas été pris (voir confirmLeaveReturn / forfeitedDays).
+        returnConfirmed: l.returnConfirmed,
+        actualReturnDate: l.actualReturnDate,
+        forfeitedDays: l.forfeitedDays ? Number(l.forfeitedDays) : 0,
+        // ✅ Rattrapage de reliquat — voir createCarryoverLeave().
+        isCarryover: !!l.carriedFromLeaveId,
       })),
       ...absences.map((a) => ({
         id: a.id,
@@ -494,6 +505,9 @@ export class LeavesService {
         daysCount: Number(a.workingDays),
         status: a.status,
         isPaid: a.isPaid,
+        returnConfirmed: false,
+        actualReturnDate: null,
+        forfeitedDays: 0,
       })),
     ].sort(
       (x, y) =>
@@ -524,7 +538,34 @@ export class LeavesService {
         .reduce((sum, e) => sum + e.daysCount, 0),
     };
 
-    return { period: { month, year }, kpis, events };
+    // ✅ Retours anticipés en attente — PAS filtré par mois/année affiché :
+    // c'est un pense-bête permanent pour le RH ("cet employé est rentré plus
+    // tôt, il lui reste Xj à reprogrammer"), purement informatif. Les jours
+    // restent légalement non reversés au solde (voir confirmLeaveReturn) —
+    // ceci ne change rien à ça, ça évite juste de l'oublier. Limité aux 30
+    // plus récents pour rester lisible.
+    const earlyReturnLeaves = await this.prisma.leave.findMany({
+      where: {
+        companyId,
+        returnConfirmed: true,
+        forfeitedDays: { gt: 0 },
+      },
+      include: { employee: { select: employeeSelect } },
+      orderBy: { actualReturnDate: 'desc' },
+      take: 30,
+    });
+    const earlyReturns = earlyReturnLeaves.map((l) => ({
+      id: l.id,
+      employeeId: l.employeeId,
+      employee: l.employee,
+      type: l.type,
+      startDate: l.startDate,
+      endDate: l.endDate,
+      actualReturnDate: l.actualReturnDate,
+      forfeitedDays: Number(l.forfeitedDays),
+    }));
+
+    return { period: { month, year }, kpis, events, earlyReturns };
   }
 
   /**
@@ -569,8 +610,14 @@ export class LeavesService {
         endDate: l.endDate,
         daysCount: Number(l.daysCount),
         status: l.status,
-        isPaid: true,
+        isPaid: !l.carriedFromLeaveId,
         reason: l.reason,
+        // ✅ Retour anticipé (voir getManagementOverview pour le détail)
+        returnConfirmed: l.returnConfirmed,
+        actualReturnDate: l.actualReturnDate,
+        forfeitedDays: l.forfeitedDays ? Number(l.forfeitedDays) : 0,
+        // ✅ Rattrapage de reliquat — voir createCarryoverLeave().
+        isCarryover: !!l.carriedFromLeaveId,
       })),
       ...absences.map((a) => ({
         id: a.id,
@@ -835,6 +882,26 @@ export class LeavesService {
       // solde se faire décompter deux fois si les deux étaient approuvées.
       await this.assertNoOverlap(createLeaveDto.employeeId, start, end);
 
+      // ============================================================================
+      // ↩️ DEMANDE DE RATTRAPAGE D'UN RELIQUAT DE RETOUR ANTICIPÉ (demande
+      // explicite) — chemin totalement séparé du congé annuel classique :
+      // part en PENDING comme une demande normale (le RH valide/refuse comme
+      // toujours), mais ne touche JAMAIS le solde/cycle en cours ni son
+      // indemnité, et n'est jamais soumise aux règles ci-dessous (12 mois de
+      // service, solde suffisant, motif obligatoire...) qui ne concernent
+      // que le cycle normal.
+      // ============================================================================
+      if (createLeaveDto.carriedFromLeaveId) {
+        return this.createCarryoverRequest(
+          createLeaveDto,
+          employee,
+          start,
+          end,
+          userId,
+          user.companyId,
+        );
+      }
+
       // ✅ Depuis la restructuration des types de congé : le modèle "Leave" ne
       // couvre plus que le congé annuel (normal ou anticipé). Maladie,
       // Maternité, Paternité, Mariage, Décès, etc. passent désormais par le
@@ -849,12 +916,12 @@ export class LeavesService {
       // Congé annuel "normal" : le Code du travail congolais exige 12 mois de
       // service continu. Le congé "anticipé" existe précisément pour déroger
       // à cette règle — plafonné plus bas au solde déjà accumulé.
-      // ✅ CORRECTIF (demande explicite) : ce blocage dur ne s'applique qu'à
-      // une demande faite par l'EMPLOYÉ lui-même (auto-service). Un RH/Admin
-      // qui planifie ce même congé pour quelqu'un sait ce qu'il fait — on ne
-      // le bloque jamais, on se contente d'un avertissement (loggé + visible
-      // côté frontend via `earlyDeparture` dans la réponse), la décision
-      // finale lui revient.
+      // ✅ CORRECTIF (demande explicite) : ce n'est plus jamais un blocage,
+      // même pour une demande faite par l'employé lui-même — seulement un
+      // avertissement (loggé + visible côté frontend via
+      // `earlyDepartureWarning` dans la réponse). La demande part quand même
+      // vers le RH, qui décide à la validation en fonction du solde réel à
+      // ce moment-là (voir updateStatus, qui n'a jamais bloqué non plus).
       let earlyDepartureWarning: string | undefined;
       if (createLeaveDto.type === 'ANNUAL') {
         const monthsWorked =
@@ -864,14 +931,9 @@ export class LeavesService {
           const remaining = Math.ceil(
             CONGO_LEAVE.MIN_MONTHS_BEFORE_LEAVE - monthsWorked,
           );
-          const noticeText = `Conformément au Code du travail congolais, les congés annuels ne sont normalement accessibles qu'après 12 mois de service continu. Ancienneté actuelle : ${Math.floor(monthsWorked)} mois. Il manque ${remaining} mois. Pour un départ avant ce délai, le congé annuel anticipé est recommandé.`;
-          if (user.role === 'EMPLOYEE') {
-            throw new BadRequestException(noticeText);
-          }
-          // RH/Admin/Manager/Cabinet : avertissement seulement, pas de blocage.
-          earlyDepartureWarning = noticeText;
+          earlyDepartureWarning = `Conformément au Code du travail congolais, les congés annuels ne sont normalement accessibles qu'après 12 mois de service continu. Ancienneté actuelle : ${Math.floor(monthsWorked)} mois. Il manque ${remaining} mois. Pour un départ avant ce délai, le congé annuel anticipé est recommandé. La demande est tout de même transmise — le RH décidera à la validation.`;
           this.logger.warn(
-            `⚠️ Congé ANNUAL créé avant 12 mois de service pour ${employee.firstName} ${employee.lastName} (${Math.floor(monthsWorked)} mois) — autorisé exceptionnellement par ${user.role} (${userId}).`,
+            `⚠️ Demande de congé ANNUAL soumise avant 12 mois de service pour ${employee.firstName} ${employee.lastName} (${Math.floor(monthsWorked)} mois) — transmise pour validation RH (par ${user.role}, ${userId}), non bloquée.`,
           );
         }
       }
@@ -884,21 +946,26 @@ export class LeavesService {
       if (workingDays === 0)
         throw new BadRequestException('Aucun jour ouvré dans cette période');
 
-      // ✅ Le solde n'est plus décrémenté ici — seulement à la VALIDATION (updateStatus).
-      // On garde un contrôle informatif pour bloquer une demande déjà clairement
-      // impossible (empêche de demander plus que le solde actuel), mais le vrai
-      // décompte se fait au moment où l'admin approuve, pas à la soumission.
-      // Pour l'anticipé, c'est ce même contrôle qui fait office de plafond
-      // légal : impossible de demander plus que ce qui est déjà accumulé à
-      // la date de la demande.
+      // ✅ CORRECTIF (demande explicite) : le solde n'est décrémenté qu'à la
+      // VALIDATION (updateStatus), jamais ici — et on ne bloque plus non
+      // plus la SOUMISSION d'une demande qui dépasse le solde actuel. Le
+      // solde à la date de départ peut légitimement changer d'ici la
+      // validation (autres congés annulés, cycle qui avance...) — c'est au
+      // RH de trancher avec le solde réel au moment où il valide, pas à
+      // l'employé/l'admin d'être bloqué à la saisie sur un solde qui n'est
+      // qu'une photo du jour de la demande. On se contente d'un
+      // avertissement (`insufficientBalanceWarning` dans la réponse).
       const balance = await this.getOrCreateLeaveBalance(
         createLeaveDto.employeeId,
       );
+      let insufficientBalanceWarning: string | undefined;
       if (Number(balance.annualRemaining) < workingDays) {
-        throw new BadRequestException(
+        insufficientBalanceWarning =
           createLeaveDto.type === 'ANNUAL_ANTICIPATED'
-            ? `Pas assez de jours accumulés pour l'instant : ${Math.round(Number(balance.annualRemaining))} jour(s) disponible(s) à ce jour, ${workingDays} jour(s) demandé(s).`
-            : `Solde insuffisant : ${Math.round(Number(balance.annualRemaining))} jour(s) disponible(s), ${workingDays} jour(s) demandé(s).`,
+            ? `Pas assez de jours accumulés pour l'instant : ${Math.round(Number(balance.annualRemaining))} jour(s) disponible(s) à ce jour, ${workingDays} jour(s) demandé(s). La demande est tout de même transmise — le RH décidera à la validation, selon le solde réel à ce moment-là.`
+            : `Solde insuffisant à ce jour : ${Math.round(Number(balance.annualRemaining))} jour(s) disponible(s), ${workingDays} jour(s) demandé(s). La demande est tout de même transmise — le RH décidera à la validation, selon le solde réel à ce moment-là.`;
+        this.logger.warn(
+          `⚠️ Demande de congé au-delà du solde actuel pour ${employee.firstName} ${employee.lastName} (${workingDays}j demandés, ${Number(balance.annualRemaining)}j restants) — transmise pour validation RH (par ${user.role}, ${userId}), non bloquée.`,
         );
       }
 
@@ -962,8 +1029,8 @@ export class LeavesService {
         },
       );
 
-      return earlyDepartureWarning
-        ? { ...leave, earlyDepartureWarning }
+      return earlyDepartureWarning || insufficientBalanceWarning
+        ? { ...leave, earlyDepartureWarning, insufficientBalanceWarning }
         : leave;
     } catch (error) {
       if (
@@ -979,6 +1046,108 @@ export class LeavesService {
           : 'Erreur lors de la création de la demande de congé';
       throw new BadRequestException(message);
     }
+  }
+
+  // ============================================================================
+  // ↩️ DEMANDE DE RATTRAPAGE (employé) — pendant de createCarryoverLeave(),
+  // mais part en PENDING pour validation RH au lieu d'être auto-approuvée.
+  // Mêmes garanties : jamais payé, jamais de débit du solde/cycle en cours,
+  // plafonné au reliquat réellement disponible du congé source.
+  // ============================================================================
+  private async createCarryoverRequest(
+    dto: CreateLeaveDto,
+    employee: { firstName: string; lastName: string; email: string },
+    start: Date,
+    end: Date,
+    userId: string,
+    companyId: string,
+  ) {
+    const source = await this.prisma.leave.findUnique({
+      where: { id: dto.carriedFromLeaveId },
+    });
+    if (!source)
+      throw new NotFoundException('Congé source du reliquat introuvable');
+    if (source.employeeId !== dto.employeeId)
+      throw new BadRequestException(
+        "Ce reliquat n'appartient pas à cet employé",
+      );
+    if (source.companyId !== companyId)
+      throw new ForbiddenException('Accès refusé');
+    if (!source.returnConfirmed || !(Number(source.forfeitedDays) > 0)) {
+      throw new BadRequestException(
+        "Ce congé n'a pas de reliquat de retour anticipé disponible",
+      );
+    }
+
+    const workingDays = await this.calculateWorkingDays(
+      start,
+      end,
+      companyId,
+    );
+    if (workingDays === 0)
+      throw new BadRequestException('Aucun jour ouvré dans cette période');
+
+    const remaining = await this.getRemainingCarryover(source.id);
+    if (workingDays > remaining) {
+      throw new BadRequestException(
+        `Reliquat insuffisant : il reste ${Math.round(remaining * 10) / 10}j à rattraper sur ce congé (du ${new Date(source.startDate).toLocaleDateString('fr-FR')} au ${new Date(source.endDate).toLocaleDateString('fr-FR')}), ${workingDays}j demandés.`,
+      );
+    }
+
+    const leave = await this.prisma.leave.create({
+      data: {
+        employeeId: dto.employeeId,
+        companyId,
+        type: 'ANNUAL',
+        startDate: start,
+        endDate: end,
+        daysCount: workingDays,
+        reason:
+          dto.reason ||
+          'Demande de rattrapage — reliquat de retour anticipé (repos non payé)',
+        status: 'PENDING',
+        carriedFromLeaveId: source.id,
+        plannedPayrollMonth: null,
+        plannedPayrollYear: null,
+        payrollIndemnityDays: null,
+      },
+      include: {
+        employee: {
+          select: {
+            firstName: true,
+            lastName: true,
+            position: true,
+            photoUrl: true,
+          },
+        },
+      },
+    });
+
+    await this.notificationsService.createForGroup(
+      companyId,
+      ['ADMIN', 'SUPER_ADMIN', 'HR_MANAGER', 'MANAGER'],
+      {
+        type: 'LEAVE_REQUEST',
+        title: '↩️ Demande de rattrapage (reliquat non payé)',
+        message: `${employee.firstName} ${employee.lastName} demande à rattraper ${Math.round(workingDays)} jour(s) non pris(s) suite à son retour anticipé du ${new Date(source.actualReturnDate ?? source.endDate).toLocaleDateString('fr-FR')}, du ${start.toLocaleDateString('fr-FR')} au ${end.toLocaleDateString('fr-FR')}`,
+        link: '/conges',
+        metadata: {
+          leaveId: leave.id,
+          employeeId: dto.employeeId,
+          employeeName: `${employee.firstName} ${employee.lastName}`,
+          daysCount: workingDays,
+          startDate: start.toISOString(),
+          endDate: end.toISOString(),
+          carriedFromLeaveId: source.id,
+        },
+      },
+    );
+
+    this.logger.log(
+      `↩️ Demande de rattrapage de ${workingDays}j soumise par ${employee.firstName} ${employee.lastName} sur le reliquat du congé ${source.id} (${Math.round((remaining - workingDays) * 10) / 10}j restants après cette demande).`,
+    );
+
+    return leave;
   }
 
   // ============================================================================
@@ -999,6 +1168,9 @@ export class LeavesService {
       reason?: string;
       extraDaysGranted?: number;
       resumptionNote?: string;
+      // ✅ Rattrapage d'un reliquat de retour anticipé — id du congé source
+      // (celui qui a un forfeitedDays > 0). Voir createCarryoverLeave().
+      carriedFromLeaveId?: string;
     },
     userId: string,
     overrideCompanyId?: string,
@@ -1058,6 +1230,26 @@ export class LeavesService {
     // ✅ CORRECTIF : même garde-fou anti-chevauchement que create() — le RH
     // peut planifier n'importe quand, mais pas deux fois sur la même période.
     await this.assertNoOverlap(dto.employeeId, start, end);
+
+    // ============================================================================
+    // ↩️ RATTRAPAGE D'UN RELIQUAT DE RETOUR ANTICIPÉ (demande explicite)
+    // Chemin totalement séparé : ce "congé" ne fait que planifier un repos
+    // physique pour rattraper des jours déjà posés mais non pris lors d'un
+    // retour anticipé (voir confirmLeaveReturn/forfeitedDays). Il ne doit
+    // JAMAIS toucher le solde du cycle en cours, ni son cycle (leaveCycle
+    // StartDate), ni générer d'indemnité — seulement du suivi d'absence.
+    // ============================================================================
+    if (dto.carriedFromLeaveId) {
+      return this.createCarryoverLeave(
+        dto,
+        employee,
+        workingDays,
+        start,
+        end,
+        userId,
+        user.companyId,
+      );
+    }
 
     // ✅ CORRECTIF : on ne compare plus au solde du JOUR DE LA PLANIFICATION,
     // mais au solde PROJETÉ à la date de DÉPART du congé — sinon planifier à
@@ -1196,6 +1388,201 @@ export class LeavesService {
   }
 
   // ============================================================================
+  // ↩️ RATTRAPAGE D'UN RELIQUAT DE RETOUR ANTICIPÉ (demande explicite)
+  // Un employé qui reprend le travail avant la fin de son congé (retour
+  // anticipé) "perd" légalement ces jours au sens du SOLDE/de l'indemnité —
+  // mais l'entreprise peut choisir de les lui laisser reprendre plus tard,
+  // en repos physique uniquement, sans jamais les payer une seconde fois.
+  // Ce congé de rattrapage :
+  //  - est toujours de type ANNUAL (même nature, juste non indemnisé)
+  //  - ne débite JAMAIS le solde/cycle en cours (employee.leaveCycleStartDate
+  //    reste inchangé — le décalage ne bouleverse pas le cycle normal)
+  //  - n'a jamais d'indemnité (plannedPayrollMonth/Year/payrollIndemnityDays
+  //    toujours null)
+  //  - est plafonné au reliquat réellement restant du congé source, calculé
+  //    à la volée (jamais stocké en dur, pour rester correct même si ce
+  //    rattrapage est lui-même modifié/supprimé ensuite)
+  // ============================================================================
+  private async createCarryoverLeave(
+    dto: {
+      employeeId: string;
+      carriedFromLeaveId?: string;
+      startDate: string;
+      endDate: string;
+      reason?: string;
+    },
+    employee: { firstName: string; lastName: string; email: string },
+    workingDays: number,
+    start: Date,
+    end: Date,
+    userId: string,
+    companyId: string,
+  ) {
+    const source = await this.prisma.leave.findUnique({
+      where: { id: dto.carriedFromLeaveId },
+    });
+    if (!source)
+      throw new NotFoundException('Congé source du reliquat introuvable');
+    if (source.employeeId !== dto.employeeId)
+      throw new BadRequestException(
+        "Ce reliquat n'appartient pas à cet employé",
+      );
+    if (source.companyId !== companyId)
+      throw new ForbiddenException('Accès refusé');
+    if (!source.returnConfirmed || !(Number(source.forfeitedDays) > 0)) {
+      throw new BadRequestException(
+        "Ce congé n'a pas de reliquat de retour anticipé disponible",
+      );
+    }
+
+    const remaining = await this.getRemainingCarryover(source.id);
+    if (workingDays > remaining) {
+      throw new BadRequestException(
+        `Reliquat insuffisant : il reste ${Math.round(remaining * 10) / 10}j à rattraper sur ce congé (du ${new Date(source.startDate).toLocaleDateString('fr-FR')} au ${new Date(source.endDate).toLocaleDateString('fr-FR')}), ${workingDays}j demandés.`,
+      );
+    }
+
+    const leave = await this.prisma.leave.create({
+      data: {
+        employeeId: dto.employeeId,
+        companyId,
+        type: 'ANNUAL',
+        startDate: start,
+        endDate: end,
+        daysCount: workingDays,
+        reason:
+          dto.reason ||
+          'Rattrapage — reliquat de retour anticipé (repos non payé)',
+        status: 'APPROVED',
+        isManual: true,
+        approvedBy: userId,
+        approvedAt: new Date(),
+        carriedFromLeaveId: source.id,
+        // ❌ Jamais d'indemnité, jamais de débit de cycle — voir le
+        // commentaire du champ carriedFromLeaveId dans le schéma Prisma.
+        plannedPayrollMonth: null,
+        plannedPayrollYear: null,
+        payrollIndemnityDays: null,
+      },
+      include: {
+        employee: {
+          select: { firstName: true, lastName: true, email: true },
+        },
+      },
+    });
+
+    // ✅ AUCUNE mutation de LeaveBalance ni de employee.leaveCycleStartDate
+    // ici — c'est tout le principe du rattrapage : le cycle normal continue
+    // sa vie sans être perturbé par ce repos de rattrapage non payé.
+
+    const employeeUser = await this.prisma.user.findFirst({
+      where: { email: employee.email, companyId },
+      select: { id: true },
+    });
+    if (employeeUser) {
+      await this.notificationsService.create({
+        userId: employeeUser.id,
+        type: 'LEAVE_APPROVED' as NotificationType,
+        title: '📅 Rattrapage de congé planifié',
+        message: `Un repos du ${start.toLocaleDateString('fr-FR')} au ${end.toLocaleDateString('fr-FR')} (${Math.round(workingDays)}j) a été planifié pour rattraper votre congé non terminé.`,
+        link: '/conges/mon-espace',
+        metadata: {
+          leaveId: leave.id,
+          startDate: start.toISOString(),
+          endDate: end.toISOString(),
+          daysCount: workingDays,
+        },
+      });
+    }
+
+    this.logger.log(
+      `↩️ Rattrapage de ${workingDays}j créé pour ${employee.firstName} ${employee.lastName} sur le reliquat du congé ${source.id} (${Math.round((remaining - workingDays) * 10) / 10}j restants).`,
+    );
+
+    return leave;
+  }
+
+  /**
+   * Reliquat restant réellement disponible sur un congé source donné —
+   * recalculé à la volée (jamais stocké) : forfeitedDays moins la somme des
+   * rattrapages déjà pris/en attente sur ce même congé source.
+   * `excludeLeaveId` : exclut un rattrapage en cours de modification de son
+   * propre calcul (pour updateLeavePlanning).
+   */
+  private async getRemainingCarryover(
+    sourceLeaveId: string,
+    excludeLeaveId?: string,
+  ): Promise<number> {
+    const source = await this.prisma.leave.findUnique({
+      where: { id: sourceLeaveId },
+      select: { forfeitedDays: true },
+    });
+    if (!source) return 0;
+    const children = await this.prisma.leave.findMany({
+      where: {
+        carriedFromLeaveId: sourceLeaveId,
+        status: { in: ['PENDING', 'APPROVED'] },
+        ...(excludeLeaveId ? { id: { not: excludeLeaveId } } : {}),
+      },
+      select: { daysCount: true },
+    });
+    const consumed = children.reduce((s, c) => s + Number(c.daysCount), 0);
+    return Math.max(0, Number(source.forfeitedDays) - consumed);
+  }
+
+  /**
+   * Reliquats de retour anticipé encore disponibles pour un employé —
+   * utilisé par "Mon espace" (l'employé voit ce qu'il lui reste à prendre de
+   * son cycle précédent) et par le RH lors de la planification d'un
+   * rattrapage (programme des départs / nouvelle demande).
+   */
+  async getCarryoverBalance(
+    employeeId: string,
+    userId: string,
+    overrideCompanyId?: string,
+  ) {
+    await this.assertEmployeeAccess(employeeId, userId, overrideCompanyId);
+
+    const sources = await this.prisma.leave.findMany({
+      where: { employeeId, returnConfirmed: true, forfeitedDays: { gt: 0 } },
+      orderBy: { actualReturnDate: 'desc' },
+    });
+
+    const results: Array<{
+      sourceLeaveId: string;
+      cycleLabel: string | null;
+      originalStartDate: Date;
+      originalEndDate: Date;
+      actualReturnDate: Date | null;
+      forfeitedDays: number;
+      remainingDays: number;
+    }> = [];
+
+    for (const source of sources) {
+      const remaining = await this.getRemainingCarryover(source.id);
+      if (remaining <= 0) continue;
+
+      let cycleLabel: string | null = null;
+      if (source.debitedCycleStartDate) {
+        const y1 = new Date(source.debitedCycleStartDate).getFullYear();
+        cycleLabel = `${y1}-${y1 + 1}`;
+      }
+
+      results.push({
+        sourceLeaveId: source.id,
+        cycleLabel,
+        originalStartDate: source.startDate,
+        originalEndDate: source.endDate,
+        actualReturnDate: source.actualReturnDate,
+        forfeitedDays: Number(source.forfeitedDays),
+        remainingDays: remaining,
+      });
+    }
+
+    return results;
+  }
+
+  // ============================================================================
   // 📋 LISTE DES CONGÉS
   // overrideCompanyId : fourni par le cabinet controller
   // ============================================================================
@@ -1284,6 +1671,11 @@ export class LeavesService {
         },
         approvedByUser: { select: { firstName: true, lastName: true } },
         rejectedByUser: { select: { firstName: true, lastName: true } },
+        // ✅ Rattrapage d'un reliquat — pour afficher le contexte du congé
+        // source (dates, retour anticipé) directement sur le détail.
+        carriedFromLeave: {
+          select: { startDate: true, endDate: true, actualReturnDate: true },
+        },
       },
     });
 
@@ -1376,7 +1768,23 @@ export class LeavesService {
     let plannedPayrollYear: number | undefined;
     let payrollIndemnityDays: number | undefined;
 
-    if (status === 'APPROVED' && isAnnualFamily) {
+    if (status === 'APPROVED' && leave.carriedFromLeaveId) {
+      // ✅ Rattrapage de reliquat — revalidation à la validation (le reliquat
+      // a pu être partiellement consommé par un autre rattrapage entre la
+      // demande et cette approbation). AUCUNE mutation de solde/cycle/
+      // indemnité ici — voir createCarryoverLeave()/createCarryoverRequest().
+      const remainingCarryover = await this.getRemainingCarryover(
+        leave.carriedFromLeaveId,
+        leave.id,
+      );
+      if (Number(leave.daysCount) > remainingCarryover) {
+        throw new BadRequestException(
+          `Reliquat insuffisant pour valider ce rattrapage : il reste ${Math.round(remainingCarryover * 10) / 10}j disponibles sur le congé source, ${Number(leave.daysCount)}j demandés.`,
+        );
+      }
+    }
+
+    if (status === 'APPROVED' && isAnnualFamily && !leave.carriedFromLeaveId) {
       // ✅ Même correctif que createManual() : projeté à la date de DÉPART
       // du congé, pas au jour où le RH clique sur "Valider" — une demande
       // posée/validée en avance ne doit pas être bloquée à tort parce que
@@ -1433,7 +1841,7 @@ export class LeavesService {
       }
     }
 
-    if (status === 'APPROVED' && isAnnualFamily) {
+    if (status === 'APPROVED' && isAnnualFamily && !leave.carriedFromLeaveId) {
       const { indemnity, basedOnAverage, monthsUsed, method } =
         await this.calculateLeaveIndemnity(
           leave.employeeId,
@@ -1603,6 +2011,232 @@ export class LeavesService {
   }
 
   // ============================================================================
+  // ✏️ MODIFIER UNE PLANIFICATION (RH/Admin) — édition complète EN PLACE d'un
+  //    congé déjà existant (dates, type, motif, jours d'ancienneté...).
+  //    ⚠️ Ne crée JAMAIS de nouvelle ligne : on met à jour la même ligne
+  //    `leave.id` et on ajuste seulement l'ÉCART de solde entre l'ancien et
+  //    le nouvel état — exactement le principe déjà utilisé par
+  //    rescheduleLeave() pour les dates seules. C'est ce qui évite qu'une
+  //    planification modifiée apparaisse en double (ancienne ligne encore
+  //    là + nouvelle créée à côté) sur le programme des départs, le planning
+  //    ou le calendrier, qui lisent tous la même table `leave`.
+  // ============================================================================
+  async updateLeavePlanning(
+    id: string,
+    dto: {
+      type?: 'ANNUAL' | 'ANNUAL_ANTICIPATED';
+      startDate?: string;
+      endDate?: string;
+      reason?: string;
+      extraDaysGranted?: number;
+      resumptionNote?: string;
+    },
+    userId: string,
+    overrideCompanyId?: string,
+  ) {
+    const user = await this.getUserWithCompany(userId, overrideCompanyId);
+    const leave = await this.prisma.leave.findUnique({ where: { id } });
+    if (!leave) throw new NotFoundException('Congé introuvable');
+    if (leave.companyId !== user.companyId)
+      throw new ForbiddenException("Vous n'avez pas accès à ce congé");
+    if (!['APPROVED', 'PENDING'].includes(leave.status))
+      throw new BadRequestException(
+        'Seul un congé en attente ou déjà approuvé/planifié peut être modifié (pas un congé rejeté ou annulé).',
+      );
+
+    const newType = dto.type ?? leave.type;
+    if (!['ANNUAL', 'ANNUAL_ANTICIPATED'].includes(newType)) {
+      throw new BadRequestException(
+        "Ce type de congé n'est plus géré ici — utilisez le module Absences.",
+      );
+    }
+    // ✅ Un congé de rattrapage (carriedFromLeaveId) reste toujours de type
+    // ANNUAL — changer son type n'aurait aucun sens (il n'a jamais été
+    // indemnisé ni débité, rien à "convertir").
+    if (leave.carriedFromLeaveId && dto.type && dto.type !== 'ANNUAL') {
+      throw new BadRequestException(
+        'Un congé de rattrapage (reliquat de retour anticipé) reste toujours de type "Annuel".',
+      );
+    }
+
+    const oldStart = new Date(leave.startDate);
+    const oldEnd = new Date(leave.endDate);
+    const newStart = dto.startDate ? new Date(dto.startDate) : oldStart;
+    const newEnd = dto.endDate ? new Date(dto.endDate) : oldEnd;
+    if (newEnd < newStart)
+      throw new BadRequestException(
+        'La date de fin doit être après la date de début',
+      );
+
+    const datesChanged =
+      newStart.getTime() !== oldStart.getTime() ||
+      newEnd.getTime() !== oldEnd.getTime();
+    const typeChanged = newType !== leave.type;
+
+    const oldWorkingDays = Number(leave.daysCount);
+    let newWorkingDays = oldWorkingDays;
+    if (datesChanged) {
+      newWorkingDays = await this.calculateWorkingDays(
+        newStart,
+        newEnd,
+        user.companyId,
+      );
+      if (newWorkingDays === 0)
+        throw new BadRequestException('Aucun jour ouvré dans cette période');
+      // ✅ Même garde-fou anti-chevauchement qu'à la création, en excluant
+      // ce congé lui-même (sinon il se bloquerait tout seul).
+      await this.assertNoOverlap(leave.employeeId, newStart, newEnd, id);
+
+      // ✅ Un congé de rattrapage reste plafonné au reliquat réellement
+      // disponible sur son congé source (en excluant SA PROPRE consommation
+      // actuelle du calcul, sinon il se bloquerait lui-même).
+      if (leave.carriedFromLeaveId) {
+        const remaining = await this.getRemainingCarryover(
+          leave.carriedFromLeaveId,
+          id,
+        );
+        if (newWorkingDays > remaining) {
+          throw new BadRequestException(
+            `Reliquat insuffisant : il reste ${Math.round(remaining * 10) / 10}j disponibles sur le congé source, ${newWorkingDays}j demandés.`,
+          );
+        }
+      }
+    }
+
+    const delta = newWorkingDays - oldWorkingDays;
+    const isAnnualFamily = ['ANNUAL', 'ANNUAL_ANTICIPATED'].includes(
+      leave.type,
+    );
+
+    // ✅ La ligne de solde déjà débitée (debitedCycleStartDate) reste la
+    // même — on ajuste juste l'écart dessus, jamais un re-décompte complet.
+    let balanceAfter: { annualRemaining: number } | null = null;
+    if (
+      leave.status === 'APPROVED' &&
+      isAnnualFamily &&
+      leave.debitedCycleStartDate &&
+      delta !== 0 &&
+      !leave.carriedFromLeaveId
+    ) {
+      const balance = await this.prisma.leaveBalance.findUnique({
+        where: {
+          employeeId_cycleStartDate: {
+            employeeId: leave.employeeId,
+            cycleStartDate: leave.debitedCycleStartDate,
+          },
+        },
+      });
+      if (balance) {
+        const updatedBalance = await this.prisma.leaveBalance.update({
+          where: { id: balance.id },
+          data: {
+            annualTaken: { increment: delta },
+            annualRemaining: { decrement: delta },
+          },
+        });
+        balanceAfter = {
+          annualRemaining: Number(updatedBalance.annualRemaining),
+        };
+      }
+    }
+
+    // ✅ Le type peut changer (ex: planifié par erreur en anticipé). On
+    // recalcule alors l'indemnité paie comme createManual() — jamais un
+    // simple report des anciennes valeurs, qui ne correspondraient plus au
+    // congé réellement modifié. Règle inchangée : jamais d'indemnité propre
+    // pour un ANNUAL_ANTICIPATED (absorbée dans le futur congé ANNUAL).
+    let plannedPayrollMonth = leave.plannedPayrollMonth;
+    let plannedPayrollYear = leave.plannedPayrollYear;
+    let payrollIndemnityDays = leave.payrollIndemnityDays;
+    if (
+      leave.status === 'APPROVED' &&
+      (typeChanged || datesChanged) &&
+      !leave.carriedFromLeaveId
+    ) {
+      if (newType === 'ANNUAL') {
+        plannedPayrollMonth =
+          newStart.getMonth() === 0 ? 12 : newStart.getMonth();
+        plannedPayrollYear =
+          newStart.getMonth() === 0
+            ? newStart.getFullYear() - 1
+            : newStart.getFullYear();
+        const balanceRow = leave.debitedCycleStartDate
+          ? await this.prisma.leaveBalance.findUnique({
+              where: {
+                employeeId_cycleStartDate: {
+                  employeeId: leave.employeeId,
+                  cycleStartDate: leave.debitedCycleStartDate,
+                },
+              },
+            })
+          : null;
+        payrollIndemnityDays = balanceRow
+          ? balanceRow.annualEntitled
+          : leave.payrollIndemnityDays;
+      } else {
+        plannedPayrollMonth = null;
+        plannedPayrollYear = null;
+        payrollIndemnityDays = null;
+      }
+    }
+
+    const extraDaysGranted =
+      newType === 'ANNUAL'
+        ? (dto.extraDaysGranted ?? leave.extraDaysGranted)
+        : null;
+    const resumptionNote =
+      newType === 'ANNUAL' ? (dto.resumptionNote ?? leave.resumptionNote) : null;
+
+    const updated = await this.prisma.leave.update({
+      where: { id },
+      data: {
+        type: newType as LeaveType,
+        startDate: newStart,
+        endDate: newEnd,
+        daysCount: newWorkingDays,
+        reason: dto.reason ?? leave.reason,
+        extraDaysGranted,
+        resumptionNote,
+        plannedPayrollMonth,
+        plannedPayrollYear,
+        payrollIndemnityDays,
+      },
+    });
+
+    // ✅ Si ce congé ANNUAL était celui qui avait fermé le cycle en cours
+    // (employee.leaveCycleStartDate === son ancienne date de fin), on
+    // répercute le décalage — sinon le cycle suivant resterait ancré sur
+    // une date de fin qui n'existe plus après la modification.
+    if (leave.type === 'ANNUAL' && leave.status === 'APPROVED' && !leave.carriedFromLeaveId) {
+      const employee = await this.prisma.employee.findUnique({
+        where: { id: leave.employeeId },
+        select: { leaveCycleStartDate: true },
+      });
+      const wasClosingCycle =
+        employee?.leaveCycleStartDate &&
+        new Date(employee.leaveCycleStartDate).getTime() ===
+          oldEnd.getTime();
+      if (wasClosingCycle) {
+        const newCycleAnchor =
+          newType === 'ANNUAL' ? newEnd : leave.debitedCycleStartDate;
+        if (newCycleAnchor) {
+          await this.prisma.employee.update({
+            where: { id: leave.employeeId },
+            data: { leaveCycleStartDate: newCycleAnchor },
+          });
+        }
+      }
+    }
+
+    this.logger.log(
+      `✏️ Congé/planification ${id} modifié par ${userId} — ${oldWorkingDays}j → ${newWorkingDays}j` +
+        (typeChanged ? `, type ${leave.type} → ${newType}` : ''),
+    );
+
+    return { ...updated, balanceAfter };
+  }
+
+  // ============================================================================
   // ❌ ANNULER
   // ============================================================================
 
@@ -1633,7 +2267,12 @@ export class LeavesService {
     const isAnnualFamily = ['ANNUAL', 'ANNUAL_ANTICIPATED'].includes(
       leave.type,
     );
-    if (isAnnualFamily && leave.status === 'APPROVED') {
+    // ✅ Un congé de rattrapage (carriedFromLeaveId non nul) n'a jamais
+    // débité le solde/cycle en cours — rien à restaurer si on l'annule,
+    // sinon on créditerait à tort le cycle normal de jours qu'il n'avait
+    // jamais perdus (le reliquat redevient disponible tout seul, recalculé
+    // à la volée par getRemainingCarryover).
+    if (isAnnualFamily && leave.status === 'APPROVED' && !leave.carriedFromLeaveId) {
       const balance = leave.debitedCycleStartDate
         ? await this.prisma.leaveBalance.findUnique({
             where: {
@@ -1688,6 +2327,87 @@ export class LeavesService {
         cancellationReason: reason,
       },
     });
+  }
+
+  // ============================================================================
+  // 🗑️ SUPPRIMER DÉFINITIVEMENT (RH/Admin) — distinct de cancel() : cancel()
+  //    conserve la ligne (statut CANCELLED) pour garder un historique ; ici
+  //    la ligne disparaît réellement des listes/du planning/du calendrier
+  //    (toutes ces pages lisent la même table `leave`, donc rien d'autre à
+  //    synchroniser). Avant de supprimer, on "vide" exactement ce que la
+  //    planification avait débité — même restauration de solde/cycle que
+  //    cancel(), pour ne jamais laisser un solde figé sur un congé qui n'existe
+  //    plus.
+  // ============================================================================
+  async deleteLeave(id: string, userId: string, overrideCompanyId?: string) {
+    const user = await this.getUserWithCompany(userId, overrideCompanyId);
+    const leave = await this.prisma.leave.findUnique({ where: { id } });
+
+    if (!leave) throw new NotFoundException('Demande de congé introuvable');
+    if (leave.companyId !== user.companyId)
+      throw new ForbiddenException('Accès refusé');
+
+    const isAnnualFamily = ['ANNUAL', 'ANNUAL_ANTICIPATED'].includes(
+      leave.type,
+    );
+    // ✅ Un congé de rattrapage (carriedFromLeaveId non nul) n'a jamais
+    // débité le solde/cycle en cours à sa création — rien à restaurer ici,
+    // sinon on créditerait à tort le cycle normal de jours qu'il n'avait
+    // jamais perdus. Le reliquat redevient disponible tout seul (recalculé
+    // à la volée par getRemainingCarryover, jamais stocké en dur).
+    if (isAnnualFamily && leave.status === 'APPROVED' && !leave.carriedFromLeaveId) {
+      // ✅ Même règle que cancel() : on restaure sur le cycle exact mémorisé
+      // à la validation (debitedCycleStartDate), pas sur "le cycle actuel"
+      // qui a pu avancer depuis.
+      const balance = leave.debitedCycleStartDate
+        ? await this.prisma.leaveBalance.findUnique({
+            where: {
+              employeeId_cycleStartDate: {
+                employeeId: leave.employeeId,
+                cycleStartDate: leave.debitedCycleStartDate,
+              },
+            },
+          })
+        : await this.getOrCreateLeaveBalance(leave.employeeId);
+
+      if (balance) {
+        await this.prisma.leaveBalance.update({
+          where: { id: balance.id },
+          data: {
+            annualTaken: { decrement: leave.daysCount },
+            annualRemaining: { increment: leave.daysCount },
+          },
+        });
+      }
+
+      // ✅ Rouvre le cycle si CE congé est bien celui qui l'avait fermé —
+      // jamais si un congé plus récent l'a refermé depuis (voir cancel()).
+      if (leave.type === 'ANNUAL' && leave.debitedCycleStartDate) {
+        const employee = await this.prisma.employee.findUnique({
+          where: { id: leave.employeeId },
+          select: { leaveCycleStartDate: true },
+        });
+        const stillCurrent =
+          employee?.leaveCycleStartDate &&
+          leave.endDate &&
+          new Date(employee.leaveCycleStartDate).getTime() ===
+            new Date(leave.endDate).getTime();
+        if (stillCurrent) {
+          await this.prisma.employee.update({
+            where: { id: leave.employeeId },
+            data: { leaveCycleStartDate: leave.debitedCycleStartDate },
+          });
+        }
+      }
+    }
+
+    await this.prisma.leave.delete({ where: { id } });
+
+    this.logger.log(
+      `🗑️ Congé/planification ${id} supprimé définitivement par ${userId} (employé ${leave.employeeId})`,
+    );
+
+    return { success: true, id };
   }
 
   // ============================================================================

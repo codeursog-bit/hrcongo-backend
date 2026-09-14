@@ -3,6 +3,7 @@
 // ============================================================================
 
 import { Injectable, Logger } from '@nestjs/common';
+import * as os from 'os';
 import { PrismaService } from '../../prisma/prisma.service';
 
 @Injectable()
@@ -24,16 +25,18 @@ export class DashboardService {
       recentCompanies,
       failedPayments,
       systemHealth,
+      growth,
     ] = await Promise.all([
-      this.prisma.company.count(),
-      this.prisma.company.count({ where: { isActive: true } }),
-      this.prisma.company.count({ where: { isActive: false } }),
+      this.prisma.company.count({ where: { archivedAt: null } }),
+      this.prisma.company.count({ where: { archivedAt: null, isActive: true } }),
+      this.prisma.company.count({ where: { archivedAt: null, isActive: false } }),
       this.prisma.user.count(),
       this.prisma.employee.count(),
       this.getTotalMRR(),
       this.getRecentCompanies(),
       this.getFailedPayments(),
       this.getSystemHealth(),
+      this.getCompanyGrowth(),
     ]);
 
     return {
@@ -46,13 +49,36 @@ export class DashboardService {
       recentCompanies,
       failedPayments,
       systemHealth,
+      growth,
     };
+  }
+
+  /**
+   * % de croissance du nombre d'entreprises (non archivées) sur les 30
+   * derniers jours — remplace le 12.5 codé en dur qui s'affichait dans le
+   * header sur toutes les pages admin, peu importe la réalité.
+   */
+  private async getCompanyGrowth(): Promise<number> {
+    const now = new Date();
+    const monthAgo = new Date(now);
+    monthAgo.setDate(monthAgo.getDate() - 30);
+
+    const [currentCount, pastCount] = await Promise.all([
+      this.prisma.company.count({ where: { archivedAt: null } }),
+      this.prisma.company.count({
+        where: { archivedAt: null, createdAt: { lte: monthAgo } },
+      }),
+    ]);
+
+    if (pastCount === 0) return 0; // pas assez de recul pour un % significatif
+    return Number((((currentCount - pastCount) / pastCount) * 100).toFixed(1));
   }
 
   private async getTotalMRR() {
     const result = await this.prisma.subscription.aggregate({
       where: {
         status: { in: ['ACTIVE', 'TRIALING'] },
+        company: { archivedAt: null },
       },
       _sum: {
         pricePerMonth: true,
@@ -64,6 +90,7 @@ export class DashboardService {
 
   private async getRecentCompanies() {
     const companies = await this.prisma.company.findMany({
+      where: { archivedAt: null },
       take: 8,
       orderBy: { createdAt: 'desc' },
       include: {
@@ -85,18 +112,13 @@ export class DashboardService {
       employees: c._count.employees,
       users: c._count.users,
       lastActive: this.calculateLastActive(c.updatedAt),
-      status: c.isActive ? 'Active' : 'Inactive',
+      status: c.isActive ? 'Active' : 'Suspended',
       mrr: Number(c.subscription?.pricePerMonth) || 0,
       region: c.city,
       rccm: c.rccmNumber,
       email: c.email,
       joinedDate: c.createdAt.toISOString(),
       contactPerson: c.legalName,
-      health: {
-        payment: 'good',
-        usage: 'good',
-        support: 'good',
-      },
     }));
   }
 
@@ -115,12 +137,22 @@ export class DashboardService {
       },
     });
 
-    return payments.map((p) => ({
+    // Nombre réel de tentatives échouées pour ce même abonnement
+    // (au lieu d'une valeur fixe qui ne voulait rien dire)
+    const attemptCounts = await Promise.all(
+      payments.map((p) =>
+        this.prisma.payment.count({
+          where: { subscriptionId: p.subscriptionId, status: 'FAILED' },
+        }),
+      ),
+    );
+
+    return payments.map((p, i) => ({
       id: p.id,
       companyName: p.company.legalName,
       amount: Number(p.amount),
-      attempts: 1,
-      error: p.description || 'Payment failed', // ✅ CORRIGÉ
+      attempts: attemptCounts[i],
+      error: p.description || 'Payment failed',
       contact: p.company.email,
       date: p.createdAt.toISOString(),
     }));
@@ -130,12 +162,13 @@ export class DashboardService {
     try {
       await this.prisma.$queryRaw`SELECT 1`;
       const uptime = Math.floor(process.uptime() / 60);
+      const mem = process.memoryUsage();
 
       return {
         database: 'healthy',
         uptime,
-        cpuLoad: 0,
-        memoryUsage: 0,
+        cpuLoad: Math.round(os.loadavg()[0] * 100) / 100,
+        memoryUsage: Math.round((mem.heapUsed / mem.heapTotal) * 100),
       };
     } catch (error) {
       return {

@@ -83,6 +83,30 @@ export class SubscriptionCronService {
   }
 
   // ==========================================================================
+  // 🔎 CHARIOW — VÉRIFIER LES VENTES EN ATTENTE (TOUTES LES 5 MINUTES)
+  // ==========================================================================
+  //
+  // Même filet de sécurité que Moteki, pour le 3e prestataire.
+  // ==========================================================================
+
+  @Cron('*/5 * * * *', {
+    name: 'check-pending-chariow-sales',
+    timeZone: 'Africa/Brazzaville',
+  })
+  async handlePendingChariowSales() {
+    try {
+      const result = await this.subscriptionsService.checkPendingChariowSales();
+      if (result.checked > 0 || result.expired > 0) {
+        this.logger.log(
+          `🔎 [Chariow] ${result.checked} vente(s) vérifiée(s), ${result.activated} activée(s), ${result.expired} expirée(s)`,
+        );
+      }
+    } catch (error) {
+      this.logger.error('❌ Error checking pending Chariow sales:', error);
+    }
+  }
+
+  // ==========================================================================
   // 🧹 NETTOYER LES PAIEMENTS ÉCHOUÉS (TOUS LES LUNDIS À 2H00)
   // ==========================================================================
 

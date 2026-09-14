@@ -94,6 +94,71 @@ export class MonitoringService {
     };
   }
 
+  async getSystemLogs(filters: {
+    source?: string;
+    level?: string;
+    companyId?: string;
+    from?: string;
+    to?: string;
+    page?: number;
+    limit?: number;
+  }) {
+    const take = Math.min(filters.limit ?? 100, 500);
+    const skip = ((filters.page ?? 1) - 1) * take;
+    const where: any = {};
+    if (filters.source) where.source = filters.source;
+    if (filters.level) where.level = filters.level.toUpperCase();
+    if (filters.companyId) where.companyId = filters.companyId;
+    if (filters.from || filters.to) {
+      where.createdAt = {};
+      if (filters.from) where.createdAt.gte = new Date(filters.from);
+      if (filters.to) where.createdAt.lte = new Date(filters.to);
+    }
+
+    const [logs, total] = await Promise.all([
+      this.prisma.systemLog.findMany({
+        where,
+        skip,
+        take,
+        orderBy: { createdAt: 'desc' },
+        include: {
+          company: { select: { id: true, legalName: true, tradeName: true } },
+        },
+      }),
+      this.prisma.systemLog.count({ where }),
+    ]);
+
+    return {
+      data: logs.map((l) => ({
+        id: l.id,
+        source: l.source,
+        level: l.level,
+        message: l.message,
+        details: l.details,
+        companyId: l.companyId,
+        companyName: l.company?.tradeName || l.company?.legalName || null,
+        durationMs: l.durationMs,
+        createdAt: l.createdAt,
+      })),
+      meta: {
+        total,
+        page: filters.page ?? 1,
+        limit: take,
+        totalPages: Math.ceil(total / take),
+      },
+    };
+  }
+
+  /** Liste des sources distinctes (noms de crons/jobs) pour peupler un filtre. */
+  async getSystemLogSources() {
+    const rows = await this.prisma.systemLog.findMany({
+      distinct: ['source'],
+      select: { source: true },
+      orderBy: { source: 'asc' },
+    });
+    return rows.map((r) => r.source);
+  }
+
   async getSecurityEvents(limit = 200) {
     const events = await this.prisma.activityLog.findMany({
       where: {

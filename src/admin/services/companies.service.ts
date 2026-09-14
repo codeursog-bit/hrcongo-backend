@@ -4,6 +4,7 @@
 
 import { Injectable, Logger, NotFoundException, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
+import { AdminSubscriptionsService } from './subscriptions.service';
 import {
   UpdateCompanyStatusDto,
   ArchiveCompanyDto,
@@ -21,7 +22,10 @@ interface CompanyFilters {
 export class AdminCompaniesService {
   private readonly logger = new Logger(AdminCompaniesService.name);
 
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private prisma: PrismaService,
+    private subscriptionsService: AdminSubscriptionsService,
+  ) {}
 
   // ==========================================================================
   // 📖 LECTURE
@@ -89,11 +93,6 @@ export class AdminCompaniesService {
       joinedDate: c.createdAt.toISOString(),
       contactPerson: c.legalName,
       archivedAt: c.archivedAt,
-      health: {
-        payment: 'good',
-        usage: 'good',
-        support: 'good',
-      },
     }));
   }
 
@@ -228,6 +227,17 @@ export class AdminCompaniesService {
         archivedByUserId: actorUserId,
       },
     });
+
+    // On coupe aussi l'abonnement : sinon il continue de compter dans le MRR
+    // et le client archivé continue de recevoir des relances de renouvellement.
+    const subscription = await this.prisma.subscription.findUnique({ where: { companyId: id } });
+    if (subscription && subscription.status !== 'CANCELED') {
+      await this.subscriptionsService.suspend(
+        id,
+        { status: 'CANCELED', reason: `Archivage de l'entreprise${dto.reason ? ' — ' + dto.reason : ''}` },
+        actorUserId,
+      );
+    }
 
     await this.logAction(actorUserId, {
       action: 'COMPANY_ARCHIVED',

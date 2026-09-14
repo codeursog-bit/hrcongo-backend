@@ -3,12 +3,18 @@
 // ✅ v5.1 — Fix TS : randomMsg typed correctly (no mixed string | function)
 // ============================================================================
 
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { PrismaService } from '../../prisma/prisma.service';
 import { PushNotificationsService } from '../../notifications/push-notifications.service';
 import { NotificationsService } from '../../notifications/notifications.service';
 import { NotificationType } from '@prisma/client';
+import {
+  SystemLogsService,
+  SystemLogSkip,
+} from '../../system-logs/system-logs.service';
+import { CronLockService } from '../../cron-lock/cron-lock.service';
+import { PlatformSettingsService } from '../../platform-settings/platform-settings.service';
 import {
   AttendanceUtilsService,
   WEEKLY_NORMAL_HOURS,
@@ -18,7 +24,8 @@ import {
 // ─── Messages : rappel AVANT le début du shift ───────────────────────────────
 // Rappel envoyé X min AVANT le début réel du shift (valeur fixe, pas de
 // config par entreprise — cf. décision produit du 05/09/2026)
-const PRE_SHIFT_REMINDER_MINUTES = 20;
+// Le délai est maintenant configurable via PlatformSettings (voir super admin)
+// au lieu d'être figé ici.
 
 const PRE_SHIFT_MESSAGES: Array<{ title: string; body: (mins: number) => string }> = [
   {
@@ -110,15 +117,35 @@ function randomItem<T>(arr: T[]): T {
 }
 
 @Injectable()
-export class AttendanceCronService {
+export class AttendanceCronService implements OnModuleDestroy {
   private readonly logger = new Logger(AttendanceCronService.name);
+  // Suivi de ce que CE process détient vraiment — pour ne jamais libérer,
+  // sur arrêt, le verrou d'une autre instance encore active (important le
+  // jour où il y a plusieurs instances backend en parallèle).
+  private heldLocks = new Set<string>();
 
   constructor(
     private prisma: PrismaService,
     private pushService: PushNotificationsService,
     private notificationsService: NotificationsService,
     private utils: AttendanceUtilsService,
+    private systemLogs: SystemLogsService,
+    private cronLock: CronLockService,
+    private platformSettings: PlatformSettingsService,
   ) {}
+
+  /**
+   * Arrêt propre (Ctrl+C, redémarrage nodemon/ts-node-dev, déploiement) :
+   * on libère les verrous qu'on aurait pu laisser pris, pour ne pas faire
+   * attendre le TTL au prochain démarrage. Sur un crash brutal (kill -9,
+   * coupure serveur), ce hook ne s'exécute pas — le TTL reste le filet de
+   * sécurité dans ce cas-là.
+   */
+  async onModuleDestroy() {
+    await Promise.all(
+      [...this.heldLocks].map((name) => this.cronLock.release(name)),
+    );
+  }
 
   // ============================================================================
   // CRON 0 — Rappels AVANT le shift (toutes les 5 min)
@@ -129,9 +156,21 @@ export class AttendanceCronService {
   // ============================================================================
   @Cron('*/5 * * * *', { timeZone: 'Africa/Brazzaville' })
   async handlePreShiftReminders(): Promise<void> {
+    const LOCK = 'attendance-cron:pre-shift';
+    if (!(await this.cronLock.acquire(LOCK, 270))) {
+      this.logger.debug(`⏭️ ${LOCK} déjà en cours ailleurs, ce tick est sauté`);
+      return;
+    }
+    this.heldLocks.add(LOCK);
+
+    const startedAt = Date.now();
     const now = new Date();
     const today = this.today();
     try {
+      // 🆕 Délai configurable par le super admin (avant: figé à 20 en dur)
+      const platformSettings = await this.platformSettings.get();
+      const preShiftMinutes = platformSettings.preShiftReminderMinutes;
+
       const holidays = await this.prisma.publicHoliday.findMany({
         where: { date: today },
         select: { companyId: true },
@@ -149,16 +188,16 @@ export class AttendanceCronService {
         const settings = company.payrollSettings[0];
         if (!settings) continue;
         const officialStartHour = settings.officialStartHour ?? 8;
-        const preShiftMinutes = PRE_SHIFT_REMINDER_MINUTES;
         const workDays = (settings.workDays as number[]) || [1, 2, 3, 4, 5];
         const nowMin = now.getHours() * 60 + now.getMinutes();
         const TOTAL = 24 * 60;
 
         if (holidayCompanyIds.has(company.id)) continue;
 
-        // Uniquement les employés "connectés" (abonnés aux notifications
-        // push) et pas encore pointés aujourd'hui — inutile de les prévenir
-        // s'ils ont déjà pointé.
+        // ⚠️ On ne filtre PLUS sur pushNotifEnabled/pushToken ici — sinon
+        // ces employés disparaissent silencieusement de la requête et on ne
+        // peut jamais savoir pourquoi ils n'ont pas été notifiés. Le filtre
+        // se fait maintenant DANS la boucle, avec une raison de skip tracée.
         const employees = await this.prisma.employee.findMany({
           where: {
             companyId: company.id,
@@ -171,7 +210,6 @@ export class AttendanceCronService {
                 endDate: { gte: new Date(today) },
               },
             },
-            user: { pushNotifEnabled: true, pushToken: { not: null } },
           },
           include: {
             user: {
@@ -180,35 +218,20 @@ export class AttendanceCronService {
           },
         });
 
-        for (const emp of employees) {
-          if (!emp.user?.id) continue;
+        // ✅ Une seule requête groupée pour toute l'entreprise, au lieu d'un
+        // findFirst par employé (N+1 — voir découverte du 11/09/2026).
+        const shiftMap = await this.getShiftAssignmentMap(
+          employees.map((e) => e.id),
+          today,
+          now.getDay(),
+        );
 
-          const sa = await this.prisma.employeeShiftAssignment.findFirst({
-            where: {
-              employeeId: emp.id,
-              OR: [
-                { specificDate: today },
-                {
-                  dayOfWeek: now.getDay(),
-                  specificDate: null,
-                  OR: [
-                    { validFrom: null },
-                    { validFrom: { lte: new Date(today) } },
-                  ],
-                  AND: [
-                    {
-                      OR: [
-                        { validUntil: null },
-                        { validUntil: { gte: new Date(today) } },
-                      ],
-                    },
-                  ],
-                },
-              ],
-            },
-            include: { shift: true },
-            orderBy: { specificDate: 'desc' },
-          });
+        let inWindowCount = 0;
+        let notifiedCount = 0;
+        const skipped: SystemLogSkip[] = [];
+
+        for (const emp of employees) {
+          const sa = shiftMap.get(emp.id);
 
           const shift = sa?.shift;
           if (!shift && !workDays.includes(now.getDay())) continue;
@@ -223,12 +246,33 @@ export class AttendanceCronService {
             nowMin >= target && nowMin < target + 5;
           if (!withinTick) continue;
 
+          // À partir d'ici, cet employé AURAIT DÛ être notifié à ce tick —
+          // tout skip à partir de maintenant est tracé avec sa raison.
+          inWindowCount++;
+          const empName = `${emp.firstName} ${emp.lastName}`;
+
+          if (!emp.user?.id) {
+            skipped.push({ employeeId: emp.id, name: empName, reason: 'Aucun compte utilisateur lié' });
+            continue;
+          }
+          if (!emp.user.pushNotifEnabled) {
+            skipped.push({ employeeId: emp.id, name: empName, reason: 'Notifications push désactivées dans le profil' });
+            continue;
+          }
+          if (!emp.user.pushToken) {
+            skipped.push({ employeeId: emp.id, name: empName, reason: 'Push activé mais aucun token enregistré (souscription navigateur/app jamais synchronisée)' });
+            continue;
+          }
+
           // Idempotence : une seule notification "pré-shift" par employé/jour,
           // même si le cron tourne plusieurs fois dans la fenêtre ou sur
           // plusieurs instances backend en parallèle.
           const dedupKey = `pre-shift:${emp.id}:${today}`;
           const canNotify = await this.notificationsService.tryClaim(dedupKey);
-          if (!canNotify) continue;
+          if (!canNotify) {
+            skipped.push({ employeeId: emp.id, name: empName, reason: 'Déjà notifié pour ce shift (dédoublonnage)' });
+            continue;
+          }
 
           const msg = randomItem(PRE_SHIFT_MESSAGES);
           const title = msg.title;
@@ -256,13 +300,47 @@ export class AttendanceCronService {
             tag: 'pre-shift-reminder',
           });
 
+          notifiedCount++;
           this.logger.log(
-            `📲 Pré-shift (${preShiftMinutes}min) → ${emp.firstName} ${emp.lastName} (shift ${startH}h${String(startMin).padStart(2, '0')})`,
+            `📲 Pré-shift (${preShiftMinutes}min) → ${empName} (shift ${startH}h${String(startMin).padStart(2, '0')})`,
           );
+        }
+
+        // On n'écrit un log que s'il y avait au moins un employé "dans la
+        // fenêtre" ce tick — sinon on génère du bruit toutes les 5 min pour
+        // rien pour la majorité des entreprises qui n'ont personne à ce
+        // créneau précis.
+        if (inWindowCount > 0) {
+          const hasIssue = skipped.length > 0;
+          await this.systemLogs.log({
+            source: 'attendance-cron:pre-shift',
+            level: hasIssue ? 'WARNING' : 'INFO',
+            message: `${inWindowCount} employé(s) dans la fenêtre pré-shift — ${notifiedCount} notifié(s), ${skipped.length} non notifié(s)`,
+            details: { evaluated: inWindowCount, notified: notifiedCount, skipped },
+            companyId: company.id,
+          });
         }
       }
     } catch (err) {
       this.logger.error('❌ Cron pré-shift:', err);
+      await this.systemLogs.log({
+        source: 'attendance-cron:pre-shift',
+        level: 'ERROR',
+        message: `Le cron a échoué : ${err?.message ?? err}`,
+        details: { errors: [String(err?.stack ?? err)] },
+      });
+    } finally {
+      const durationMs = Date.now() - startedAt;
+      if (durationMs > 10_000) {
+        await this.systemLogs.log({
+          source: 'attendance-cron:pre-shift',
+          level: 'WARNING',
+          message: `Cron anormalement lent (${durationMs}ms)`,
+          durationMs,
+        });
+      }
+      this.heldLocks.delete(LOCK);
+      await this.cronLock.release(LOCK);
     }
   }
 
@@ -271,6 +349,14 @@ export class AttendanceCronService {
   // ============================================================================
   @Cron('*/10 * * * *', { timeZone: 'Africa/Brazzaville' })
   async handleCheckInReminders(): Promise<void> {
+    const LOCK = 'attendance-cron:check-in';
+    if (!(await this.cronLock.acquire(LOCK, 570))) {
+      this.logger.debug(`⏭️ ${LOCK} déjà en cours ailleurs, ce tick est sauté`);
+      return;
+    }
+    this.heldLocks.add(LOCK);
+
+    const startedAt = Date.now();
     const now = new Date();
     const today = this.today();
     try {
@@ -315,35 +401,21 @@ export class AttendanceCronService {
           },
         });
 
+        // ✅ Requête groupée au lieu d'un findFirst par employé.
+        const shiftMap = await this.getShiftAssignmentMap(
+          employees.map((e) => e.id),
+          today,
+          now.getDay(),
+        );
+
+        let inWindowCount = 0;
+        let notifiedCount = 0;
+        const skipped: SystemLogSkip[] = [];
+
         for (const emp of employees) {
           if (!emp.user?.id) continue;
 
-          const sa = await this.prisma.employeeShiftAssignment.findFirst({
-            where: {
-              employeeId: emp.id,
-              OR: [
-                { specificDate: today },
-                {
-                  dayOfWeek: now.getDay(),
-                  specificDate: null,
-                  OR: [
-                    { validFrom: null },
-                    { validFrom: { lte: new Date(today) } },
-                  ],
-                  AND: [
-                    {
-                      OR: [
-                        { validUntil: null },
-                        { validUntil: { gte: new Date(today) } },
-                      ],
-                    },
-                  ],
-                },
-              ],
-            },
-            include: { shift: true },
-            orderBy: { specificDate: 'desc' },
-          });
+          const sa = shiftMap.get(emp.id);
 
           const shift = sa?.shift;
           if (!shift && !workDays.includes(now.getDay())) continue;
@@ -360,6 +432,9 @@ export class AttendanceCronService {
               ? nowMin >= threshold && nowMin <= windowEnd
               : nowMin >= threshold || nowMin <= windowEnd;
           if (!inWindow) continue;
+
+          inWindowCount++;
+          const empName = `${emp.firstName} ${emp.lastName}`;
 
           // ✅ Fix TS : tableaux séparés, body résolu ici
           const isLate = nowMin > (startH * 60 + startMin + 20) % TOTAL;
@@ -390,6 +465,12 @@ export class AttendanceCronService {
             },
           });
 
+          if (!emp.user.pushNotifEnabled) {
+            skipped.push({ employeeId: emp.id, name: empName, reason: 'Notif in-app créée, mais push désactivé dans le profil' });
+          } else if (!emp.user.pushToken) {
+            skipped.push({ employeeId: emp.id, name: empName, reason: 'Notif in-app créée, mais aucun token push enregistré' });
+          }
+
           await this.pushService.sendPushToUser(emp.user.id, {
             title,
             body,
@@ -397,13 +478,43 @@ export class AttendanceCronService {
             tag: isLate ? 'checkin-late' : 'checkin-reminder',
           });
 
+          notifiedCount++;
           this.logger.log(
-            `📲 Check-in${isLate ? ' RETARD' : ''} → ${emp.firstName} ${emp.lastName} (shift ${startH}h${String(startMin).padStart(2, '0')})`,
+            `📲 Check-in${isLate ? ' RETARD' : ''} → ${empName} (shift ${startH}h${String(startMin).padStart(2, '0')})`,
           );
+        }
+
+        if (inWindowCount > 0) {
+          const hasIssue = skipped.length > 0;
+          await this.systemLogs.log({
+            source: 'attendance-cron:check-in',
+            level: hasIssue ? 'WARNING' : 'INFO',
+            message: `${inWindowCount} rappel(s) check-in — ${notifiedCount} notif(s) in-app créée(s), ${skipped.length} sans push effectif`,
+            details: { evaluated: inWindowCount, notified: notifiedCount, skipped },
+            companyId: company.id,
+          });
         }
       }
     } catch (err) {
       this.logger.error('❌ Cron check-in:', err);
+      await this.systemLogs.log({
+        source: 'attendance-cron:check-in',
+        level: 'ERROR',
+        message: `Le cron a échoué : ${err?.message ?? err}`,
+        details: { errors: [String(err?.stack ?? err)] },
+      });
+    } finally {
+      const durationMs = Date.now() - startedAt;
+      if (durationMs > 10_000) {
+        await this.systemLogs.log({
+          source: 'attendance-cron:check-in',
+          level: 'WARNING',
+          message: `Cron anormalement lent (${durationMs}ms)`,
+          durationMs,
+        });
+      }
+      this.heldLocks.delete(LOCK);
+      await this.cronLock.release(LOCK);
     }
   }
 
@@ -412,6 +523,14 @@ export class AttendanceCronService {
   // ============================================================================
   @Cron('*/5 * * * *', { timeZone: 'Africa/Brazzaville' })
   async handleCheckOutReminders(): Promise<void> {
+    const LOCK = 'attendance-cron:check-out';
+    if (!(await this.cronLock.acquire(LOCK, 270))) {
+      this.logger.debug(`⏭️ ${LOCK} déjà en cours ailleurs, ce tick est sauté`);
+      return;
+    }
+    this.heldLocks.add(LOCK);
+
+    const startedAt = Date.now();
     const now = new Date();
     const today = this.today();
     try {
@@ -450,35 +569,20 @@ export class AttendanceCronService {
           },
         });
 
+        // ✅ Requête groupée au lieu d'un findFirst par pointage ouvert.
+        const shiftMap = await this.getShiftAssignmentMap(
+          openAttendances.map((a) => a.employeeId),
+          today,
+          now.getDay(),
+        );
+
+        let notifiedCount = 0;
+        const skipped: SystemLogSkip[] = [];
+
         for (const att of openAttendances) {
           if (!att.employee.user?.id) continue;
 
-          const sa = await this.prisma.employeeShiftAssignment.findFirst({
-            where: {
-              employeeId: att.employeeId,
-              OR: [
-                { specificDate: today },
-                {
-                  dayOfWeek: now.getDay(),
-                  specificDate: null,
-                  OR: [
-                    { validFrom: null },
-                    { validFrom: { lte: new Date(today) } },
-                  ],
-                  AND: [
-                    {
-                      OR: [
-                        { validUntil: null },
-                        { validUntil: { gte: new Date(today) } },
-                      ],
-                    },
-                  ],
-                },
-              ],
-            },
-            include: { shift: true },
-            orderBy: { specificDate: 'desc' },
-          });
+          const sa = shiftMap.get(att.employeeId);
 
           const shift = sa?.shift;
           let empEndH = officialEndH;
@@ -495,6 +599,8 @@ export class AttendanceCronService {
               : nowMin >= empEndMin;
           if (!isAfterEnd) continue;
 
+          const empName = `${att.employee.firstName} ${att.employee.lastName}`;
+
           const hoursElapsed =
             (now.getTime() - new Date(att.checkIn!).getTime()) / 3_600_000;
           const shiftDuration = shift
@@ -503,6 +609,12 @@ export class AttendanceCronService {
               : shift.endHour - shift.startHour
             : workHoursPerDay;
           const pendingOT = Math.max(0, hoursElapsed - shiftDuration);
+
+          if (!att.employee.user.pushNotifEnabled) {
+            skipped.push({ employeeId: att.employeeId, name: empName, reason: 'Notif in-app créée, mais push désactivé dans le profil' });
+          } else if (!att.employee.user.pushToken) {
+            skipped.push({ employeeId: att.employeeId, name: empName, reason: 'Notif in-app créée, mais aucun token push enregistré' });
+          }
 
           if (overtimeEnabled && pendingOT > 0) {
             await this.prisma.attendance.update({
@@ -567,13 +679,43 @@ export class AttendanceCronService {
             });
           }
 
+          notifiedCount++;
           this.logger.log(
-            `📲 Check-out → ${att.employee.firstName} ${att.employee.lastName} (fin ${empEndH % 24}h)`,
+            `📲 Check-out → ${empName} (fin ${empEndH % 24}h)`,
           );
+        }
+
+        if (notifiedCount + skipped.length > 0) {
+          const hasIssue = skipped.length > 0;
+          await this.systemLogs.log({
+            source: 'attendance-cron:check-out',
+            level: hasIssue ? 'WARNING' : 'INFO',
+            message: `${notifiedCount} rappel(s) check-out — ${skipped.length} sans push effectif`,
+            details: { evaluated: notifiedCount + skipped.length, notified: notifiedCount, skipped },
+            companyId: company.id,
+          });
         }
       }
     } catch (err) {
       this.logger.error('❌ Cron check-out:', err);
+      await this.systemLogs.log({
+        source: 'attendance-cron:check-out',
+        level: 'ERROR',
+        message: `Le cron a échoué : ${err?.message ?? err}`,
+        details: { errors: [String(err?.stack ?? err)] },
+      });
+    } finally {
+      const durationMs = Date.now() - startedAt;
+      if (durationMs > 10_000) {
+        await this.systemLogs.log({
+          source: 'attendance-cron:check-out',
+          level: 'WARNING',
+          message: `Cron anormalement lent (${durationMs}ms)`,
+          durationMs,
+        });
+      }
+      this.heldLocks.delete(LOCK);
+      await this.cronLock.release(LOCK);
     }
   }
 
@@ -1103,6 +1245,48 @@ export class AttendanceCronService {
     const d = new Date();
     d.setDate(d.getDate() - 1);
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  }
+
+  /**
+   * Récupère les affectations de shift pour tout un lot d'employés en UNE
+   * seule requête (au lieu d'un findFirst par employé — un vrai N+1 qui
+   * plombait les 3 crons de pointage à mesure que la base grossit).
+   * Reproduit exactement la même logique de priorité que l'ancien
+   * `findFirst` par employé : date spécifique d'abord, sinon jour de
+   * semaine récurrent — même `orderBy`, donc même résultat, juste en un
+   * aller-retour DB au lieu de N.
+   */
+  private async getShiftAssignmentMap(
+    employeeIds: string[],
+    today: string,
+    dayOfWeek: number,
+  ) {
+    if (employeeIds.length === 0) return new Map<string, any>();
+
+    const assignments = await this.prisma.employeeShiftAssignment.findMany({
+      where: {
+        employeeId: { in: employeeIds },
+        OR: [
+          { specificDate: today },
+          {
+            dayOfWeek,
+            specificDate: null,
+            OR: [{ validFrom: null }, { validFrom: { lte: new Date(today) } }],
+            AND: [
+              { OR: [{ validUntil: null }, { validUntil: { gte: new Date(today) } }] },
+            ],
+          },
+        ],
+      },
+      include: { shift: true },
+      orderBy: { specificDate: 'desc' },
+    });
+
+    const map = new Map<string, (typeof assignments)[number]>();
+    for (const a of assignments) {
+      if (!map.has(a.employeeId)) map.set(a.employeeId, a);
+    }
+    return map;
   }
 
   private async notif(data: {

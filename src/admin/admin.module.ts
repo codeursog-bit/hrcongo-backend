@@ -13,12 +13,14 @@ import { AnalyticsService } from './services/analytics.service';
 import { MonitoringService } from './services/monitoring.service';
 import { SettingsService } from './services/settings.service';
 import { ErrorTrackingService } from './services/error-tracking.service';
+import { AdminUserActivityService } from './services/user-activity.service';
 import { CleanupModule } from '../cleanup/cleanup.module';
 import { PrismaModule } from '../prisma/prisma.module';
+import { PlatformSettingsModule } from '../platform-settings/platform-settings.module';
 import { UltraAdminGuard } from './guards/ultra-admin.guard';
 
 @Module({
-  imports: [PrismaModule, CleanupModule],
+  imports: [PrismaModule, CleanupModule, PlatformSettingsModule],
   controllers: [AdminController],
   providers: [
     // Services
@@ -30,6 +32,7 @@ import { UltraAdminGuard } from './guards/ultra-admin.guard';
     MonitoringService,
     SettingsService,
     ErrorTrackingService,
+    AdminUserActivityService,
     // Guards
     UltraAdminGuard,
   ],
@@ -43,6 +46,7 @@ import { UltraAdminGuard } from './guards/ultra-admin.guard';
     MonitoringService,
     SettingsService,
     ErrorTrackingService,
+    AdminUserActivityService,
   ],
 })
 export class AdminModule {}

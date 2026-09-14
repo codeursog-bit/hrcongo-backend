@@ -26,10 +26,13 @@ import { MonitoringService } from './services/monitoring.service';
 import { ErrorTrackingService } from './services/error-tracking.service';
 import { CleanupService } from '../cleanup/cleanup.service';
 import { SettingsService } from './services/settings.service';
+import { AdminUserActivityService } from './services/user-activity.service';
 import {
   UpdateCompanyStatusDto,
   ArchiveCompanyDto,
   UpdateCompanyDto,
+  ActivateSubscriptionDto,
+  SetSubscriptionPeriodDto,
   UpdateSubscriptionPlanDto,
   SuspendSubscriptionDto,
   ExtendSubscriptionDto,
@@ -48,6 +51,7 @@ export class AdminController {
     private readonly errorTrackingService: ErrorTrackingService,
     private readonly cleanupService: CleanupService,
     private readonly settingsService: SettingsService,
+    private readonly userActivityService: AdminUserActivityService,
   ) {}
 
   // ==========================================================================
@@ -57,6 +61,25 @@ export class AdminController {
   @Get('stats')
   async getDashboardStats() {
     return this.dashboardService.getStats();
+  }
+
+  // ==========================================================================
+  // 👀 SECTION PRÉSENCE / ACTIVITÉ UTILISATEURS
+  // ==========================================================================
+
+  @Get('users/online')
+  async getUsersOnlineNow() {
+    return this.userActivityService.getOnlineNow();
+  }
+
+  @Get('users/recently-online')
+  async getUsersRecentlyOnline(@Query('hours') hours?: string) {
+    return this.userActivityService.getRecentlyOnline(hours ? +hours : 24);
+  }
+
+  @Get('users/most-active')
+  async getMostActiveUsers(@Query('period') period?: 'today' | 'week' | 'month') {
+    return this.userActivityService.getMostActive(period ?? 'week');
   }
 
   // ==========================================================================
@@ -119,9 +142,35 @@ export class AdminController {
   // 💳 SECTION ABONNEMENTS
   // ==========================================================================
 
+  @Get('subscriptions')
+  async getAllSubscriptions(
+    @Query('expiringInDays') expiringInDays?: string,
+    @Query('expired') expired?: string,
+    @Query('status') status?: string,
+  ) {
+    return this.subscriptionsService.getAll({
+      expiringInDays: expiringInDays ? +expiringInDays : undefined,
+      expired: expired === 'true',
+      status,
+    });
+  }
+
   @Patch('companies/:id/subscription/activate')
-  async activateSubscription(@Param('id') id: string, @Request() req: any) {
-    return this.subscriptionsService.activate(id, req.user.userId);
+  async activateSubscription(
+    @Param('id') id: string,
+    @Body() dto: ActivateSubscriptionDto,
+    @Request() req: any,
+  ) {
+    return this.subscriptionsService.activate(id, dto, req.user.userId);
+  }
+
+  @Patch('companies/:id/subscription/period')
+  async setSubscriptionPeriod(
+    @Param('id') id: string,
+    @Body() dto: SetSubscriptionPeriodDto,
+    @Request() req: any,
+  ) {
+    return this.subscriptionsService.setPeriod(id, dto, req.user.userId);
   }
 
   @Patch('companies/:id/subscription/suspend')
@@ -208,6 +257,32 @@ export class AdminController {
     return this.monitoringService.getSecurityEvents(limit ? +limit : 200);
   }
 
+  @Get('monitoring/system-logs')
+  async getSystemLogs(
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+    @Query('source') source?: string,
+    @Query('level') level?: string,
+    @Query('companyId') companyId?: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+  ) {
+    return this.monitoringService.getSystemLogs({
+      page: page ? +page : 1,
+      limit: limit ? +limit : 100,
+      source,
+      level,
+      companyId,
+      from,
+      to,
+    });
+  }
+
+  @Get('monitoring/system-logs/sources')
+  async getSystemLogSources() {
+    return this.monitoringService.getSystemLogSources();
+  }
+
   @Get('monitoring/stats')
   async getMonitoringStats() {
     return this.monitoringService.getGlobalStats();
@@ -230,6 +305,14 @@ export class AdminController {
   @Get('settings')
   async getGlobalSettings() {
     return this.settingsService.getGlobalSettings();
+  }
+
+  @Patch('settings')
+  async updateGlobalSettings(
+    @Body() dto: { preShiftReminderMinutes?: number },
+    @Request() req: any,
+  ) {
+    return this.settingsService.updateGlobalSettings(dto, req.user.userId);
   }
 
   // ── Error Tracking ──────────────────────────────────────────────────────

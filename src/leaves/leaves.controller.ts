@@ -96,6 +96,27 @@ export class LeavesController {
   }
 
   /**
+   * Reliquats de retour anticipé encore disponibles pour un employé — les
+   * jours posés mais non pris lors d'un retour anticipé, qu'il peut encore
+   * rattraper (repos non payé, sans impact sur son cycle en cours). Utilisé
+   * par "Mon espace" (l'employé voit son reliquat) et par le RH lors de la
+   * planification d'un rattrapage.
+   * ?companyId= : optionnel, utilisé UNIQUEMENT par le cabinet
+   */
+  @Get('carryover/:employeeId')
+  getCarryoverBalance(
+    @Param('employeeId') employeeId: string,
+    @Request() req,
+    @Query('companyId') companyId?: string,
+  ) {
+    return this.leavesService.getCarryoverBalance(
+      employeeId,
+      req.user.userId,
+      companyId,
+    );
+  }
+
+  /**
    * Télécharge le "Programme des départs en congé" Orca rempli (2 onglets)
    * pour un mois donné — écriture directe dans leur fichier .xlsx original.
    */
@@ -184,6 +205,9 @@ export class LeavesController {
       reason?: string;
       extraDaysGranted?: number;
       resumptionNote?: string;
+      // ✅ Rattrapage d'un reliquat de retour anticipé — voir
+      // createCarryoverLeave() côté service.
+      carriedFromLeaveId?: string;
     },
     @Request() req,
     @Query('companyId') companyId?: string,
@@ -496,6 +520,55 @@ export class LeavesController {
       new Date(endDate),
       companyId,
     );
+  }
+
+  /**
+   * Modifier une planification/congé déjà existant (dates, type, motif,
+   * jours d'ancienneté...) — édition EN PLACE, ne crée jamais de nouvelle
+   * ligne, pour ne pas dupliquer la planification sur le programme des
+   * départs, le planning ou le calendrier. Réservé RH/Admin.
+   * ?companyId= : optionnel, utilisé UNIQUEMENT par le cabinet
+   */
+  @Patch(':id')
+  @UseGuards(RolesGuard)
+  @Roles('ADMIN', 'HR_MANAGER', 'SUPER_ADMIN')
+  update(
+    @Param('id') id: string,
+    @Body()
+    dto: {
+      type?: 'ANNUAL' | 'ANNUAL_ANTICIPATED';
+      startDate?: string;
+      endDate?: string;
+      reason?: string;
+      extraDaysGranted?: number;
+      resumptionNote?: string;
+    },
+    @Request() req,
+    @Query('companyId') companyId?: string,
+  ) {
+    return this.leavesService.updateLeavePlanning(
+      id,
+      dto,
+      req.user.userId,
+      companyId,
+    );
+  }
+
+  /**
+   * Supprimer définitivement un congé/une planification — distinct de
+   * 'cancel' (qui garde la ligne pour historique). Restaure d'abord le
+   * solde/cycle éventuellement débité, puis retire la ligne. Réservé RH/Admin.
+   * ?companyId= : optionnel, utilisé UNIQUEMENT par le cabinet
+   */
+  @Delete(':id')
+  @UseGuards(RolesGuard)
+  @Roles('ADMIN', 'HR_MANAGER', 'SUPER_ADMIN')
+  remove(
+    @Param('id') id: string,
+    @Request() req,
+    @Query('companyId') companyId?: string,
+  ) {
+    return this.leavesService.deleteLeave(id, req.user.userId, companyId);
   }
 
   /**

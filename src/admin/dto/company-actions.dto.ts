@@ -61,6 +61,50 @@ export class UpdateCompanyDto {
 
 // ── Abonnements ──────────────────────────────────────────────────────────────
 
+export class ActivateSubscriptionDto {
+  // Montant réellement encaissé hors plateforme. Si omis/0 => aucune ligne
+  // de paiement n'est créée (geste gratuit / essai / commercial).
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  amount?: number;
+
+  @IsOptional()
+  @IsIn(['Virement bancaire', 'Espèces', 'Mobile Money', 'Autre'])
+  paymentMethod?: string;
+
+  @IsOptional()
+  @IsString()
+  reason?: string;
+}
+
+export class SetSubscriptionPeriodDto {
+  @IsOptional()
+  @IsString()
+  startDate?: string; // ISO — si omis, garde la date de début actuelle
+
+  @IsString()
+  endDate: string; // ISO — date de fin exacte de la période
+
+  @IsOptional()
+  @IsIn(['MONTHLY', 'YEARLY'])
+  billingCycle?: 'MONTHLY' | 'YEARLY';
+
+  // Paiement manuel optionnel — même logique que ActivateSubscriptionDto
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  amount?: number;
+
+  @IsOptional()
+  @IsIn(['Virement bancaire', 'Espèces', 'Mobile Money', 'Autre'])
+  paymentMethod?: string;
+
+  @IsOptional()
+  @IsString()
+  reason?: string;
+}
+
 export class UpdateSubscriptionPlanDto {
   @IsIn(['FREE', 'BASIC', 'PRO', 'ENTERPRISE'])
   plan: string;
@@ -90,6 +134,16 @@ export class ExtendSubscriptionDto {
   @IsInt()
   @Min(1)
   days: number;
+
+  // Idem ActivateSubscriptionDto : optionnel, crée une ligne de paiement si fourni.
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  amount?: number;
+
+  @IsOptional()
+  @IsIn(['Virement bancaire', 'Espèces', 'Mobile Money', 'Autre'])
+  paymentMethod?: string;
 
   @IsOptional()
   @IsString()
