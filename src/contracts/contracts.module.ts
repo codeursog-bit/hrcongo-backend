@@ -2,7 +2,6 @@
 // 📁 src/contracts/contracts.module.ts
 // ============================================================================
 import { Module } from '@nestjs/common';
-import { ScheduleModule } from '@nestjs/schedule';
 import { ContractExpiryService } from './contract-expiry.service';
 import { ContractExpiryScheduler } from './contract-expiry.scheduler';
 import { TrialPeriodService } from './trial-period.service';
@@ -15,7 +14,6 @@ import { FiscalModule } from '../payroll/fiscal/fiscal.module';
 
 @Module({
   imports: [
-    ScheduleModule.forRoot(),
     PrismaModule,
     NotificationsModule,
     FiscalModule,

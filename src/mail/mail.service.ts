@@ -810,7 +810,7 @@ export class MailService {
         <p style="color:#e2e8f0;font-size:14px;line-height:1.7;margin:0;">
           Notre équipe à Pointe-Noire vous répondra dans les prochaines <strong>24 heures ouvrées</strong>.
           Si votre demande est urgente, appelez-nous directement au
-          <a href="tel:+242053079107" style="color:#06b6d4;text-decoration:none;font-weight:700;">+242 053 079 107</a>.
+          <a href="tel:+242064133693" style="color:#06b6d4;text-decoration:none;font-weight:700;">+242 06 413 36 93</a>.
         </p>
       </div>
 
@@ -818,7 +818,7 @@ export class MailService {
         <tr>
           <td style="padding:12px 0;border-bottom:1px solid rgba(255,255,255,0.06);">
             <span style="color:#94a3b8;font-size:13px;">📧</span>
-            <a href="mailto:contact@konzarh.com" style="color:#06b6d4;font-size:13px;text-decoration:none;margin-left:8px;">contact@konzarh.com</a>
+            <a href="mailto:contact@konzarh.com" style="color:#06b6d4;font-size:13px;text-decoration:none;margin-left:8px;">rhkonza@gmail.com</a>
           </td>
         </tr>
         <tr>

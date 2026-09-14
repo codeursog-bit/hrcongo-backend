@@ -47,7 +47,6 @@
 
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
-import { ScheduleModule } from '@nestjs/schedule';
 import { SubscriptionsService } from './subscriptions.service';
 import { SubscriptionsController } from './subscriptions.controller';
 import { WebhooksController } from './webhooks.controller';
@@ -70,7 +69,6 @@ import { NotificationsModule } from '../notifications/notifications.module';
     AffiliateModule,
     CabinetModule, // ← pour injecter CabinetSubscriptionService dans WebhooksController
     NotificationsModule, // ← pour les rappels J-7/J-3/J-1 et l'alerte "abonnement expiré"
-    ScheduleModule.forRoot(),
   ],
   controllers: [
     SubscriptionsController,
