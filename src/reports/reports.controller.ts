@@ -58,6 +58,21 @@ export class ReportsController {
   }
 
   /**
+   * ✅ Répartition ITS / BNC (10%/20%) — par salarié, par mois et par
+   * département, sur l'année. Ne mélange jamais les trois impôts entre
+   * eux (cf. FiscalBreakdown dans payroll-recap.service.ts).
+   * GET /reports/fiscal-breakdown?year=&companyId=xxx
+   */
+  @Get('fiscal-breakdown')
+  getFiscalBreakdown(
+    @Request() req,
+    @Query('year', ParseIntPipe) year: number,
+    @Query('companyId') companyId?: string,
+  ) {
+    return this.payrollRecapService.getFiscalBreakdown(req.user.userId, year, companyId);
+  }
+
+  /**
    * ✅ Export Excel du récap mensuel — design pro, cellules déverrouillées
    * (modifiables à la main), formules SUM sur la ligne TOTAUX.
    * GET /reports/personnel-recap/export?month=&year=&companyId=xxx

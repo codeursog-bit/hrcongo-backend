@@ -107,10 +107,25 @@ export interface RecapRow {
   salBrut: number;
   cnss: number;
   irpp: number;
+  // ✅ Précise ce que "irpp" représente vraiment pour CETTE ligne — le champ
+  // brut peut contenir un vrai ITS (barème progressif) ou une retenue BNC
+  // (10%/20%, prestataires) selon payroll-calculator.service.ts. Toujours
+  // afficher ce label à côté du montant pour ne jamais laisser croire que
+  // deux impôts différents sont la même chose. Voir classifyFiscalCategory.
+  fiscalCategory: 'ITS' | 'BNC_10' | 'BNC_20' | 'EXONERE' | 'AGENCE' | 'MIXTE';
   reste1: number;
 
   indemnites: Record<string, number>; // clé = IndemniteColumn.key
   sousTotal: number;
+
+  // ✅ Avantages en nature (logement, véhicule, téléphone fournis...) —
+  // sous-ensemble informatif, PAS exclusif des indemnités/du brut : un
+  // avantage en nature reste normalement dans salBrut (via isTaxable/isCnss
+  // comme n'importe quelle prime). Ce total sert uniquement à l'afficher
+  // séparément dans les rapports — identifié par le nom de la prime, qui
+  // doit correspondre à un BonusTemplate marqué isNature=true dans la
+  // configuration de l'entreprise (voir getNatureLabels ci-dessous).
+  avantagesNature: number;
 
   avance: number;
   pharmacie: number;
@@ -139,6 +154,75 @@ export interface MonthlyRecap {
   totals: RecapRow;
 }
 
+// ══════════════════════════════════════════════════════════════════════
+// ✅ Répartition ITS / BNC (voir getFiscalBreakdown ci-dessous) — jamais
+// additionner its + bnc10 + bnc20 dans un même total : ce sont trois
+// impôts différents, à des taux différents, versés au même endroit (DGI)
+// mais qui ne doivent jamais se confondre dans un rapport.
+// ══════════════════════════════════════════════════════════════════════
+export type FiscalCategory = 'ITS' | 'BNC_10' | 'BNC_20' | 'EXONERE' | 'AGENCE';
+
+export interface FiscalMonthlyAmount {
+  month: number; // 1-12
+  its: number;
+  bnc10: number;
+  bnc20: number;
+}
+
+export interface FiscalEmployeeRow {
+  employeeId: string;
+  employeeName: string;
+  matricule: string | null;
+  departmentId: string | null;
+  departmentName: string;
+  contractType: string;
+  category: FiscalCategory;
+  monthly: FiscalMonthlyAmount[]; // toujours 12 entrées, mois sans paie = 0
+  annualIts: number;
+  annualBnc10: number;
+  annualBnc20: number;
+}
+
+export interface FiscalDepartmentRow {
+  departmentId: string | null;
+  departmentName: string;
+  monthly: FiscalMonthlyAmount[];
+  annualIts: number;
+  annualBnc10: number;
+  annualBnc20: number;
+}
+
+export interface FiscalBreakdown {
+  year: number;
+  employees: FiscalEmployeeRow[];
+  byDepartment: FiscalDepartmentRow[];
+  totals: {
+    monthly: FiscalMonthlyAmount[];
+    annualIts: number;
+    annualBnc10: number;
+    annualBnc20: number;
+  };
+}
+
+function emptyFiscalMonths(): FiscalMonthlyAmount[] {
+  return Array.from({ length: 12 }, (_, i) => ({ month: i + 1, its: 0, bnc10: 0, bnc20: 0 }));
+}
+
+function classifyFiscalCategory(
+  contractType: string,
+  isResident: boolean | string | null | undefined,
+): FiscalCategory {
+  if (contractType === 'STAGE') return 'EXONERE';
+  if (contractType === 'INTERIM') return 'AGENCE';
+  if (contractType === 'CONSULTANT' || contractType === 'PRESTATAIRE') {
+    // Même règle que payroll-calculator.service.ts : résident par défaut
+    // sauf mention explicite du contraire.
+    const resident = isResident !== false && isResident !== 'false';
+    return resident ? 'BNC_10' : 'BNC_20';
+  }
+  return 'ITS'; // CDI / CDD
+}
+
 export interface AnnualRecap {
   year: number;
   indemniteColumns: IndemniteColumn[];
@@ -155,6 +239,25 @@ function normalize(s: string | null | undefined): string {
     .replace(/[\u0300-\u036f]/g, '') // retire les accents
     .toUpperCase()
     .trim();
+}
+
+// ✅ Avantages en nature — source de vérité UNIQUE : BonusTemplate.isNature,
+// coché par le RH à la configuration de la prime (jamais déduit ici). On ne
+// duplique pas ce flag sur EmployeeBonus/PayrollItem : on relit simplement,
+// pour chaque entreprise, le nom des primes marquées "en nature" et on
+// matche par libellé (normalisé) sur les PayrollItem — donc si le RH
+// renomme une prime après coup, il faut renommer aussi le nom du template
+// pour que le rapprochement reste correct. Limite connue, acceptée pour
+// rester simple.
+export async function getNatureLabels(
+  prisma: PrismaService,
+  companyId: string,
+): Promise<Set<string>> {
+  const templates = await prisma.bonusTemplate.findMany({
+    where: { companyId, isNature: true },
+    select: { name: true },
+  });
+  return new Set(templates.map((t) => normalize(t.name)));
 }
 
 const INDEMNITY_PATTERNS: { key: string; label: string; test: (n: string) => boolean }[] = [
@@ -227,6 +330,7 @@ function emptyRow(
   matricule: string | null = null,
   status: RecapRow['status'] = 'PAYE',
   leaveLabelText: string | null = null,
+  fiscalCategory: RecapRow['fiscalCategory'] = 'MIXTE',
 ): RecapRow {
   return {
     employeeId,
@@ -237,9 +341,11 @@ function emptyRow(
     salBrut: 0,
     cnss: 0,
     irpp: 0,
+    fiscalCategory,
     reste1: 0,
     indemnites: {},
     sousTotal: 0,
+    avantagesNature: 0,
     avance: 0,
     pharmacie: 0,
     tol: 0,
@@ -259,6 +365,7 @@ function addInto(target: RecapRow, source: RecapRow) {
     target.indemnites[k] = (target.indemnites[k] ?? 0) + v;
   }
   target.sousTotal += source.sousTotal;
+  target.avantagesNature += source.avantagesNature;
   target.avance += source.avance;
   target.pharmacie += source.pharmacie;
   target.tol += source.tol;
@@ -319,6 +426,8 @@ export class PayrollRecapService {
     const monthStart = new Date(year, month - 1, 1);
     const monthEnd = new Date(year, month, 0); // dernier jour du mois
 
+    const natureLabels = await getNatureLabels(this.prisma, companyId);
+
     // ── Tous les employés présents dans l'entreprise sur cette période ──
     // (pas seulement ceux qui ont un bulletin) — on exclut l'INTERIM, qui
     // n'est jamais payé par cette entreprise (agence d'intérim), donc son
@@ -338,7 +447,14 @@ export class PayrollRecapService {
       where: { companyId, month, year, status: { not: 'CANCELLED' } },
       include: {
         employee: {
-          select: { id: true, firstName: true, lastName: true, employeeNumber: true },
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            employeeNumber: true,
+            contractType: true,
+            isResident: true,
+          },
         },
         items: true,
       },
@@ -373,7 +489,7 @@ export class PayrollRecapService {
       }
     }
 
-    const { rows: paidRows, indemniteColumns } = this.buildRows(payrolls, pharmacieByEmployee);
+    const { rows: paidRows, indemniteColumns } = this.buildRows(payrolls, pharmacieByEmployee, natureLabels);
     const paidRowByEmployee = new Map(paidRows.map((r) => [r.employeeId, r]));
 
     // ── Assemblage final : un employé = une ligne, payé ou non ──────────
@@ -407,6 +523,8 @@ export class PayrollRecapService {
     const yearStart = new Date(year, 0, 1);
     const yearEnd = new Date(year, 11, 31);
 
+    const natureLabels = await getNatureLabels(this.prisma, companyId);
+
     // Tous les employés présents au moins un jour dans l'année (hors intérim)
     const employees = await this.prisma.employee.findMany({
       where: {
@@ -415,16 +533,34 @@ export class PayrollRecapService {
         hireDate: { lte: yearEnd },
         OR: [{ terminationDate: null }, { terminationDate: { gte: yearStart } }],
       },
-      select: { id: true, firstName: true, lastName: true, employeeNumber: true },
+      select: {
+        id: true,
+        firstName: true,
+        lastName: true,
+        employeeNumber: true,
+        contractType: true,
+        isResident: true,
+      },
       orderBy: { lastName: 'asc' },
     });
     const employeeIds = employees.map((e) => e.id);
 
+    // ✅ Le récap annuel alimente le Bulletin Annuel (DAS 1) transmis à la
+    // DGI — seules les paies VALIDATED/PAID doivent y figurer (exclut aussi
+    // bien les brouillons DRAFT que les paies CANCELLED, contrairement au
+    // filtre précédent 'not: CANCELLED' qui laissait passer les DRAFT).
     const payrolls = await this.prisma.payroll.findMany({
-      where: { companyId, year, status: { not: 'CANCELLED' } },
+      where: { companyId, year, status: { in: ['VALIDATED', 'PAID'] } },
       include: {
         employee: {
-          select: { id: true, firstName: true, lastName: true, employeeNumber: true },
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            employeeNumber: true,
+            contractType: true,
+            isResident: true,
+          },
         },
         items: true,
       },
@@ -469,11 +605,12 @@ export class PayrollRecapService {
 
     for (const e of employees) {
       const empPayrolls = payrollsByEmployee.get(e.id) ?? [];
-      const { rows: monthRows, indemniteColumns } = this.buildRows(empPayrolls, new Map());
+      const { rows: monthRows, indemniteColumns } = this.buildRows(empPayrolls, new Map(), natureLabels);
       for (const c of indemniteColumns) indemniteKeys.set(c.key, c.label);
 
       const name = `${e.lastName} ${e.firstName}`.trim();
       const yearRow = emptyRow(e.id, name, e.employeeNumber ?? null);
+      yearRow.fiscalCategory = classifyFiscalCategory(e.contractType, e.isResident);
       for (const r of monthRows) addInto(yearRow, r);
       yearRow.pharmacie += pharmacieByEmployee.get(e.id) ?? 0;
 
@@ -513,13 +650,167 @@ export class PayrollRecapService {
     for (let m = 1; m <= 12; m++) {
       const monthPayrolls = payrolls.filter((p) => p.month === m);
       if (monthPayrolls.length === 0) continue;
-      const { rows: mRows } = this.buildRows(monthPayrolls, new Map());
+      const { rows: mRows } = this.buildRows(monthPayrolls, new Map(), natureLabels);
       const sousTotal = mRows.reduce((s, r) => s + r.sousTotal, 0);
       const netAPayer = mRows.reduce((s, r) => s + r.netAPayer, 0);
       monthlyTotals.push({ month: m, sousTotal, netAPayer });
     }
 
     return { year, indemniteColumns, rows, totals, monthlyTotals };
+  }
+
+  // ══════════════════════════════════════════════════════════════════════
+  // ✅ Répartition ITS / BNC — par salarié, par mois, par département
+  //
+  // ⚠️ POURQUOI CETTE MÉTHODE EXISTE :
+  // `Payroll.its` est un champ générique qui contient soit un vrai ITS
+  // (barème progressif, salariés CDI/CDD), soit une retenue BNC (10% ou
+  // 20%, consultants/prestataires) — cf. payroll-calculator.service.ts
+  // ligne `its = bncAmount;`. Additionner ce champ sans distinction (ce que
+  // fait le Récap Personnel classique) mélange deux impôts différents dans
+  // un même total. Cette méthode reclasse chaque paie à la lecture, sans
+  // toucher au calculateur ni au schéma — on se base sur des informations
+  // déjà connues à ce stade : `employee.contractType` et `employee.isResident`.
+  //
+  // Catégories possibles par salarié :
+  //   ITS      → CDI/CDD assujettis à l'ITS
+  //   BNC_10   → CONSULTANT/PRESTATAIRE résident (retenue à la source 10%)
+  //   BNC_20   → CONSULTANT/PRESTATAIRE non-résident (retenue à la source 20%)
+  //   EXONERE  → STAGE (aucune retenue, montant toujours à 0)
+  //   AGENCE   → INTERIM (géré par l'agence, exclu des totaux de l'entreprise)
+  // ══════════════════════════════════════════════════════════════════════
+  async getFiscalBreakdown(
+    userId: string,
+    year: number,
+    overrideCompanyId?: string,
+  ): Promise<FiscalBreakdown> {
+    const companyId = await this.resolveCompanyId(userId, overrideCompanyId);
+    const empty: FiscalBreakdown = {
+      year,
+      employees: [],
+      byDepartment: [],
+      totals: { monthly: emptyFiscalMonths(), annualIts: 0, annualBnc10: 0, annualBnc20: 0 },
+    };
+    if (!companyId) return empty;
+
+    const yearStart = new Date(year, 0, 1);
+    const yearEnd = new Date(year, 11, 31);
+
+    const employees = await this.prisma.employee.findMany({
+      where: {
+        companyId,
+        hireDate: { lte: yearEnd },
+        OR: [{ terminationDate: null }, { terminationDate: { gte: yearStart } }],
+      },
+      select: {
+        id: true,
+        firstName: true,
+        lastName: true,
+        employeeNumber: true,
+        contractType: true,
+        isResident: true,
+        departmentId: true,
+        department: { select: { id: true, name: true } },
+      },
+      orderBy: { lastName: 'asc' },
+    });
+
+    // Mêmes statuts que le reste des rapports/DAS — cf. correction ci-dessus.
+    const payrolls = await this.prisma.payroll.findMany({
+      where: { companyId, year, status: { in: ['VALIDATED', 'PAID'] } },
+      select: { employeeId: true, month: true, its: true },
+    });
+
+    const byEmployee = new Map<string, typeof payrolls>();
+    for (const p of payrolls) {
+      const list = byEmployee.get(p.employeeId) ?? [];
+      list.push(p);
+      byEmployee.set(p.employeeId, list);
+    }
+
+    const employeeRows: FiscalEmployeeRow[] = employees.map((e) => {
+      const contractType = (e.contractType as string) ?? 'CDI';
+      const category = classifyFiscalCategory(contractType, e.isResident);
+      const monthly = emptyFiscalMonths();
+      const empPayrolls = byEmployee.get(e.id) ?? [];
+
+      for (const p of empPayrolls) {
+        const amount = Number(p.its ?? 0);
+        const slot = monthly[p.month - 1];
+        if (!slot) continue;
+        if (category === 'ITS') slot.its += amount;
+        else if (category === 'BNC_10') slot.bnc10 += amount;
+        else if (category === 'BNC_20') slot.bnc20 += amount;
+        // EXONERE / AGENCE → jamais additionné, reste à 0 par construction
+      }
+
+      const annualIts = monthly.reduce((s, m) => s + m.its, 0);
+      const annualBnc10 = monthly.reduce((s, m) => s + m.bnc10, 0);
+      const annualBnc20 = monthly.reduce((s, m) => s + m.bnc20, 0);
+
+      return {
+        employeeId: e.id,
+        employeeName: `${e.lastName} ${e.firstName}`.trim(),
+        matricule: e.employeeNumber ?? null,
+        departmentId: e.departmentId ?? null,
+        departmentName: e.department?.name ?? 'Sans département',
+        contractType,
+        category,
+        monthly,
+        annualIts,
+        annualBnc10,
+        annualBnc20,
+      };
+    });
+
+    // ── Regroupement par département ────────────────────────────────────
+    const deptMap = new Map<string, FiscalDepartmentRow>();
+    for (const row of employeeRows) {
+      const key = row.departmentId ?? '__none__';
+      let dept = deptMap.get(key);
+      if (!dept) {
+        dept = {
+          departmentId: row.departmentId,
+          departmentName: row.departmentName,
+          monthly: emptyFiscalMonths(),
+          annualIts: 0,
+          annualBnc10: 0,
+          annualBnc20: 0,
+        };
+        deptMap.set(key, dept);
+      }
+      for (let m = 0; m < 12; m++) {
+        dept.monthly[m].its += row.monthly[m].its;
+        dept.monthly[m].bnc10 += row.monthly[m].bnc10;
+        dept.monthly[m].bnc20 += row.monthly[m].bnc20;
+      }
+      dept.annualIts += row.annualIts;
+      dept.annualBnc10 += row.annualBnc10;
+      dept.annualBnc20 += row.annualBnc20;
+    }
+
+    // ── Totaux entreprise ────────────────────────────────────────────────
+    const totalsMonthly = emptyFiscalMonths();
+    for (const row of employeeRows) {
+      for (let m = 0; m < 12; m++) {
+        totalsMonthly[m].its += row.monthly[m].its;
+        totalsMonthly[m].bnc10 += row.monthly[m].bnc10;
+        totalsMonthly[m].bnc20 += row.monthly[m].bnc20;
+      }
+    }
+    const totals = {
+      monthly: totalsMonthly,
+      annualIts: employeeRows.reduce((s, r) => s + r.annualIts, 0),
+      annualBnc10: employeeRows.reduce((s, r) => s + r.annualBnc10, 0),
+      annualBnc20: employeeRows.reduce((s, r) => s + r.annualBnc20, 0),
+    };
+
+    return {
+      year,
+      employees: employeeRows,
+      byDepartment: Array.from(deptMap.values()),
+      totals,
+    };
   }
 
   // ══════════════════════════════════════════════════════════════════════
@@ -532,10 +823,18 @@ export class PayrollRecapService {
       cnssSalarial: any;
       its: any;
       netSalary: any;
-      employee: { id: string; firstName: string; lastName: string; employeeNumber: string | null };
+      employee: {
+        id: string;
+        firstName: string;
+        lastName: string;
+        employeeNumber: string | null;
+        contractType: string;
+        isResident: boolean | string | null;
+      };
       items: Array<{ type: string; code: string | null; label: string; amount: any; isTaxable: boolean; isCnss: boolean }>;
     }>,
     pharmacieByEmployee: Map<string, number>,
+    natureLabels: Set<string> = new Set(),
   ): { rows: RecapRow[]; indemniteColumns: IndemniteColumn[] } {
     const indemniteKeys = new Map<string, string>();
     const rows: RecapRow[] = [];
@@ -545,6 +844,9 @@ export class PayrollRecapService {
         p.employeeId,
         `${p.employee.lastName} ${p.employee.firstName}`.trim(),
         p.employee.employeeNumber ?? null,
+        'PAYE',
+        null,
+        classifyFiscalCategory(p.employee.contractType, p.employee.isResident),
       );
 
       row.salBrut = Number(p.grossSalary);
@@ -553,6 +855,7 @@ export class PayrollRecapService {
       row.reste1 = row.salBrut - row.cnss - row.irpp;
 
       let indemnitesTotal = 0;
+      let avantagesNature = 0;
       let avance = 0;
       let tol = 0;
       let taxeDept = 0;
@@ -560,6 +863,15 @@ export class PayrollRecapService {
       let autresRetenues = 0; // prêt + retenues manuelles non classées
 
       for (const item of p.items) {
+        // ── 0) AVANTAGE EN NATURE : tag informatif, non exclusif ────────
+        // Un avantage en nature (logement, véhicule...) reste classé
+        // normalement ci-dessous selon isTaxable/isCnss (il continue de
+        // compter dans salBrut ou dans les indemnités comme toute prime) —
+        // on ajoute juste son montant à un total séparé pour l'affichage.
+        if (item.type === 'GAIN' && natureLabels.has(normalize(item.label))) {
+          avantagesNature += Number(item.amount);
+        }
+
         // ── 1) INDEMNITÉS : GAIN non-taxable + non-CNSS ────────────────
         if (item.type === 'GAIN' && item.isTaxable === false && item.isCnss === false) {
           const { key, label } = classifyIndemnite(item.label);
@@ -619,6 +931,7 @@ export class PayrollRecapService {
       }
 
       row.sousTotal = row.reste1 + indemnitesTotal;
+      row.avantagesNature = avantagesNature;
       row.avance = avance;
       row.tol = tol;
       row.taxeDept = taxeDept;

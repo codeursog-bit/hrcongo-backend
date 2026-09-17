@@ -73,6 +73,7 @@ import {
   DasExportPayload,
   DasEmployeeLine,
 } from './export-das-template';
+import { getNatureLabels } from '../reports/payroll-recap.service';
 
 // ⚠️ Le package `archiver` installé (5.x) exporte une fonction factory
 // callable (`archiver('zip', options)`), mais `@types/archiver` (8.x) ne
@@ -157,6 +158,11 @@ export interface EmployeeAccumulator {
   taxeDeptAnnuel: number; // i (ligne "PARTI LE") — cumul CTAX_ + saisie manuelle "DPT/DEPART/REGION"
   indemniteTransport: number; // j "T" — primes non imposables dont le libellé contient "transport"
   indemnitePanier: number; // j "P" — primes non imposables dont le libellé contient "panier"
+  // ✅ e = avantages en nature — primes dont le nom correspond à un
+  // BonusTemplate marqué isNature=true dans la configuration (voir
+  // getNatureLabels). Reste à 0 si le RH n'a rien configuré comme tel —
+  // jamais déduit automatiquement.
+  avantageNature: number;
 }
 
 export interface DasRecapLine {
@@ -186,6 +192,7 @@ export interface DasRecapLine {
   taxeDeptAnnuel: number; // i (ligne "PARTI LE") — taxe départementale/régionale réelle cumulée
   indemniteTransport: number; // j "T"
   indemnitePanier: number; // j "P"
+  avantageNature: number; // e — voir EmployeeAccumulator.avantageNature
 }
 
 export interface DasRecap {
@@ -200,7 +207,7 @@ export interface DasRecap {
   year: number;
   deadlineLabel: string;
   employees: DasRecapLine[];
-  totals: { effectif: number; salaireBrut: number; irppRetenu: number };
+  totals: { effectif: number; salaireBrut: number; irppRetenu: number; avantageNature: number };
 }
 
 function n(v: any): number {
@@ -257,7 +264,10 @@ export class DasDeclarationService {
     const rows = await this.prisma.payroll.findMany({
       where: {
         companyId,
-        status: { not: 'DRAFT' },
+        // ✅ Seules les paies VALIDATED/PAID entrent dans le DAS légal —
+        // exclut à la fois les brouillons (DRAFT) et les paies annulées
+        // (CANCELLED, précédemment incluses par erreur avec 'not: DRAFT').
+        status: { in: ['VALIDATED', 'PAID'] },
         // ⚠️ DAS I ne concerne que les salariés CDI/CDD — les prestataires,
         // stagiaires, consultants et intérimaires n'y figurent pas.
         employee: { contractType: { in: ['CDI', 'CDD'] } },
@@ -290,7 +300,10 @@ export class DasDeclarationService {
       where: {
         companyId,
         year,
-        status: { not: 'DRAFT' },
+        // ✅ Seules les paies VALIDATED/PAID entrent dans le DAS légal —
+        // exclut à la fois les brouillons (DRAFT) et les paies annulées
+        // (CANCELLED, précédemment incluses par erreur avec 'not: DRAFT').
+        status: { in: ['VALIDATED', 'PAID'] },
         // ⚠️ DAS I ne concerne que les salariés CDI/CDD — les prestataires,
         // stagiaires, consultants et intérimaires n'y figurent pas.
         employee: { contractType: { in: ['CDI', 'CDD'] } },
@@ -330,6 +343,8 @@ export class DasDeclarationService {
       orderBy: { employee: { lastName: 'asc' } },
     });
 
+    const natureLabels = await getNatureLabels(this.prisma, companyId);
+
     // ── Regroupement par salarié (12 bulletins → 1 ligne DAS) ─────────────
     const byEmployee = new Map<string, EmployeeAccumulator>();
 
@@ -347,6 +362,7 @@ export class DasDeclarationService {
           taxeDeptAnnuel: 0,
           indemniteTransport: 0,
           indemnitePanier: 0,
+          avantageNature: 0,
         });
       }
       const acc = byEmployee.get(emp.id)!;
@@ -363,6 +379,15 @@ export class DasDeclarationService {
         const amt = n(item.amount);
 
         if (item.type === 'GAIN') {
+          // ✅ Avantage en nature — tag informatif, non exclusif : la prime
+          // continue d'être traitée normalement ci-dessous (congé,
+          // transport/panier non imposables, ou simplement incluse dans le
+          // brut si imposable) — on additionne juste son montant à part
+          // pour pouvoir le reporter en case "e" du formulaire.
+          if (natureLabels.has(normalize(item.label))) {
+            acc.avantageNature += amt;
+          }
+
           if (isCongeLabel(item.label)) {
             // d = salaire de congé — déjà inclus dans grossSalary/f, on
             // l'isole seulement pour le split c/d de la déclaration DAS.
@@ -439,6 +464,7 @@ export class DasDeclarationService {
         taxeDeptAnnuel: acc.taxeDeptAnnuel,
         indemniteTransport: acc.indemniteTransport,
         indemnitePanier: acc.indemnitePanier,
+        avantageNature: acc.avantageNature,
       };
     });
 
@@ -451,6 +477,7 @@ export class DasDeclarationService {
         effectif: lines.length,
         salaireBrut: lines.reduce((s, l) => s + l.salaireBrut, 0),
         irppRetenu: lines.reduce((s, l) => s + l.irppRetenu, 0),
+        avantageNature: lines.reduce((s, l) => s + l.avantageNature, 0),
       },
     };
   }
@@ -534,8 +561,11 @@ export class DasDeclarationService {
         salairePlafonne: e.salairePlafonne,
         salaireDePresence: e.salaireDePresence, // c = f − d
         salaireDeConge: e.salaireDeConge, // d = primes libellées "congé" (voir isCongeLabel)
-        avantageNature: '',
-        avantageMontant: undefined, // e = avantages en nature : non tracké, cellule laissée vide plutôt qu'à 0
+        // ✅ e = avantages en nature — vient de la configuration des primes
+        // (BonusTemplate.isNature), plus figé à vide. Reste à 0/vide si
+        // rien n'est configuré comme tel chez ce client — jamais déduit.
+        avantageNature: e.avantageNature > 0 ? 'X' : '',
+        avantageMontant: e.avantageNature > 0 ? e.avantageNature : undefined,
         salaireBrutTaxable: e.salaireBrutTaxable,
         baseImposable: e.baseImposable,
         irppRetenu: e.irppRetenu,

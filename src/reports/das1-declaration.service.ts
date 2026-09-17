@@ -199,8 +199,13 @@ export class Das1DeclarationService {
           periodTo: fmtDdMmYyyy(periodTo),
 
           montantEspeces,
-          avantageNatureLogement: 0,
-          avantageNatureAutres: 0,
+          avantageNatureLogement: 0, // pas séparé du reste — voir avantageNatureAutres
+          // ✅ Vient désormais de PayrollRecapService (r.avantagesNature),
+          // basé sur les primes marquées "en nature" dans la configuration
+          // (BonusTemplate.isNature) — plus figé à 0. Pas encore ventilé
+          // logement/autres (tout tombe ici pour l'instant, voir ligne
+          // au-dessus si un jour on veut séparer).
+          avantageNatureAutres: r.avantagesNature ?? 0,
           montantImposable80,
           irppRetenu: r.irpp,
           taxeDepartementale: r.taxeDept,

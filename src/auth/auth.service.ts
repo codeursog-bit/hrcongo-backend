@@ -280,6 +280,48 @@ export class AuthService {
     );
   }
 
+  // 🆕 Auto-inscription "portefeuille" — page publique dédiée, aucune
+  // entreprise créée à l'inscription (l'admin en ajoute via /portfolio/companies
+  // une fois connecté). Même squelette que registerCompany, avec le flag activé.
+  async registerPortfolio(dto: {
+    email: string;
+    password: string;
+    firstName: string;
+    lastName: string;
+  }, res: Response) {
+    this.validatePasswordStrength(dto.password);
+
+    const existing = await this.prisma.user.findUnique({ where: { email: dto.email } });
+    if (existing)
+      throw new BadRequestException('Un compte existe déjà avec cet email');
+
+    const hashedPassword = await bcrypt.hash(dto.password, 10);
+    const user = await this.prisma.user.create({
+      data: {
+        email: dto.email,
+        password: hashedPassword,
+        firstName: dto.firstName,
+        lastName: dto.lastName,
+        role: 'ADMIN',
+        manageMultipleCompanies: true,
+        maxCompanies: 5,
+      },
+    });
+    this.mailService
+      .sendWelcomeAdmin({
+        to: user.email,
+        firstName: user.firstName,
+        lastName: user.lastName,
+      })
+      .catch((err) =>
+        this.logger.error('Erreur email inscription portefeuille:', err),
+      );
+    return this.issueTokensAndSetCookies(
+      { ...user, cabinetId: null, managedByCabinet: false },
+      res,
+    );
+  }
+
   private async registerCabinet(dto: RegisterDto, res: Response) {
     if (!dto.cabinetName || !dto.subdomain)
       throw new BadRequestException('Nom du cabinet et sous-domaine requis');
@@ -635,6 +677,7 @@ export class AuthService {
       companyId: user.companyId ?? null,
       cabinetId: user.cabinetId ?? null,
       managedByCabinet: user.managedByCabinet ?? false,
+      manageMultipleCompanies: user.manageMultipleCompanies ?? false, // 🆕
     };
     const refreshPayload = { sub: user.id, type: 'refresh', jti };
     const accessToken = this.jwtService.sign(accessPayload, {
@@ -666,6 +709,7 @@ export class AuthService {
         cabinetId: user.cabinetId ?? null,
         managedByCabinet: user.managedByCabinet ?? false,
         canRecordAttendanceForAll: user.canRecordAttendanceForAll ?? false, // 🆕 permission "secrétaire" pointage
+        manageMultipleCompanies: user.manageMultipleCompanies ?? false, // 🆕 redirige vers /portefeuille au login
       },
     });
   }

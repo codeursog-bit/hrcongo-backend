@@ -344,6 +344,11 @@ export interface CreateBonusTemplateDto {
   isProratized?: boolean;
   isInLeaveBase?: boolean;
   description?: string | null;
+  // ✅ Avantage en nature (logement, véhicule, téléphone fournis) vs prime
+  // en espèces — voir bonus-template.entity.ts pour le détail. Par défaut
+  // false : le RH doit cocher explicitement, jamais déduit automatiquement
+  // du nom ou de la catégorie de la prime.
+  isNature?: boolean;
   // 🆕 Mode quantité libre (le seul conservé — voir bonus-quantity.controller.ts)
   fiscalType?: 'TAXABLE_CNSS' | 'TAXABLE_NO_CNSS' | 'NON_TAXABLE' | null;
   quantityMode?: 'FREE' | null;
@@ -380,6 +385,9 @@ export class BonusTemplatesService {
         isCnss: dto.isCnss ?? defaults.isCnss,
         isProratized: dto.isProratized ?? defaults.isProratized,
         isInLeaveBase: dto.isInLeaveBase ?? defaults.isInLeaveBase,
+        // ✅ Jamais déduit d'une catégorie ou d'un mot-clé — false par
+        // défaut, le RH coche lui-même s'il s'agit d'un avantage en nature.
+        isNature: dto.isNature ?? false,
         description: dto.description ?? defaults.description,
         isActive: true,
         // ✅ FIX : ces champs étaient envoyés par le front mais jamais

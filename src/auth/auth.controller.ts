@@ -68,6 +68,17 @@ export class AuthController {
     return this.authService.register(dto, res);
   }
 
+  // ── Auto-inscription portefeuille (page publique dédiée) ───────────────────
+  @Post('register-portfolio')
+  @HttpCode(HttpStatus.CREATED)
+  @Throttle({ default: { limit: 3, ttl: 3600000 } })
+  async registerPortfolio(
+    @Body() dto: { email: string; password: string; firstName: string; lastName: string },
+    @Res() res: Response,
+  ) {
+    return this.authService.registerPortfolio(dto, res);
+  }
+
   // ── Force password change (premier login) ─────────────────────────────────
   @Post('force-password-change')
   @HttpCode(HttpStatus.OK)
