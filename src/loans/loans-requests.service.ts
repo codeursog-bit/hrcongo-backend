@@ -34,8 +34,9 @@ export class LoansRequestsService {
   // 💳 PRÊTS (argent / marchandise / autre)
   // ============================================================================
 
-  async createLoan(data: CreateLoanDto, userId: string) {
+  async createLoan(data: CreateLoanDto, userId: string, overrideCompanyId?: string) {
     const user = await this.common.getVerifiedUser(userId);
+    this.common.applyCompanyOverride(user, overrideCompanyId);
     await this.subscriptionGuard.assertActionAllowed(user.companyId, user.role);
     await this.subscriptionGuard.checkFeatureAccess(user.companyId, 'hasLoansAndAdvances');
 
@@ -126,8 +127,9 @@ export class LoansRequestsService {
     });
   }
 
-  async findOneLoan(id: string, userId: string) {
+  async findOneLoan(id: string, userId: string, overrideCompanyId?: string) {
     const user = await this.common.getVerifiedUser(userId);
+    this.common.applyCompanyOverride(user, overrideCompanyId);
     const loan = await this.prisma.loan.findUnique({
       where: { id },
       include: {
@@ -156,8 +158,9 @@ export class LoansRequestsService {
    * Édition — l'ADMIN/SUPER_ADMIN peut modifier à tout moment (CRUD complet).
    * Le HR_MANAGER ne peut modifier que tant qu'aucune décision n'a été prise.
    */
-  async updateLoan(id: string, dto: UpdateLoanDto, userId: string) {
+  async updateLoan(id: string, dto: UpdateLoanDto, userId: string, overrideCompanyId?: string) {
     const user = await this.common.getVerifiedUser(userId);
+    this.common.applyCompanyOverride(user, overrideCompanyId);
     this.common.requireFinanceAccess(user.role);
     const loan = await this.common.getOwnedLoanOrThrow(id, user.companyId);
 
@@ -200,8 +203,9 @@ export class LoansRequestsService {
    * Le HR_MANAGER est limité aux statuts qui n'ont jamais touché la paie
    * (pour un prêt actif/soldé, utiliser `cancelLoan` à la place).
    */
-  async deleteLoan(id: string, userId: string) {
+  async deleteLoan(id: string, userId: string, overrideCompanyId?: string) {
     const user = await this.common.getVerifiedUser(userId);
+    this.common.applyCompanyOverride(user, overrideCompanyId);
     this.common.requireFinanceAccess(user.role);
     const loan = await this.common.getOwnedLoanOrThrow(id, user.companyId);
 
@@ -214,8 +218,9 @@ export class LoansRequestsService {
   }
 
   /** Annulation d'un prêt ACTIF — conserve l'historique de remboursement déjà effectué, arrête les futures déductions. */
-  async cancelLoan(id: string, userId: string) {
+  async cancelLoan(id: string, userId: string, overrideCompanyId?: string) {
     const user = await this.common.getVerifiedUser(userId);
+    this.common.applyCompanyOverride(user, overrideCompanyId);
     this.common.requireFinanceAccess(user.role);
     const loan = await this.common.getOwnedLoanOrThrow(id, user.companyId);
     if (loan.status === 'PAID' && !FULL_ADMIN_ROLES.includes(user.role)) throw new BadRequestException('Ce prêt est déjà soldé');
@@ -228,8 +233,9 @@ export class LoansRequestsService {
    * corriger/forcer manuellement (ex : entreprise sans employés sur l'app,
    * ou correction d'une erreur de saisie), sans repasser par le circuit normal.
    */
-  async forceLoanStatus(id: string, userId: string, status: string, recoverViaPayroll?: boolean) {
+  async forceLoanStatus(id: string, userId: string, status: string, recoverViaPayroll?: boolean, overrideCompanyId?: string) {
     const user = await this.common.getVerifiedUser(userId);
+    this.common.applyCompanyOverride(user, overrideCompanyId);
     if (!FULL_ADMIN_ROLES.includes(user.role)) throw new ForbiddenException('Réservé aux administrateurs');
     await this.common.getOwnedLoanOrThrow(id, user.companyId);
 
@@ -248,8 +254,9 @@ export class LoansRequestsService {
   // 💵 AVANCES SUR SALAIRE
   // ============================================================================
 
-  async createAdvance(data: CreateAdvanceDto, userId: string) {
+  async createAdvance(data: CreateAdvanceDto, userId: string, overrideCompanyId?: string) {
     const user = await this.common.getVerifiedUser(userId);
+    this.common.applyCompanyOverride(user, overrideCompanyId);
     await this.subscriptionGuard.assertActionAllowed(user.companyId, user.role);
     await this.subscriptionGuard.checkFeatureAccess(user.companyId, 'hasLoansAndAdvances');
 
@@ -313,8 +320,9 @@ export class LoansRequestsService {
     return this.prisma.advance.findMany({ where: { employeeId: employee.id }, orderBy: { createdAt: 'desc' } });
   }
 
-  async findOneAdvance(id: string, userId: string) {
+  async findOneAdvance(id: string, userId: string, overrideCompanyId?: string) {
     const user = await this.common.getVerifiedUser(userId);
+    this.common.applyCompanyOverride(user, overrideCompanyId);
     const advance = await this.prisma.advance.findUnique({
       where: { id },
       include: { employee: { select: { ...this.common.employeeSelect, hireDate: true } } },
@@ -337,8 +345,9 @@ export class LoansRequestsService {
   }
 
   /** ADMIN/SUPER_ADMIN : CRUD complet, à tout moment. HR_MANAGER : uniquement tant que PENDING. */
-  async updateAdvance(id: string, dto: UpdateAdvanceDto, userId: string) {
+  async updateAdvance(id: string, dto: UpdateAdvanceDto, userId: string, overrideCompanyId?: string) {
     const user = await this.common.getVerifiedUser(userId);
+    this.common.applyCompanyOverride(user, overrideCompanyId);
     this.common.requireFinanceAccess(user.role);
     const advance = await this.common.getOwnedAdvanceOrThrow(id, user.companyId);
 
@@ -372,8 +381,9 @@ export class LoansRequestsService {
     });
   }
 
-  async deleteAdvance(id: string, userId: string) {
+  async deleteAdvance(id: string, userId: string, overrideCompanyId?: string) {
     const user = await this.common.getVerifiedUser(userId);
+    this.common.applyCompanyOverride(user, overrideCompanyId);
     this.common.requireFinanceAccess(user.role);
     const advance = await this.common.getOwnedAdvanceOrThrow(id, user.companyId);
 
@@ -384,8 +394,9 @@ export class LoansRequestsService {
     return { success: true };
   }
 
-  async cancelAdvance(id: string, userId: string) {
+  async cancelAdvance(id: string, userId: string, overrideCompanyId?: string) {
     const user = await this.common.getVerifiedUser(userId);
+    this.common.applyCompanyOverride(user, overrideCompanyId);
     this.common.requireFinanceAccess(user.role);
     const advance = await this.common.getOwnedAdvanceOrThrow(id, user.companyId);
     if (['DEDUCTED', 'PAID'].includes(advance.status) && !FULL_ADMIN_ROLES.includes(user.role)) {

@@ -76,11 +76,14 @@ export class AbsenceTrackingService {
   // --------------------------------------------------------------------
   // 🔒 Scope entreprise
   // --------------------------------------------------------------------
-  private async getCompanyId(userId: string): Promise<string> {
+  private async getCompanyId(userId: string, overrideCompanyId?: string): Promise<string> {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
-      select: { companyId: true },
+      select: { companyId: true, manageMultipleCompanies: true },
     });
+    // 🆕 Admin multi-entreprises : companyId fourni par l'appelant
+    // (PortfolioAbsenceService), après vérification d'appartenance.
+    if (overrideCompanyId && user?.manageMultipleCompanies) return overrideCompanyId;
     if (!user?.companyId) throw new Error('Entreprise introuvable pour cet utilisateur');
     return user.companyId;
   }
@@ -339,8 +342,8 @@ export class AbsenceTrackingService {
   // ========================================================================
   // 1) GRILLE MENSUELLE — employé × jour, façon calendrier
   // ========================================================================
-  async getMonthlyGrid(userId: string, year: number, month: number, departmentId?: string, scope: AbsenceScope = 'all') {
-    const companyId = await this.getCompanyId(userId);
+  async getMonthlyGrid(userId: string, year: number, month: number, departmentId?: string, scope: AbsenceScope = 'all', overrideCompanyId?: string) {
+    const companyId = await this.getCompanyId(userId, overrideCompanyId);
     const { start, end, daysInMonth } = this.monthBounds(year, month);
 
     const [employees, entries, holidays, presenceRows] = await Promise.all([
@@ -401,8 +404,8 @@ export class AbsenceTrackingService {
   //    Répartition fine par motif + famille, taux d'absentéisme, classements
   //    ciblés (top maladie, top exceptionnelle...) et alertes RH.
   // ========================================================================
-  async getMonthlyDashboard(userId: string, year: number, month: number, scope: AbsenceScope = 'all') {
-    const companyId = await this.getCompanyId(userId);
+  async getMonthlyDashboard(userId: string, year: number, month: number, scope: AbsenceScope = 'all', overrideCompanyId?: string) {
+    const companyId = await this.getCompanyId(userId, overrideCompanyId);
     const { start, end } = this.monthBounds(year, month);
 
     const [employees, entries, workingDaysInMonth] = await Promise.all([
@@ -507,8 +510,8 @@ export class AbsenceTrackingService {
   // ========================================================================
   // 2bis) JOURNAL DU MOIS — une ligne par épisode d'absence (pas par jour)
   // ========================================================================
-  async getMonthJournal(userId: string, year: number, month: number, scope: AbsenceScope = 'all') {
-    const companyId = await this.getCompanyId(userId);
+  async getMonthJournal(userId: string, year: number, month: number, scope: AbsenceScope = 'all', overrideCompanyId?: string) {
+    const companyId = await this.getCompanyId(userId, overrideCompanyId);
     const { start, end } = this.monthBounds(year, month);
 
     const wantLeave = sourceAllowedForScope('LEAVE', scope);
@@ -596,8 +599,8 @@ export class AbsenceTrackingService {
   // ========================================================================
   // 3) VUE ANNUELLE — 12 mois, pour graphique ligne + barres empilées/famille
   // ========================================================================
-  async getYearlyOverview(userId: string, year: number, scope: AbsenceScope = 'all') {
-    const companyId = await this.getCompanyId(userId);
+  async getYearlyOverview(userId: string, year: number, scope: AbsenceScope = 'all', overrideCompanyId?: string) {
+    const companyId = await this.getCompanyId(userId, overrideCompanyId);
     const { start, end } = this.yearBounds(year);
 
     const [employees, entries] = await Promise.all([

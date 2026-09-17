@@ -715,6 +715,80 @@ export class AttendanceCheckService {
   }
 
   // ============================================================================
+  // ✅ SUPPRESSION — réservée aux administrateurs
+  // ============================================================================
+  // Suppression définitive (pas de "corbeille") — mais on garde une trace
+  // indépendante dans AttendanceDeletionLog, qui n'est PAS liée par clé
+  // étrangère à l'Attendance supprimée (donc elle survit à la suppression,
+  // contrairement à AttendanceLog qui est en cascade et disparaîtrait avec
+  // la ligne). C'est volontaire : on privilégie une suppression simple et
+  // sûre pour tout le reste de l'app (stats, paie, exports...) plutôt qu'un
+  // "soft delete" qu'il aurait fallu filtrer manuellement dans une bonne
+  // dizaine de fichiers différents — au prix de ne pas pouvoir "annuler"
+  // une suppression.
+  async deleteAttendance(
+    attendanceId: string,
+    userId: string,
+    reason: string,
+    req?: any,
+  ): Promise<{ success: boolean }> {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { firstName: true, lastName: true, companyId: true, role: true },
+    });
+
+    // ✅ Réservé aux rôles avec autorité RH : admins + RH manager.
+    if (!user || !['ADMIN', 'HR_MANAGER', 'SUPER_ADMIN'].includes(user.role)) {
+      throw new Error(
+        'Accès refusé : la suppression est réservée aux administrateurs',
+      );
+    }
+
+    if (!reason || reason.trim().length < 3) {
+      throw new Error('Un motif de suppression est requis');
+    }
+
+    const attendance = await this.prisma.attendance.findUnique({
+      where: { id: attendanceId },
+      include: {
+        employee: { select: { firstName: true, lastName: true } },
+      },
+    });
+
+    // ✅ Vérification d'appartenance à l'entreprise — même message dans les
+    // deux cas pour ne pas révéler l'existence d'un pointage chez une autre
+    // entreprise.
+    if (!attendance || attendance.companyId !== user.companyId) {
+      throw new Error('Présence introuvable');
+    }
+
+    await this.prisma.attendanceDeletionLog.create({
+      data: {
+        companyId: user.companyId,
+        employeeId: attendance.employeeId,
+        attendanceDate: attendance.date,
+        checkIn: attendance.checkIn,
+        checkOut: attendance.checkOut,
+        deletedBy: userId,
+        reason: reason.trim(),
+        ipAddress: req?.ip,
+        userAgent: req?.headers?.['user-agent'],
+      },
+    });
+
+    await this.prisma.attendance.delete({ where: { id: attendanceId } });
+
+    this.gateway.sendAdminNotification({
+      type: 'ATTENDANCE_CORRECTION',
+      employeeId: attendance.employeeId,
+      title: '🗑️ Pointage supprimé',
+      message: `${user.firstName} ${user.lastName} a supprimé le pointage du ${attendance.date} de ${attendance.employee.firstName} ${attendance.employee.lastName} (${reason})`,
+    });
+
+    return { success: true };
+  }
+
+  // ============================================================================
   // Helpers
   // ============================================================================
   private async getWeeklyOvertimeHours(

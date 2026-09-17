@@ -21,5 +21,6 @@ import { AttendanceUtilsService } from '../attendance/services/attendance-utils.
   imports: [PrismaModule],
   controllers: [AbsenceTrackingController],
   providers: [AbsenceTrackingService, AttendanceUtilsService],
+  exports: [AbsenceTrackingService],
 })
 export class AbsenceTrackingModule {}

@@ -36,51 +36,51 @@ export class LoansService {
   ) {}
 
   // ── Prêts : demandes / CRUD ─────────────────────────────────────────────
-  createLoan(data: CreateLoanDto, userId: string) { return this.requests.createLoan(data, userId); }
+  createLoan(data: CreateLoanDto, userId: string, overrideCompanyId?: string) { return this.requests.createLoan(data, userId, overrideCompanyId); }
   findAllLoans(userId: string, status?: string) { return this.requests.findAllLoans(userId, status); }
   findMyLoans(userId: string) { return this.requests.findMyLoans(userId); }
-  findOneLoan(id: string, userId: string) { return this.requests.findOneLoan(id, userId); }
-  updateLoan(id: string, dto: UpdateLoanDto, userId: string) { return this.requests.updateLoan(id, dto, userId); }
-  deleteLoan(id: string, userId: string) { return this.requests.deleteLoan(id, userId); }
-  cancelLoan(id: string, userId: string) { return this.requests.cancelLoan(id, userId); }
-  forceLoanStatus(id: string, userId: string, status: string, recoverViaPayroll?: boolean) {
-    return this.requests.forceLoanStatus(id, userId, status, recoverViaPayroll);
+  findOneLoan(id: string, userId: string, overrideCompanyId?: string) { return this.requests.findOneLoan(id, userId, overrideCompanyId); }
+  updateLoan(id: string, dto: UpdateLoanDto, userId: string, overrideCompanyId?: string) { return this.requests.updateLoan(id, dto, userId, overrideCompanyId); }
+  deleteLoan(id: string, userId: string, overrideCompanyId?: string) { return this.requests.deleteLoan(id, userId, overrideCompanyId); }
+  cancelLoan(id: string, userId: string, overrideCompanyId?: string) { return this.requests.cancelLoan(id, userId, overrideCompanyId); }
+  forceLoanStatus(id: string, userId: string, status: string, recoverViaPayroll?: boolean, overrideCompanyId?: string) {
+    return this.requests.forceLoanStatus(id, userId, status, recoverViaPayroll, overrideCompanyId);
   }
 
   // ── Avances : demandes / CRUD ────────────────────────────────────────────
-  createAdvance(data: CreateAdvanceDto, userId: string) { return this.requests.createAdvance(data, userId); }
+  createAdvance(data: CreateAdvanceDto, userId: string, overrideCompanyId?: string) { return this.requests.createAdvance(data, userId, overrideCompanyId); }
   findAllAdvances(userId: string, status?: string) { return this.requests.findAllAdvances(userId, status); }
   findMyAdvances(userId: string) { return this.requests.findMyAdvances(userId); }
-  findOneAdvance(id: string, userId: string) { return this.requests.findOneAdvance(id, userId); }
-  updateAdvance(id: string, dto: UpdateAdvanceDto, userId: string) { return this.requests.updateAdvance(id, dto, userId); }
-  deleteAdvance(id: string, userId: string) { return this.requests.deleteAdvance(id, userId); }
-  cancelAdvance(id: string, userId: string) { return this.requests.cancelAdvance(id, userId); }
+  findOneAdvance(id: string, userId: string, overrideCompanyId?: string) { return this.requests.findOneAdvance(id, userId, overrideCompanyId); }
+  updateAdvance(id: string, dto: UpdateAdvanceDto, userId: string, overrideCompanyId?: string) { return this.requests.updateAdvance(id, dto, userId, overrideCompanyId); }
+  deleteAdvance(id: string, userId: string, overrideCompanyId?: string) { return this.requests.deleteAdvance(id, userId, overrideCompanyId); }
+  cancelAdvance(id: string, userId: string, overrideCompanyId?: string) { return this.requests.cancelAdvance(id, userId, overrideCompanyId); }
 
   // ── Décisions (workflow parallèle) ───────────────────────────────────────
-  decideLoan(id: string, decision: 'OUI' | 'NON', userId: string, rejectionReason?: string, recoverViaPayroll = true) {
-    return this.decision.decideLoan(id, decision, userId, rejectionReason, recoverViaPayroll);
+  decideLoan(id: string, decision: 'OUI' | 'NON', userId: string, rejectionReason?: string, recoverViaPayroll = true, overrideCompanyId?: string) {
+    return this.decision.decideLoan(id, decision, userId, rejectionReason, recoverViaPayroll, overrideCompanyId);
   }
-  decideAdvance(id: string, decision: 'APPROVED' | 'REJECTED', userId: string, rejectionReason?: string, recoverViaPayroll = true) {
-    return this.decision.decideAdvance(id, decision, userId, rejectionReason, recoverViaPayroll);
+  decideAdvance(id: string, decision: 'APPROVED' | 'REJECTED', userId: string, rejectionReason?: string, recoverViaPayroll = true, overrideCompanyId?: string) {
+    return this.decision.decideAdvance(id, decision, userId, rejectionReason, recoverViaPayroll, overrideCompanyId);
   }
 
   // ── Remboursement / déduction / historique ───────────────────────────────
   processMonthlyDeduction(loanId: string) { return this.repayment.processMonthlyDeduction(loanId); }
-  recordCashRepayment(loanId: string, amount: number, userId: string) {
-    return this.repayment.recordCashRepayment(loanId, amount, userId);
+  recordCashRepayment(loanId: string, amount: number, userId: string, overrideCompanyId?: string) {
+    return this.repayment.recordCashRepayment(loanId, amount, userId, overrideCompanyId);
   }
-  deleteCashRepayment(loanId: string, logId: string, userId: string) {
-    return this.repayment.deleteCashRepayment(loanId, logId, userId);
+  deleteCashRepayment(loanId: string, logId: string, userId: string, overrideCompanyId?: string) {
+    return this.repayment.deleteCashRepayment(loanId, logId, userId, overrideCompanyId);
   }
-  getLoanHistory(loanId: string, userId: string) { return this.repayment.getLoanHistory(loanId, userId); }
-  recordAdvanceCashRepayment(advanceId: string, amount: number, userId: string) {
-    return this.repayment.recordAdvanceCashRepayment(advanceId, amount, userId);
+  getLoanHistory(loanId: string, userId: string, overrideCompanyId?: string) { return this.repayment.getLoanHistory(loanId, userId, overrideCompanyId); }
+  recordAdvanceCashRepayment(advanceId: string, amount: number, userId: string, overrideCompanyId?: string) {
+    return this.repayment.recordAdvanceCashRepayment(advanceId, amount, userId, overrideCompanyId);
   }
-  deleteAdvanceCashRepayment(advanceId: string, logId: string, userId: string) {
-    return this.repayment.deleteAdvanceCashRepayment(advanceId, logId, userId);
+  deleteAdvanceCashRepayment(advanceId: string, logId: string, userId: string, overrideCompanyId?: string) {
+    return this.repayment.deleteAdvanceCashRepayment(advanceId, logId, userId, overrideCompanyId);
   }
-  getAdvanceHistory(advanceId: string, userId: string) { return this.repayment.getAdvanceHistory(advanceId, userId); }
-  markAdvancePaidInCash(id: string, userId: string) { return this.repayment.markAdvancePaidInCash(id, userId); }
+  getAdvanceHistory(advanceId: string, userId: string, overrideCompanyId?: string) { return this.repayment.getAdvanceHistory(advanceId, userId, overrideCompanyId); }
+  markAdvancePaidInCash(id: string, userId: string, overrideCompanyId?: string) { return this.repayment.markAdvancePaidInCash(id, userId, overrideCompanyId); }
   markAdvanceAsDeducted(advanceId: string) { return this.repayment.markAdvanceAsDeducted(advanceId); }
 
   // ── Documents imprimables ─────────────────────────────────────────────────

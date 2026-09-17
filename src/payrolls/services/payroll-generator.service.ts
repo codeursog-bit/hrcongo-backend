@@ -462,19 +462,26 @@ export class PayrollGeneratorService {
     // à la toute fin. N'existe que pour l'UX ; le comportement de calcul
     // est identique avec ou sans callback.
     onProgress?: (detail: PayrollGenerationDetail) => void,
+    overrideCompanyId?: string,
   ) {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
-      select: { companyId: true },
+      select: { companyId: true, manageMultipleCompanies: true },
     });
     if (!user?.companyId) throw new CompanyNotFoundException();
 
+    // 🆕 Admin multi-entreprises : cible une entreprise précise depuis la vue
+    // portefeuille. Appartenance déjà vérifiée par PortfolioPayrollService.
+    const companyId =
+      overrideCompanyId && user.manageMultipleCompanies
+        ? overrideCompanyId
+        : user.companyId;
+
     await this.subscriptionGuard.checkFeatureAccess(
-      user.companyId,
+      companyId,
       'hasPayrollBulk',
     );
 
-    const companyId = user.companyId;
     const monthNum = typeof month === 'string' ? parseInt(month) : month;
 
     this.logger.log(

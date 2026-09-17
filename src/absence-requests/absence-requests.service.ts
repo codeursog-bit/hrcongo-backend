@@ -47,15 +47,21 @@ export class AbsenceRequestsService {
   // 🔒 HELPERS PRIVÉS (identiques au pattern LeavesService)
   // ============================================================================
 
-private async getUserWithCompany(userId: string): Promise<{
+private async getUserWithCompany(userId: string, overrideCompanyId?: string): Promise<{
   id: string; companyId: string; role: string; email: string | null;
 }> {
   const user = await this.prisma.user.findUnique({
     where:  { id: userId },
-    select: { id: true, companyId: true, role: true, email: true },
+    select: { id: true, companyId: true, role: true, email: true, manageMultipleCompanies: true },
   });
-  if (!user || !user.companyId) throw new CompanyNotFoundException();
-  return { ...user, companyId: user.companyId };
+  if (!user) throw new CompanyNotFoundException();
+  // 🆕 Admin multi-entreprises : companyId fourni par l'appelant
+  // (PortfolioAbsenceService), après vérification d'appartenance.
+  if (overrideCompanyId && user.manageMultipleCompanies) {
+    return { id: user.id, companyId: overrideCompanyId, role: user.role, email: user.email };
+  }
+  if (!user.companyId) throw new CompanyNotFoundException();
+  return { id: user.id, companyId: user.companyId, role: user.role, email: user.email };
 }
 
   private async getManagerDepartmentId(userId: string, companyId: string): Promise<string | null> {
@@ -112,8 +118,8 @@ private async getUserWithCompany(userId: string): Promise<{
   // 📝 CRÉER UNE DEMANDE (depuis l'espace employé)
   // ============================================================================
 
-  async create(dto: CreateAbsenceRequestDto, userId: string) {
-    const user = await this.getUserWithCompany(userId);
+  async create(dto: CreateAbsenceRequestDto, userId: string, overrideCompanyId?: string) {
+    const user = await this.getUserWithCompany(userId, overrideCompanyId);
     await this.subscriptionGuard.assertActionAllowed(user.companyId, user.role);
 
     let employee: {
@@ -227,8 +233,8 @@ private async getUserWithCompany(userId: string): Promise<{
   // 📋 LISTE (vue RH / Manager / Admin)
   // ============================================================================
 
-  async findAll(userId: string, employeeId?: string, status?: string) {
-    const user = await this.getUserWithCompany(userId);
+  async findAll(userId: string, employeeId?: string, status?: string, overrideCompanyId?: string) {
+    const user = await this.getUserWithCompany(userId, overrideCompanyId);
     const whereClause: any = { companyId: user.companyId };
 
     if (user.role === 'MANAGER') {
@@ -267,8 +273,8 @@ private async getUserWithCompany(userId: string): Promise<{
     });
   }
 
-  async findOne(id: string, userId: string) {
-    const user = await this.getUserWithCompany(userId);
+  async findOne(id: string, userId: string, overrideCompanyId?: string) {
+    const user = await this.getUserWithCompany(userId, overrideCompanyId);
     const absenceRequest = await this.prisma.absenceRequest.findUnique({
       where:   { id },
       include: {
@@ -285,8 +291,8 @@ private async getUserWithCompany(userId: string): Promise<{
   // ✅ APPROUVER / REJETER
   // ============================================================================
 
-  async updateStatus(id: string, status: 'APPROVED' | 'REJECTED', userId: string, rejectionReason?: string, isPaid?: boolean) {
-    const user = await this.getUserWithCompany(userId);
+  async updateStatus(id: string, status: 'APPROVED' | 'REJECTED', userId: string, rejectionReason?: string, isPaid?: boolean, overrideCompanyId?: string) {
+    const user = await this.getUserWithCompany(userId, overrideCompanyId);
     const absenceRequest = await this.prisma.absenceRequest.findUnique({
       where:   { id },
       include: { employee: { select: { id: true, firstName: true, lastName: true, email: true, departmentId: true } } },
@@ -341,8 +347,8 @@ private async getUserWithCompany(userId: string): Promise<{
   // ❌ ANNULER (employé, tant que la demande est PENDING)
   // ============================================================================
 
-  async cancel(id: string, userId: string, reason?: string) {
-    const user = await this.getUserWithCompany(userId);
+  async cancel(id: string, userId: string, reason?: string, overrideCompanyId?: string) {
+    const user = await this.getUserWithCompany(userId, overrideCompanyId);
     const absenceRequest = await this.prisma.absenceRequest.findUnique({ where: { id } });
 
     if (!absenceRequest) throw new NotFoundException('Demande introuvable');

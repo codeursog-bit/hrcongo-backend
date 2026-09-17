@@ -42,7 +42,7 @@ export class AttendanceService {
   // ============================================================================
   // 🔒 HELPER : user vérifié + companyId
   // ============================================================================
-  private async getVerifiedUser(userId: string): Promise<{
+  private async getVerifiedUser(userId: string, overrideCompanyId?: string): Promise<{
     id: string;
     companyId: string;
     role: string;
@@ -57,9 +57,20 @@ export class AttendanceService {
         role: true,
         email: true,
         canRecordAttendanceForAll: true, // 🆕 permission "secrétaire" pointage
+        manageMultipleCompanies: true,
       },
     });
-    if (!user || !user.companyId) {
+    if (!user) {
+      throw new ForbiddenException(
+        'Utilisateur non rattaché à une entreprise.',
+      );
+    }
+    // 🆕 Admin multi-entreprises : companyId fourni par l'appelant
+    // (PortfolioAttendanceService), après vérification d'appartenance.
+    if (overrideCompanyId && user.manageMultipleCompanies) {
+      return { ...user, companyId: overrideCompanyId };
+    }
+    if (!user.companyId) {
       throw new ForbiddenException(
         'Utilisateur non rattaché à une entreprise.',
       );
@@ -233,6 +244,15 @@ export class AttendanceService {
     return this.check.correctAttendance(attendanceId, userId, updates, req);
   }
 
+  async deleteAttendance(
+    attendanceId: string,
+    userId: string,
+    reason: string,
+    req?: any,
+  ) {
+    return this.check.deleteAttendance(attendanceId, userId, reason, req);
+  }
+
   // ============================================================================
   // ✅ DÉLÉGATION RAPPORTS
   // ============================================================================
@@ -261,8 +281,8 @@ export class AttendanceService {
   // ============================================================================
   // ✅ LISTE DU JOUR — filtrée par département si MANAGER
   // ============================================================================
-  async findToday(userId: string) {
-    const user = await this.getVerifiedUser(userId);
+  async findToday(userId: string, overrideCompanyId?: string) {
+    const user = await this.getVerifiedUser(userId, overrideCompanyId);
 
     const whereClause: any = {
       companyId: user.companyId,
@@ -294,8 +314,8 @@ export class AttendanceService {
   // ============================================================================
   // ✅ HISTORIQUE MENSUEL — filtré par département si MANAGER
   // ============================================================================
-  async findAll(userId: string, month: number, year: number) {
-    const user = await this.getVerifiedUser(userId);
+  async findAll(userId: string, month: number, year: number, overrideCompanyId?: string) {
+    const user = await this.getVerifiedUser(userId, overrideCompanyId);
 
     const startDate = new Date(year, month - 1, 1);
     const endDate = new Date(year, month, 0);
@@ -608,8 +628,8 @@ export class AttendanceService {
   // ============================================================================
   // ✅ LOGS D'AUDIT
   // ============================================================================
-  async getLogs(userId: string, month: number, year: number) {
-    const user = await this.getVerifiedUser(userId);
+  async getLogs(userId: string, month: number, year: number, overrideCompanyId?: string) {
+    const user = await this.getVerifiedUser(userId, overrideCompanyId);
 
     const startDate = `${year}-${String(month).padStart(2, '0')}-01`;
     const lastDay = new Date(year, month, 0).getDate();
@@ -676,8 +696,9 @@ export class AttendanceService {
     month: number,
     year: number,
     summaryService: any,
+    overrideCompanyId?: string,
   ) {
-    const user = await this.getVerifiedUser(userId);
+    const user = await this.getVerifiedUser(userId, overrideCompanyId);
     await this.assertCanAccessEmployee(
       user.id,
       user.companyId,
@@ -706,8 +727,9 @@ export class AttendanceService {
     employeeId: string,
     month: number,
     year: number,
+    overrideCompanyId?: string,
   ): Promise<any[]> {
-    const user = await this.getVerifiedUser(userId);
+    const user = await this.getVerifiedUser(userId, overrideCompanyId);
     await this.assertCanAccessEmployee(
       user.id,
       user.companyId,

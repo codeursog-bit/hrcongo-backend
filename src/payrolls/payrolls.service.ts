@@ -1366,14 +1366,17 @@ export class PayrollsService {
   async create(createPayrollDto: CreatePayrollDto, userId: string) {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
-      select: { companyId: true, role: true },
+      select: { companyId: true, role: true, manageMultipleCompanies: true },
     });
 
     // ✅ FIX BUG 6: CABINET_ADMIN n'a pas de companyId sur son User
     // Il fournit le companyId directement dans le DTO (front l'envoie déjà)
+    // 🆕 Même principe étendu à l'admin multi-entreprises (manageMultipleCompanies) —
+    // l'appartenance à ce companyId est vérifiée en amont par PortfolioPayrollService.
     const isCabinet =
       user?.role === 'CABINET_ADMIN' || user?.role === 'CABINET_GESTIONNAIRE';
-    const effectiveCompanyId = isCabinet
+    const canOverride = isCabinet || user?.manageMultipleCompanies;
+    const effectiveCompanyId = canOverride
       ? (createPayrollDto as any).companyId
       : user?.companyId;
 
@@ -1787,6 +1790,7 @@ export class PayrollsService {
     employeeIds?: string[],
     customWorkDays?: number,
     onProgress?: (detail: any) => void,
+    overrideCompanyId?: string,
   ) {
     return this.generator.generate(
       userId,
@@ -1795,6 +1799,7 @@ export class PayrollsService {
       employeeIds,
       customWorkDays,
       onProgress,
+      overrideCompanyId,
     );
   }
 
@@ -1814,14 +1819,22 @@ export class PayrollsService {
   ) {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
-      select: { companyId: true, role: true, employeeId: true, email: true },
+      select: {
+        companyId: true,
+        role: true,
+        employeeId: true,
+        email: true,
+        manageMultipleCompanies: true,
+      },
     });
 
-    // Pour les rôles cabinet, on utilise le companyId passé en filtre
+    // Pour les rôles cabinet et l'admin multi-entreprises, on utilise le
+    // companyId passé en filtre (vérifié en amont par PortfolioPayrollService).
     const isCabinet =
       user?.role === 'CABINET_ADMIN' || user?.role === 'CABINET_GESTIONNAIRE';
+    const canOverride = isCabinet || user?.manageMultipleCompanies;
     const effectiveCompanyId =
-      isCabinet && filters?.companyId ? filters.companyId : user?.companyId;
+      canOverride && filters?.companyId ? filters.companyId : user?.companyId;
 
     if (!effectiveCompanyId) return [];
 
@@ -1861,7 +1874,7 @@ export class PayrollsService {
     });
   }
 
-  async findOne(id: string, userId: string) {
+  async findOne(id: string, userId: string, overrideCompanyId?: string) {
     const payroll = await this.prisma.payroll.findUnique({
       where: { id },
       include: {
@@ -1901,9 +1914,18 @@ export class PayrollsService {
     if (!payroll) throw new PayrollNotFoundException(id);
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
-      select: { role: true, employeeId: true, companyId: true, email: true },
+      select: {
+        role: true,
+        employeeId: true,
+        companyId: true,
+        email: true,
+        manageMultipleCompanies: true,
+      },
     });
     if (!user) throw new ForbiddenException('Utilisateur non trouvé');
+    if (overrideCompanyId && user.manageMultipleCompanies) {
+      user.companyId = overrideCompanyId;
+    }
     if (user.companyId !== payroll.companyId)
       throw new ForbiddenException('Accès refusé');
     if (user.role === 'EMPLOYEE') {
@@ -2034,6 +2056,7 @@ export class PayrollsService {
     id: string,
     updatePayrollDto: UpdatePayrollDto,
     userId?: string,
+    overrideCompanyId?: string,
   ) {
     const payroll = await this.prisma.payroll.findUnique({ where: { id } });
     if (!payroll) throw new PayrollNotFoundException(id);
@@ -2041,11 +2064,18 @@ export class PayrollsService {
     if (userId) {
       const user = await this.prisma.user.findUnique({
         where: { id: userId },
-        select: { role: true, companyId: true },
+        select: { role: true, companyId: true, manageMultipleCompanies: true },
       });
       if (user?.role === 'EMPLOYEE')
         throw new ForbiddenException('Modification réservée aux admins/RH');
-      if (user?.companyId !== payroll.companyId)
+      // 🆕 Admin multi-entreprises : autorisé si le companyId fourni par
+      // l'appelant (déjà vérifié en amont par PortfolioPayrollService)
+      // correspond bien à l'entreprise du bulletin.
+      const isPortfolioMatch =
+        user?.manageMultipleCompanies &&
+        overrideCompanyId &&
+        overrideCompanyId === payroll.companyId;
+      if (!isPortfolioMatch && user?.companyId !== payroll.companyId)
         throw new ForbiddenException('Accès refusé');
     }
 

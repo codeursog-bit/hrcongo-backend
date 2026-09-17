@@ -20,6 +20,7 @@ export type VerifiedUser = {
   companyId: string;
   role: string;
   email: string | null;
+  manageMultipleCompanies: boolean;
 };
 
 @Injectable()
@@ -31,13 +32,29 @@ export class LoansCommonService {
   async getVerifiedUser(userId: string): Promise<VerifiedUser> {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
-      select: { id: true, companyId: true, role: true, email: true },
+      select: {
+        id: true,
+        companyId: true,
+        role: true,
+        email: true,
+        manageMultipleCompanies: true,
+      },
     });
     if (!user || !user.companyId)
       throw new ForbiddenException(
         'Utilisateur non rattaché à une entreprise.',
       );
     return { ...user, companyId: user.companyId };
+  }
+
+  // 🆕 Admin multi-entreprises : cible une entreprise précise depuis la vue
+  // portefeuille. L'appartenance est vérifiée en amont par
+  // PortfolioMembershipService — ici on ne fait que router, même principe
+  // que EmployeesService.applyCompanyOverride.
+  applyCompanyOverride(user: VerifiedUser, overrideCompanyId?: string) {
+    if (overrideCompanyId && user.manageMultipleCompanies) {
+      user.companyId = overrideCompanyId;
+    }
   }
 
   requireFinanceAccess(role: string) {

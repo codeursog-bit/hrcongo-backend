@@ -3,6 +3,11 @@
 // ============================================================================
 // 🔥 KONZA SUITE — Web Push Service (vraies notifications téléphone)
 //
+// Multi-appareil : un utilisateur peut avoir plusieurs abonnements actifs
+// (téléphone perso + tablette bureau, par ex.) — chacun est une ligne
+// PushSubscription séparée. S'abonner sur un nouvel appareil n'écrase plus
+// les autres.
+//
 // Prérequis :
 //   npm install web-push
 //   npm install --save-dev @types/web-push
@@ -41,8 +46,6 @@ export class PushNotificationsService implements OnModuleInit {
       this.logger.warn(
         '   Génère tes clés avec : npx web-push generate-vapid-keys',
       );
-      // 🆕 Panne plateforme entière (personne ne reçoit de push) → doit être
-      // visible en prod, pas juste dans un stdout que personne ne regarde.
       this.systemLogs.log({
         source: 'push-notifications:startup',
         level: 'ALERT',
@@ -63,7 +66,8 @@ export class PushNotificationsService implements OnModuleInit {
 
   // ============================================================================
   // 📱 Enregistrer le token push d'un appareil
-  // Appelé depuis le controller quand l'employé clique "Activer"
+  // Appelé depuis le controller quand l'employé clique "Activer". Un nouvel
+  // appareil s'AJOUTE aux abonnements existants — il ne les remplace pas.
   // ============================================================================
   async registerToken(
     userId: string,
@@ -71,35 +75,65 @@ export class PushNotificationsService implements OnModuleInit {
       endpoint: string;
       keys: { p256dh: string; auth: string };
     },
+    deviceLabel?: string,
   ): Promise<void> {
-    await this.prisma.user.update({
-      where: { id: userId },
-      data: {
-        pushToken: JSON.stringify(subscription),
-        pushNotifEnabled: true,
-      },
+    const token = JSON.stringify(subscription);
+
+    // upsert par token : si ce même appareil se réabonne (token identique),
+    // on met juste à jour lastUsedAt au lieu de créer un doublon.
+    await this.prisma.pushSubscription.upsert({
+      where: { token },
+      create: { userId, token, deviceLabel },
+      update: { lastUsedAt: new Date(), deviceLabel },
     });
 
-    this.logger.log(`📲 Push token enregistré pour userId: ${userId}`);
+    await this.prisma.user.update({
+      where: { id: userId },
+      data: { pushNotifEnabled: true },
+    });
+
+    this.logger.log(`📲 Appareil push enregistré pour userId: ${userId}`);
   }
 
   // ============================================================================
-  // 🔕 Supprimer le token push d'un appareil
+  // 🔕 Supprimer l'abonnement d'UN appareil (pas les autres)
+  // `endpoint` permet de cibler l'appareil courant précisément. Sans
+  // `endpoint` (vieux client, compat), on retire tous les appareils de
+  // l'utilisateur — comportement de l'ancienne version à champ unique.
   // ============================================================================
-  async unregisterToken(userId: string): Promise<void> {
-    await this.prisma.user.update({
-      where: { id: userId },
-      data: {
-        pushToken: null,
-        pushNotifEnabled: false,
-      },
-    });
+  async unregisterToken(userId: string, endpoint?: string): Promise<void> {
+    if (endpoint) {
+      const subs = await this.prisma.pushSubscription.findMany({
+        where: { userId },
+        select: { id: true, token: true },
+      });
+      const match = subs.find((s) => {
+        try {
+          return JSON.parse(s.token).endpoint === endpoint;
+        } catch {
+          return false;
+        }
+      });
+      if (match) {
+        await this.prisma.pushSubscription.delete({ where: { id: match.id } });
+      }
+    } else {
+      await this.prisma.pushSubscription.deleteMany({ where: { userId } });
+    }
 
-    this.logger.log(`🔕 Push token supprimé pour userId: ${userId}`);
+    const remaining = await this.prisma.pushSubscription.count({ where: { userId } });
+    if (remaining === 0) {
+      await this.prisma.user.update({
+        where: { id: userId },
+        data: { pushNotifEnabled: false },
+      });
+    }
+
+    this.logger.log(`🔕 Abonnement push retiré pour userId: ${userId} (${remaining} appareil(s) restant(s))`);
   }
 
   // ============================================================================
-  // 🚀 Envoyer une notification push à un utilisateur
+  // 🚀 Envoyer une notification push à un utilisateur — sur TOUS ses appareils
   // C'est LA méthode centrale — appelée depuis AttendanceCronService
   // ============================================================================
   async sendPushToUser(
@@ -123,23 +157,14 @@ export class PushNotificationsService implements OnModuleInit {
 
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
-      select: { pushToken: true, pushNotifEnabled: true },
+      select: { pushNotifEnabled: true },
     });
+    if (!user?.pushNotifEnabled) return;
 
-    if (!user?.pushToken || !user.pushNotifEnabled) return;
-
-    let subscription: webpush.PushSubscription;
-    try {
-      subscription = JSON.parse(user.pushToken) as webpush.PushSubscription;
-    } catch {
-      this.logger.warn(`⚠️  Token push invalide pour userId: ${userId}`);
-      await this.systemLogs.log({
-        source: 'push-notifications:send',
-        level: 'WARNING',
-        message: `Token push illisible (JSON invalide) pour userId ${userId}`,
-      });
-      return;
-    }
+    const subscriptions = await this.prisma.pushSubscription.findMany({
+      where: { userId },
+    });
+    if (subscriptions.length === 0) return;
 
     const pushPayload = JSON.stringify({
       title: payload.title,
@@ -154,29 +179,57 @@ export class PushNotificationsService implements OnModuleInit {
       ...payload.actionUrls,
     });
 
+    // Chaque appareil est indépendant : un échec sur l'un ne doit jamais
+    // empêcher l'envoi aux autres.
+    await Promise.all(
+      subscriptions.map((sub) => this.sendToOneSubscription(sub, pushPayload, userId, payload.title)),
+    );
+  }
+
+  private async sendToOneSubscription(
+    sub: { id: string; token: string },
+    pushPayload: string,
+    userId: string,
+    title: string,
+  ): Promise<void> {
+    let subscription: webpush.PushSubscription;
+    try {
+      subscription = JSON.parse(sub.token) as webpush.PushSubscription;
+    } catch {
+      this.logger.warn(`⚠️  Token push illisible (id: ${sub.id}) pour userId: ${userId}`);
+      await this.prisma.pushSubscription.delete({ where: { id: sub.id } }).catch(() => {});
+      await this.systemLogs.log({
+        source: 'push-notifications:send',
+        level: 'WARNING',
+        message: `Token push illisible (JSON invalide) pour userId ${userId} — appareil retiré`,
+      });
+      return;
+    }
+
     try {
       await webpush.sendNotification(subscription, pushPayload);
-      this.logger.log(
-        `✅ Push envoyé → userId: ${userId} | "${payload.title}"`,
-      );
+      this.logger.log(`✅ Push envoyé → userId: ${userId} | "${title}"`);
     } catch (err: any) {
-      // Token expiré ou révoqué → nettoyer
       if (err.statusCode === 410 || err.statusCode === 404) {
-        this.logger.warn(
-          `🗑️  Token push expiré pour userId: ${userId} — suppression`,
-        );
-        await this.unregisterToken(userId);
+        this.logger.warn(`🗑️  Abonnement push expiré (id: ${sub.id}) pour userId: ${userId} — suppression`);
+        await this.prisma.pushSubscription.delete({ where: { id: sub.id } }).catch(() => {});
+
+        const remaining = await this.prisma.pushSubscription.count({ where: { userId } });
+        if (remaining === 0) {
+          await this.prisma.user.update({
+            where: { id: userId },
+            data: { pushNotifEnabled: false },
+          }).catch(() => {});
+        }
+
         await this.systemLogs.log({
           source: 'push-notifications:send',
           level: 'WARNING',
-          message: `Abonnement push expiré (${err.statusCode}) pour userId ${userId} — token supprimé, l'employé doit se réabonner`,
+          message: `Abonnement push expiré (${err.statusCode}) pour userId ${userId} — un appareil retiré, ${remaining} restant(s)`,
           details: { evaluated: 1, skipped: [{ employeeId: userId, reason: `Abonnement expiré (HTTP ${err.statusCode})` }] },
         });
       } else {
-        this.logger.error(
-          `❌ Erreur push pour userId: ${userId}:`,
-          err.message,
-        );
+        this.logger.error(`❌ Erreur push pour userId: ${userId}:`, err.message);
         await this.systemLogs.log({
           source: 'push-notifications:send',
           level: 'ERROR',

@@ -560,6 +560,72 @@ export class AuthService {
     return { message: 'Mot de passe réinitialisé avec succès.' };
   }
 
+  // ── Multi-entreprises (ADMIN avec manageMultipleCompanies) ─────────────────
+  // Change l'entreprise active du compte : vérifie l'appartenance via
+  // UserCompany, puis réémet un JWT avec le nouveau companyId. Ne modifie
+  // jamais User.companyId en base — cette colonne reste "l'entreprise active
+  // au dernier login/switch", recalculée à chaque émission de token.
+  async switchCompany(userId: string, companyId: string, res: Response) {
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (!user || !user.isActive) {
+      throw new UnauthorizedException('Compte introuvable ou désactivé');
+    }
+
+    if (user.role !== 'SUPER_ADMIN') {
+      if (!user.manageMultipleCompanies) {
+        throw new BadRequestException(
+          "Ce compte n'est pas autorisé à gérer plusieurs entreprises",
+        );
+      }
+      const link = await this.prisma.userCompany.findUnique({
+        where: { userId_companyId: { userId, companyId } },
+      });
+      if (!link) {
+        throw new UnauthorizedException(
+          "Vous n'êtes pas lié à cette entreprise",
+        );
+      }
+    }
+
+    const company = await this.prisma.company.findUnique({
+      where: { id: companyId },
+    });
+    if (!company || !company.isActive) {
+      throw new BadRequestException('Entreprise introuvable ou désactivée');
+    }
+
+    return this.issueTokensAndSetCookies({ ...user, companyId }, res);
+  }
+
+  // Liste des entreprises liées au compte (pour le sélecteur + vue perso)
+  async getMyCompanies(userId: string) {
+    const links = await this.prisma.userCompany.findMany({
+      where: { userId },
+      include: {
+        company: {
+          select: {
+            id: true,
+            legalName: true,
+            tradeName: true,
+            logo: true,
+            isActive: true,
+            city: true,
+          },
+        },
+      },
+      orderBy: { createdAt: 'asc' },
+    });
+    return links
+      .filter((l) => l.company)
+      .map((l) => ({
+        id: l.company.id,
+        name: l.company.tradeName || l.company.legalName,
+        logo: l.company.logo,
+        isActive: l.company.isActive,
+        city: l.company.city,
+      }));
+  }
+
   private async issueTokensAndSetCookies(user: any, res: Response) {
     const jti = uuidv4();
     const accessPayload = {

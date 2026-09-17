@@ -40,8 +40,10 @@ export class LoansDecisionService {
     userId: string,
     rejectionReason?: string,
     recoverViaPayroll = true,
+    overrideCompanyId?: string,
   ) {
     const user = await this.common.getVerifiedUser(userId);
+    this.common.applyCompanyOverride(user, overrideCompanyId);
     if (!DRH_ROLES.includes(user.role))
       throw new ForbiddenException(
         "Vous n'avez pas les droits pour valider un prêt",
@@ -134,8 +136,10 @@ export class LoansDecisionService {
     userId: string,
     rejectionReason?: string,
     recoverViaPayroll = true,
+    overrideCompanyId?: string,
   ) {
     const user = await this.common.getVerifiedUser(userId);
+    this.common.applyCompanyOverride(user, overrideCompanyId);
     if (!DRH_ROLES.includes(user.role))
       throw new ForbiddenException(
         "Vous n'avez pas les droits pour valider une avance",

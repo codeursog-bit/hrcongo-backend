@@ -112,6 +112,48 @@ export class AdminUserActivityService {
     });
   }
 
+  /**
+   * Qui a activé les notifications push, et parmi eux qui a vraiment un
+   * appareil enregistré (les deux ne vont pas toujours ensemble — voir le
+   * bug diagnostiqué plus tôt dans la conversation : activé côté profil
+   * n'implique pas forcément un abonnement technique réussi).
+   */
+  async getPushStatus() {
+    const users = await this.prisma.user.findMany({
+      where: { isActive: true },
+      select: {
+        id: true,
+        firstName: true,
+        lastName: true,
+        email: true,
+        role: true,
+        pushNotifEnabled: true,
+        company: { select: { legalName: true, tradeName: true } },
+        _count: { select: { pushSubscriptions: true } },
+      },
+    });
+
+    const enabled = users.filter((u) => u.pushNotifEnabled);
+    const withDevice = enabled.filter((u) => u._count.pushSubscriptions > 0);
+    const enabledButBroken = enabled.filter((u) => u._count.pushSubscriptions === 0);
+
+    return {
+      totalUsers: users.length,
+      enabledCount: enabled.length,
+      activeDeviceCount: withDevice.length,
+      brokenCount: enabledButBroken.length,
+      users: enabled.map((u) => ({
+        id: u.id,
+        name: `${u.firstName} ${u.lastName}`,
+        email: u.email,
+        role: u.role,
+        companyName: u.company?.tradeName || u.company?.legalName || null,
+        status: u._count.pushSubscriptions > 0 ? 'active' : 'broken',
+        deviceCount: u._count.pushSubscriptions,
+      })),
+    };
+  }
+
   private periodRange(period: 'today' | 'week' | 'month') {
     const now = new Date();
     const fmt = (d: Date) =>

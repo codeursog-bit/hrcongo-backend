@@ -32,6 +32,7 @@ import { RegisterDto } from './dto/register.dto';
 import { JwtAuthGuard } from './jwt-auth.guard';
 import { Throttle } from '@nestjs/throttler';
 import { ForcePasswordChangeDto } from './dto/force-password-change.dto';
+import { SwitchCompanyDto } from './dto/switch-company.dto';
 import { PrismaService } from '../prisma/prisma.service';
 import { CabinetService } from 'src/cabinet/services/cabinet.service';
 
@@ -264,6 +265,34 @@ export class AuthController {
     }
 
     return { ...user, company };
+  }
+
+  // ── Switch company (ADMIN multi-entreprises) ───────────────────────────────
+  // Réémet un JWT avec le companyId choisi, après vérification d'appartenance.
+  // Réutilise le même flux de cookies que login — le front n'a rien à gérer
+  // de spécial, juste rediriger/recharger le dashboard une fois la réponse reçue.
+  @Post('switch-company')
+  @UseGuards(JwtAuthGuard)
+  @HttpCode(HttpStatus.OK)
+  @Throttle({ default: { limit: 20, ttl: 60000 } })
+  async switchCompany(
+    @Request() req: any,
+    @Body() dto: SwitchCompanyDto,
+    @Res() res: Response,
+  ) {
+    return this.authService.switchCompany(
+      req.user.userId,
+      dto.companyId,
+      res,
+    );
+  }
+
+  // ── Mes entreprises (ADMIN multi-entreprises) ──────────────────────────────
+  @Get('my-companies')
+  @UseGuards(JwtAuthGuard)
+  @HttpCode(HttpStatus.OK)
+  async myCompanies(@Request() req: any) {
+    return this.authService.getMyCompanies(req.user.userId);
   }
 
   // ── Invitation info (PUBLIC — pas de guard) ───────────────────────────────

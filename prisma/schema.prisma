@@ -44,6 +44,8 @@ model User {
   role     UserRole @default(EMPLOYEE)
   isActive Boolean  @default(true)
   canRecordAttendanceForAll Boolean @default(false)
+  manageMultipleCompanies Boolean @default(false) // flag ADMIN multi-entreprises
+  maxCompanies            Int     @default(5)      // relevable par le super admin
  
 
   
@@ -80,6 +82,7 @@ model User {
   cabinetUsers CabinetUser[]
   activityLogs ActivityLog[]
   dailyActivity DailyUserActivity[]
+  pushSubscriptions PushSubscription[]
   sessions     UserSession[]  // ← AJOUTER
   notifications       Notification[]
   createdEmployees    Employee[]             @relation("EmployeeCreatedBy")
@@ -107,6 +110,7 @@ model User {
 
   blogPosts      BlogPost[]
   blogLikes      BlogLike[]
+  ownedCompanies UserCompany[]
 
   @@index([email])
   @@index([companyId])
@@ -267,6 +271,7 @@ model Company {
   pseProcedures    PSEProcedure[]    // ← AJOUTER
 
   cabinetCompanies      CabinetCompany[]
+  ownerLinks UserCompany[]
   cabinetImportMappings CabinetImportMapping[]
   batchClosureItems     CabinetBatchClosureItem[]
   cnssDeclarations       CnssDeclaration[]
@@ -2432,6 +2437,7 @@ model UserInvitation {
 
   companyId   String? @db.Uuid
   cabinetId   String? @db.Uuid
+  manageMultipleCompanies Boolean @default(false)
   cabinetName String? @db.VarChar(255)
   accepted   Boolean   @default(false)
   acceptedAt DateTime? @db.Timestamptz
@@ -4170,6 +4176,7 @@ model PlatformSettings {
 }
 
 
+
 model DailyUserActivity {
   id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   userId String @db.Uuid
@@ -4184,4 +4191,59 @@ model DailyUserActivity {
   @@index([date])
   @@index([companyId])
   @@map("daily_user_activity")
+}
+
+model AttendanceDeletionLog {
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+
+  companyId      String    @db.Uuid
+  employeeId     String    @db.Uuid
+  attendanceDate String    @db.VarChar(10) // même format que Attendance.date ("2025-12-25")
+  checkIn        DateTime? @db.Timestamptz
+  checkOut       DateTime? @db.Timestamptz
+
+  deletedBy String   @db.Uuid
+  deletedAt DateTime @default(now()) @db.Timestamptz
+
+  reason    String  @db.Text
+  ipAddress String? @db.Inet
+  userAgent String? @db.Text
+
+  @@index([companyId])
+  @@index([deletedBy])
+  @@map("attendance_deletion_logs")
+}
+
+
+
+
+
+model UserCompany {
+  id        String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId    String @db.Uuid
+  companyId String @db.Uuid
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now()) @db.Timestamptz
+
+  @@unique([userId, companyId])
+  @@index([userId])
+  @@index([companyId])
+  @@map("user_companies")
+}
+
+
+
+model PushSubscription {
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId String @db.Uuid
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  token String @unique @db.Text
+  deviceLabel String?  @db.VarChar(150)
+  createdAt   DateTime @default(now()) @db.Timestamptz
+  lastUsedAt  DateTime @default(now()) @db.Timestamptz
+  @@index([userId])
+  @@map("push_subscriptions")
 }

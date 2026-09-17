@@ -63,6 +63,7 @@ import { ContactModule } from './contact/contact.module';
 import { PermissionTicketsModule } from './permission-tickets/permission-tickets.module';
 import { CompanyDeductionsModule } from './company-deductions/company-deductions.module';
 import { AbsenceTrackingModule } from './absence-tracking/absence-tracking.module';
+import { PortfolioModule } from './portfolio/portfolio.module';
 
 @Module({
   imports: [
@@ -123,6 +124,7 @@ import { AbsenceTrackingModule } from './absence-tracking/absence-tracking.modul
     AdminModule,
     UserActivityModule,
     CabinetModule,
+    PortfolioModule,
 
     // ── GESTION ──────────────────────────────────────────────────────────────
     DashboardModule,

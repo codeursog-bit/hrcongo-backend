@@ -72,6 +72,7 @@ import { ManualPayrollService } from './services/manual-payroll.service';
   ],
   exports: [
     PayrollsService,
+    ManualPayrollService,
     PayrollCalculatorService,
     PayrollDeductionsService,
     PayrollBonusesService,

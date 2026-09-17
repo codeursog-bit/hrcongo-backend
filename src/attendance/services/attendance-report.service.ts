@@ -206,13 +206,14 @@ export class AttendanceReportService {
   ): Promise<MonthlyReportItem[]> {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
-      select: { companyId: true, role: true, email: true },
+      select: { companyId: true, role: true, email: true, manageMultipleCompanies: true },
     });
 
     const isCabinet =
       user?.role === 'CABINET_ADMIN' || user?.role === 'CABINET_GESTIONNAIRE';
+    const canOverride = isCabinet || user?.manageMultipleCompanies;
     const targetCompanyId =
-      isCabinet && overrideCompanyId ? overrideCompanyId : user?.companyId;
+      canOverride && overrideCompanyId ? overrideCompanyId : user?.companyId;
     if (!targetCompanyId) return [];
 
     // 🔒 Scoping par rôle — c'était le trou : avant ce correctif, TOUT

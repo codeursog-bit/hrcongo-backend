@@ -856,11 +856,15 @@ export class ManualPayrollService {
   ): Promise<string> {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
-      select: { companyId: true, role: true },
+      select: { companyId: true, role: true, manageMultipleCompanies: true },
     });
     const isCabinet =
       user?.role === 'CABINET_ADMIN' || user?.role === 'CABINET_GESTIONNAIRE';
-    const companyId = isCabinet ? overrideCompanyId : user?.companyId;
+    // 🆕 Admin multi-entreprises : même principe que Cabinet — companyId
+    // fourni par l'appelant (PortfolioPayrollService, après vérification
+    // d'appartenance), au lieu de forcer l'entreprise active de l'admin.
+    const canOverride = isCabinet || user?.manageMultipleCompanies;
+    const companyId = canOverride ? overrideCompanyId : user?.companyId;
     if (!companyId) throw new CompanyNotFoundException();
     return companyId;
   }

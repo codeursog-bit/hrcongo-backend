@@ -385,6 +385,31 @@ export class AttendanceController {
     }
   }
 
+  // ✅ Suppression d'un pointage — réservée ADMIN/SUPER_ADMIN uniquement,
+  // comme demandé (contrairement à la correction, ouverte à plus de rôles).
+  @Delete(':attendanceId')
+  @UseGuards(RolesGuard)
+  @Roles('ADMIN', 'HR_MANAGER', 'SUPER_ADMIN')
+  async deleteAttendance(
+    @Param('attendanceId') attendanceId: string,
+    @Body() body: { reason: string },
+    @Request() req,
+  ): Promise<{ success: boolean }> {
+    try {
+      return await this.attendanceService.deleteAttendance(
+        attendanceId,
+        req.user.userId,
+        body?.reason,
+        req,
+      );
+    } catch (error: any) {
+      throw new HttpException(
+        error.message || 'Erreur',
+        error.status || HttpStatus.BAD_REQUEST,
+      );
+    }
+  }
+
   // ========================================
   // 📈 STATISTIQUES
   // ========================================

@@ -39,8 +39,9 @@ export class LoansRepaymentService {
    * forcément la mensualité), ex : "il a remboursé 2 000 FCFA, il reste
    * 10 000 FCFA". Le solde restant et le statut se recalculent aussitôt.
    */
-  async recordCashRepayment(loanId: string, amount: number, userId: string) {
+  async recordCashRepayment(loanId: string, amount: number, userId: string, overrideCompanyId?: string) {
     const user = await this.common.getVerifiedUser(userId);
+    this.common.applyCompanyOverride(user, overrideCompanyId);
     this.common.requireFinanceAccess(user.role);
 
     const loan = await this.common.getOwnedLoanOrThrow(loanId, user.companyId);
@@ -71,8 +72,9 @@ export class LoansRepaymentService {
    * l'argent lui est reversé). C'est la façon de "corriger" une saisie :
    * supprimer la mauvaise entrée puis, si besoin, en resaisir une bonne.
    */
-  async deleteCashRepayment(loanId: string, logId: string, userId: string) {
+  async deleteCashRepayment(loanId: string, logId: string, userId: string, overrideCompanyId?: string) {
     const user = await this.common.getVerifiedUser(userId);
+    this.common.applyCompanyOverride(user, overrideCompanyId);
     this.common.requireFinanceAccess(user.role);
     const loan = await this.common.getOwnedLoanOrThrow(loanId, user.companyId);
 
@@ -92,8 +94,9 @@ export class LoansRepaymentService {
     return { success: true, remainingBalance: restoredBalance };
   }
 
-  async getLoanHistory(loanId: string, userId: string) {
+  async getLoanHistory(loanId: string, userId: string, overrideCompanyId?: string) {
     const user = await this.common.getVerifiedUser(userId);
+    this.common.applyCompanyOverride(user, overrideCompanyId);
     await this.common.getOwnedLoanOrThrow(loanId, user.companyId);
     return this.prisma.loanRepaymentLog.findMany({ where: { loanId }, orderBy: [{ year: 'desc' }, { month: 'desc' }] });
   }
@@ -105,8 +108,9 @@ export class LoansRepaymentService {
    * les prêts. Remplace l'ancien "tout rembourser d'un coup" par un
    * remboursement partiel possible.
    */
-  async recordAdvanceCashRepayment(advanceId: string, amount: number, userId: string) {
+  async recordAdvanceCashRepayment(advanceId: string, amount: number, userId: string, overrideCompanyId?: string) {
     const user = await this.common.getVerifiedUser(userId);
+    this.common.applyCompanyOverride(user, overrideCompanyId);
     this.common.requireFinanceAccess(user.role);
 
     const advance = await this.common.getOwnedAdvanceOrThrow(advanceId, user.companyId);
@@ -131,8 +135,9 @@ export class LoansRepaymentService {
   }
 
   /** Supprime une saisie de remboursement d'avance erronée — même logique que pour les prêts. */
-  async deleteAdvanceCashRepayment(advanceId: string, logId: string, userId: string) {
+  async deleteAdvanceCashRepayment(advanceId: string, logId: string, userId: string, overrideCompanyId?: string) {
     const user = await this.common.getVerifiedUser(userId);
+    this.common.applyCompanyOverride(user, overrideCompanyId);
     this.common.requireFinanceAccess(user.role);
     const advance = await this.common.getOwnedAdvanceOrThrow(advanceId, user.companyId);
 
@@ -152,8 +157,9 @@ export class LoansRepaymentService {
     return { success: true, remainingBalance: restoredBalance };
   }
 
-  async getAdvanceHistory(advanceId: string, userId: string) {
+  async getAdvanceHistory(advanceId: string, userId: string, overrideCompanyId?: string) {
     const user = await this.common.getVerifiedUser(userId);
+    this.common.applyCompanyOverride(user, overrideCompanyId);
     await this.common.getOwnedAdvanceOrThrow(advanceId, user.companyId);
     return this.prisma.advanceRepaymentLog.findMany({ where: { advanceId }, orderBy: [{ year: 'desc' }, { month: 'desc' }] });
   }
@@ -164,8 +170,9 @@ export class LoansRepaymentService {
    * AdvanceRepaymentLog comme recordAdvanceCashRepayment, sinon ce
    * remboursement resterait invisible dans l'historique/traçabilité.
    */
-  async markAdvancePaidInCash(id: string, userId: string) {
+  async markAdvancePaidInCash(id: string, userId: string, overrideCompanyId?: string) {
     const user = await this.common.getVerifiedUser(userId);
+    this.common.applyCompanyOverride(user, overrideCompanyId);
     this.common.requireFinanceAccess(user.role);
     const advance = await this.common.getOwnedAdvanceOrThrow(id, user.companyId);
     if (advance.status !== 'APPROVED') throw new BadRequestException('Seule une avance approuvée peut être marquée remboursée');

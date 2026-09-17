@@ -31,14 +31,22 @@ export async function getUserWithCompany(
 ) {
   const user = await prisma.user.findUnique({
     where: { id: userId },
-    select: { id: true, companyId: true, role: true, email: true },
+    select: {
+      id: true,
+      companyId: true,
+      role: true,
+      email: true,
+      manageMultipleCompanies: true,
+    },
   });
 
   const isCabinet =
     user?.role === 'CABINET_ADMIN' || user?.role === 'CABINET_GESTIONNAIRE';
+  // 🆕 Admin multi-entreprises : même principe que Cabinet — companyId fourni
+  // par l'appelant (PortfolioLeavesService), après vérification d'appartenance.
+  const canOverride = isCabinet || user?.manageMultipleCompanies;
 
-  if (isCabinet) {
-    if (!overrideCompanyId) throw new CompanyNotFoundException();
+  if (canOverride && overrideCompanyId) {
     return {
       id: user.id,
       companyId: overrideCompanyId,
@@ -46,6 +54,7 @@ export async function getUserWithCompany(
       email: user.email,
     };
   }
+  if (isCabinet) throw new CompanyNotFoundException();
 
   if (!user?.companyId) throw new CompanyNotFoundException();
   return { ...user, companyId: user.companyId };

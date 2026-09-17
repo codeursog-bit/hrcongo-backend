@@ -574,6 +574,63 @@ export class MailService {
   }
 
   // ──────────────────────────────────────────────────────────
+  // PORTEFEUILLE MULTI-ENTREPRISES — Invitation co-admin
+  // ──────────────────────────────────────────────────────────
+  async sendPortfolioCoAdminInvitation(params: {
+    to: string;
+    firstName: string;
+    lastName: string;
+    inviterName: string;
+    companyCount: number;
+    invitationToken: string;
+    expiresAt: Date;
+  }): Promise<boolean> {
+    const { to, firstName, lastName, inviterName, companyCount, invitationToken, expiresAt } = params;
+    const color = '#10b981';
+    const acceptUrl = `${this.frontendUrl}/auth/accept-portfolio-invitation/${invitationToken}`;
+    const expiryLabel = expiresAt.toLocaleDateString('fr-FR', {
+      day: 'numeric', month: 'long', year: 'numeric',
+    });
+    const displayName = `${firstName} ${lastName}`.trim() || to.split('@')[0];
+    const companyLabel = companyCount > 1 ? `${companyCount} entreprises` : `${companyCount} entreprise`;
+
+    const html = this.baseTemplate(
+      `
+      <p style="font-size:16px;margin:0 0 20px;">Bonjour <strong>${displayName}</strong>,</p>
+      <p style="color:#94a3b8;margin:0 0 24px;line-height:1.6;">
+        <strong style="color:#e2e8f0;">${inviterName}</strong> vous invite à co-gérer son portefeuille
+        de <strong style="color:#e2e8f0;">${companyLabel}</strong> sur KonzaRH, avec les mêmes droits.
+      </p>
+      <div style="background:rgba(16,185,129,0.08);border:1px solid rgba(16,185,129,0.3);border-radius:12px;padding:20px;margin:0 0 24px;">
+        <p style="margin:0 0 10px;font-weight:700;color:#6ee7b7;">✅ Vous pourrez :</p>
+        <ul style="margin:0;padding-left:20px;color:#94a3b8;font-size:14px;line-height:1.8;">
+          <li>Accéder à toutes les entreprises du portefeuille</li>
+          <li>Gérer la paie, les employés, congés et présences</li>
+          <li>Naviguer librement d'une entreprise à l'autre</li>
+        </ul>
+      </div>
+      <div style="text-align:center;margin:20px 0;">
+        <a href="${acceptUrl}" style="display:inline-block;background:${color};color:#fff;padding:14px 36px;text-decoration:none;border-radius:10px;font-weight:700;">
+          Créer mon accès →
+        </a>
+      </div>
+      <div style="background:rgba(251,191,36,0.08);border:1px solid rgba(251,191,36,0.2);border-radius:8px;padding:14px;margin-top:20px;">
+        <p style="margin:0;font-size:13px;color:#fbbf24;">⏳ Ce lien est valable jusqu'au <strong>${expiryLabel}</strong>.</p>
+      </div>
+    `,
+      color,
+      `Invitation portefeuille — ${inviterName}`,
+    );
+
+    return this.send(
+      to,
+      `${inviterName} vous invite à co-gérer son portefeuille d'entreprises`,
+      html,
+      `Bonjour ${displayName},\n\n${inviterName} vous invite à co-gérer son portefeuille (${companyLabel}) : ${acceptUrl}\nValable jusqu'au ${expiryLabel}.`,
+    );
+  }
+
+  // ──────────────────────────────────────────────────────────
   // MOT DE PASSE OUBLIÉ — Lien de réinitialisation
   // ──────────────────────────────────────────────────────────
   async sendPasswordReset(params: {

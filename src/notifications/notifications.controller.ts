@@ -69,10 +69,12 @@ export class NotificationsController {
     body: {
       endpoint: string;
       keys: { p256dh: string; auth: string };
+      deviceLabel?: string;
     },
     @Request() req,
   ) {
-    await this.pushService.registerToken(req.user.userId, body);
+    const { deviceLabel, ...subscription } = body;
+    await this.pushService.registerToken(req.user.userId, subscription, deviceLabel);
     return {
       success: true,
       message: 'Notifications activées sur cet appareil.',
@@ -80,11 +82,11 @@ export class NotificationsController {
   }
 
   // ========================================
-  // 🔕 Désabonner l'appareil
+  // 🔕 Désabonner l'appareil courant (les autres appareils restent actifs)
   // ========================================
   @Delete('push/unsubscribe')
-  async unsubscribePush(@Request() req) {
-    await this.pushService.unregisterToken(req.user.userId);
-    return { success: true, message: 'Notifications désactivées.' };
+  async unsubscribePush(@Body() body: { endpoint?: string }, @Request() req) {
+    await this.pushService.unregisterToken(req.user.userId, body?.endpoint);
+    return { success: true, message: 'Notifications désactivées sur cet appareil.' };
   }
 }
