@@ -604,9 +604,11 @@ export class AuthService {
 
   // ── Multi-entreprises (ADMIN avec manageMultipleCompanies) ─────────────────
   // Change l'entreprise active du compte : vérifie l'appartenance via
-  // UserCompany, puis réémet un JWT avec le nouveau companyId. Ne modifie
-  // jamais User.companyId en base — cette colonne reste "l'entreprise active
-  // au dernier login/switch", recalculée à chaque émission de token.
+  // UserCompany, PERSISTE le nouveau companyId en base (c'est la source de
+  // vérité pour "l'entreprise active" — relue par login() et refreshToken()
+  // à chaque émission de token, donc si on ne persiste pas ici le switch ne
+  // survit ni à un refresh de token ni à une reconnexion), puis réémet un JWT
+  // avec ce companyId.
   async switchCompany(userId: string, companyId: string, res: Response) {
     const user = await this.prisma.user.findUnique({ where: { id: userId } });
     if (!user || !user.isActive) {
@@ -636,7 +638,12 @@ export class AuthService {
       throw new BadRequestException('Entreprise introuvable ou désactivée');
     }
 
-    return this.issueTokensAndSetCookies({ ...user, companyId }, res);
+    const updatedUser = await this.prisma.user.update({
+      where: { id: userId },
+      data: { companyId },
+    });
+
+    return this.issueTokensAndSetCookies({ ...updatedUser, companyId }, res);
   }
 
   // Liste des entreprises liées au compte (pour le sélecteur + vue perso)
