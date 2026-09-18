@@ -86,7 +86,7 @@ export class LoansRequestsService {
         type: 'LOAN_REQUEST' as NotificationType,
         title: '💳 Nouvelle demande de prêt',
         message: `${employee.firstName} ${employee.lastName} demande un prêt (${(data.type ?? 'ARGENT').toLowerCase()}) de ${data.amount.toLocaleString()} FCFA`,
-        link: '/finances/prets-avances',
+        link: '/loans',
         metadata: { loanId: loan.id, employeeId: employee.id },
       });
     }
@@ -288,7 +288,7 @@ export class LoansRequestsService {
         type: 'ADVANCE_REQUEST' as NotificationType,
         title: '💵 Nouvelle demande d\u2019avance',
         message: `${employee.firstName} ${employee.lastName} demande une avance de ${data.amount.toLocaleString()} FCFA`,
-        link: '/finances/prets-avances',
+        link: '/loans',
         metadata: { advanceId: advance.id, employeeId: employee.id },
       });
     }

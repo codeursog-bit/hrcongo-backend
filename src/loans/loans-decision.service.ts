@@ -122,7 +122,7 @@ export class LoansDecisionService {
         result === 'ACTIVE'
           ? 'Votre demande de prêt a été accordée'
           : `Votre demande de prêt a été refusée${rejectionReason ? ` : ${rejectionReason}` : ''}`,
-      link: '/finances/prets-avances/mon-espace',
+      link: '/loans/mon-espace',
       metadata: {},
     });
   }
@@ -197,7 +197,7 @@ export class LoansDecisionService {
             decision === 'APPROVED'
               ? 'Votre demande d\u2019avance a été accordée'
               : `Votre demande d'avance a été refusée${rejectionReason ? ` : ${rejectionReason}` : ''}`,
-          link: '/finances/prets-avances/mon-espace',
+          link: '/loans/mon-espace',
           metadata: {},
         });
       }
