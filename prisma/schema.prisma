@@ -2853,6 +2853,7 @@ model PredefinedConvention {
    isRecurring        Boolean  @default(true)
    isTaxable          Boolean  @default(true)
    isCnss             Boolean  @default(true)
+   isNature Boolean @default(false)
    description        String?
    isActive           Boolean  @default(true)
    createdAt          DateTime @default(now())
