@@ -172,6 +172,7 @@ export class AuthController {
         role: true,
         companyId: true,
         isActive: true,
+        manageMultipleCompanies: true, // 🆕
       },
     });
 
@@ -210,6 +211,7 @@ export class AuthController {
         companyId: user.companyId ?? null,
         cabinetId,
         managedByCabinet,
+        manageMultipleCompanies: user.manageMultipleCompanies ?? false, // 🆕
       },
     };
   }
