@@ -208,7 +208,7 @@ function emptyFiscalMonths(): FiscalMonthlyAmount[] {
   return Array.from({ length: 12 }, (_, i) => ({ month: i + 1, its: 0, bnc10: 0, bnc20: 0 }));
 }
 
-function classifyFiscalCategory(
+export function classifyFiscalCategory(
   contractType: string,
   isResident: boolean | string | null | undefined,
 ): FiscalCategory {

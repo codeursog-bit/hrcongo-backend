@@ -10,6 +10,7 @@ import {
   ConventionsService,
   ConventionCategory,
 } from '../conventions/conventions.service';
+import { classifyFiscalCategory } from './payroll-recap.service';
 
 @Injectable()
 export class ReportsService {
@@ -1661,6 +1662,25 @@ export class ReportsService {
           (sum, emp) => sum + Number(emp.payrolls[0]?.its || 0),
           0,
         );
+        // ✅ "its" mélange ITS réel et BNC 10%/20% selon le type de contrat
+        // (voir payroll-calculator.service.ts) — cette page inclut TOUS les
+        // salariés actifs, prestataires compris. On reventile le même total
+        // en 3 sous-totaux distincts pour ne jamais laisser un chiffre
+        // unique faire croire à un ITS pur. totalITS ci-dessus reste calculé
+        // pour compatibilité mais NE DOIT PLUS être affiché seul.
+        let totalItsReel = 0;
+        let totalBnc10 = 0;
+        let totalBnc20 = 0;
+        for (const emp of employeesWithPayroll) {
+          const amount = Number(emp.payrolls[0]?.its || 0);
+          const category = classifyFiscalCategory(
+            (emp as any).contractType,
+            (emp as any).isResident,
+          );
+          if (category === 'ITS') totalItsReel += amount;
+          else if (category === 'BNC_10') totalBnc10 += amount;
+          else if (category === 'BNC_20') totalBnc20 += amount;
+        }
         const totalLeaves = dept.employees.reduce(
           (sum, emp) => sum + emp.leaves.length,
           0,
@@ -1686,6 +1706,9 @@ export class ReportsService {
           totalNet,
           totalCNSS,
           totalITS,
+          totalItsReel,
+          totalBnc10,
+          totalBnc20,
           totalEmployerCost: totalGross + totalCNSS,
           avgSalary:
             employeesWithPayroll.length > 0
