@@ -1371,14 +1371,17 @@ export class PayrollsService {
 
     // ✅ FIX BUG 6: CABINET_ADMIN n'a pas de companyId sur son User
     // Il fournit le companyId directement dans le DTO (front l'envoie déjà)
-    // 🆕 Même principe étendu à l'admin multi-entreprises (manageMultipleCompanies) —
-    // l'appartenance à ce companyId est vérifiée en amont par PortfolioPayrollService.
+    // 🆕 Admin multi-entreprises : override UNIQUEMENT si companyId est
+    // fourni dans le DTO (appel venant du portefeuille) — sinon on retombe
+    // sur son entreprise active (user.companyId), comme n'importe quel
+    // admin normal. Sans ce `&&`, un admin multi-entreprises utilisant la
+    // page paie normale (qui n'envoie pas companyId) perdait son entreprise.
     const isCabinet =
       user?.role === 'CABINET_ADMIN' || user?.role === 'CABINET_GESTIONNAIRE';
-    const canOverride = isCabinet || user?.manageMultipleCompanies;
-    const effectiveCompanyId = canOverride
-      ? (createPayrollDto as any).companyId
-      : user?.companyId;
+    const dtoCompanyId = (createPayrollDto as any).companyId;
+    const effectiveCompanyId = isCabinet
+      ? dtoCompanyId
+      : (user?.manageMultipleCompanies && dtoCompanyId) || user?.companyId;
 
     if (!effectiveCompanyId) throw new CompanyNotFoundException();
 

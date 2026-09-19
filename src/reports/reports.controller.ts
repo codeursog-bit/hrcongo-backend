@@ -154,8 +154,18 @@ export class ReportsController {
    * GET /reports/payroll?companyId=xxx
    */
   @Get('payroll')
-  getPayrollAnalysis(@Request() req, @Query('companyId') companyId?: string) {
-    return this.reportsService.getPayrollAnalysis(req.user.userId, companyId);
+  getPayrollAnalysis(
+    @Request() req,
+    @Query('companyId') companyId?: string,
+    @Query('month') month?: string,
+    @Query('year') year?: string,
+  ) {
+    return this.reportsService.getPayrollAnalysis(
+      req.user.userId,
+      companyId,
+      month ? parseInt(month, 10) : undefined,
+      year ? parseInt(year, 10) : undefined,
+    );
   }
 
   /**
@@ -233,55 +243,69 @@ export class ReportsController {
 
   /**
    * ✅ Analyse des congés (répartition, saisonnalité)
-   * GET /reports/leaves?companyId=xxx
+   * GET /reports/leaves?year=2026&companyId=xxx
    */
   @Get('leaves')
-  getLeaveAnalysis(@Request() req, @Query('companyId') companyId?: string) {
-    return this.reportsService.getLeaveAnalysis(req.user.userId, companyId);
+  getLeaveAnalysis(
+    @Request() req,
+    @Query('companyId') companyId?: string,
+    @Query('year') year?: string,
+  ) {
+    return this.reportsService.getLeaveAnalysis(
+      req.user.userId,
+      companyId,
+      year ? parseInt(year, 10) : undefined,
+    );
   }
 
   /**
    * 🆕 Indicateurs performance — objectifs (Goal) & entretiens (PerformanceReview)
-   * GET /reports/performance-indicators?companyId=xxx
+   * GET /reports/performance-indicators?year=2026&companyId=xxx
    */
   @Get('performance-indicators')
   getPerformanceIndicators(
     @Request() req,
     @Query('companyId') companyId?: string,
+    @Query('year') year?: string,
   ) {
     return this.reportsService.getPerformanceIndicators(
       req.user.userId,
       companyId,
+      year ? parseInt(year, 10) : undefined,
     );
   }
 
   /**
    * 🆕 Indicateurs recrutement — offres (JobOffer) & candidatures (Candidate)
-   * GET /reports/recruitment-indicators?companyId=xxx
+   * GET /reports/recruitment-indicators?year=2026&companyId=xxx
    */
   @Get('recruitment-indicators')
   getRecruitmentIndicators(
     @Request() req,
     @Query('companyId') companyId?: string,
+    @Query('year') year?: string,
   ) {
     return this.reportsService.getRecruitmentIndicators(
       req.user.userId,
       companyId,
+      year ? parseInt(year, 10) : undefined,
     );
   }
 
   /**
    * 🆕 Indicateurs formation — TrainingCourse & EmployeeTraining
-   * GET /reports/training-indicators?companyId=xxx
+   * GET /reports/training-indicators?year=2026&companyId=xxx
    */
   @Get('training-indicators')
   getTrainingIndicators(
     @Request() req,
     @Query('companyId') companyId?: string,
+    @Query('year') year?: string,
   ) {
     return this.reportsService.getTrainingIndicators(
       req.user.userId,
       companyId,
+      year ? parseInt(year, 10) : undefined,
     );
   }
 
@@ -309,10 +333,17 @@ export class ReportsController {
    * GET /reports/departments?companyId=xxx
    */
   @Get('departments')
-  getDepartmentReport(@Request() req, @Query('companyId') companyId?: string) {
+  getDepartmentReport(
+    @Request() req,
+    @Query('companyId') companyId?: string,
+    @Query('month') month?: string,
+    @Query('year') year?: string,
+  ) {
     return this.reportsService.getDepartmentAnalysis(
       req.user.userId,
       companyId,
+      month ? parseInt(month, 10) : undefined,
+      year ? parseInt(year, 10) : undefined,
     );
   }
 
@@ -370,10 +401,15 @@ export class ReportsController {
    * GET /reports/top-employees?companyId=xxx
    */
   @Get('top-employees')
-  getTopEmployees(@Request() req, @Query('companyId') companyId?: string) {
+  getTopEmployees(
+    @Request() req,
+    @Query('companyId') companyId?: string,
+    @Query('year') year?: string,
+  ) {
     return this.reportsService.getTopEmployeesReport(
       req.user.userId,
       companyId,
+      year ? parseInt(year, 10) : undefined,
     );
   }
 

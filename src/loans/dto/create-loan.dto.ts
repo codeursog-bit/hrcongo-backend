@@ -18,6 +18,14 @@ export enum LoanType {
   AUTRE = 'AUTRE',
 }
 
+export enum LoanNature {
+  SOCIAL = 'SOCIAL',
+  SCOLARITE = 'SCOLARITE',
+  LOGEMENT = 'LOGEMENT',
+  EXCEPTIONNEL = 'EXCEPTIONNEL',
+  AUTRE = 'AUTRE',
+}
+
 export class CreateLoanDto {
   /** Renseigné uniquement quand un RH/Admin crée le prêt pour un employé (sinon résolu depuis l'utilisateur connecté) */
   @IsString()
@@ -27,6 +35,12 @@ export class CreateLoanDto {
   @IsEnum(LoanType)
   @IsOptional()
   type?: LoanType;
+
+  /** "Nature du prêt" du modèle papier (Social/Scolarité/...) — affichée
+   *  seulement par les entreprises au modèle de document STANDARD. */
+  @IsEnum(LoanNature)
+  @IsOptional()
+  nature?: LoanNature;
 
   @IsNotEmpty()
   @IsNumber()

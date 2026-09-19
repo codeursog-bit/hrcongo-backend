@@ -860,11 +860,13 @@ export class ManualPayrollService {
     });
     const isCabinet =
       user?.role === 'CABINET_ADMIN' || user?.role === 'CABINET_GESTIONNAIRE';
-    // 🆕 Admin multi-entreprises : même principe que Cabinet — companyId
-    // fourni par l'appelant (PortfolioPayrollService, après vérification
-    // d'appartenance), au lieu de forcer l'entreprise active de l'admin.
-    const canOverride = isCabinet || user?.manageMultipleCompanies;
-    const companyId = canOverride ? overrideCompanyId : user?.companyId;
+    // 🆕 Admin multi-entreprises : override UNIQUEMENT si overrideCompanyId
+    // est fourni (appel venant du portefeuille) — sinon on retombe sur
+    // l'entreprise active de l'admin, comme un admin normal. Sans ce `&&`,
+    // la paie manuelle depuis la page normale perdait l'entreprise.
+    const companyId = isCabinet
+      ? overrideCompanyId
+      : (user?.manageMultipleCompanies && overrideCompanyId) || user?.companyId;
     if (!companyId) throw new CompanyNotFoundException();
     return companyId;
   }

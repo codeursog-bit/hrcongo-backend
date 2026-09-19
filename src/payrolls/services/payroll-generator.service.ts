@@ -468,14 +468,18 @@ export class PayrollGeneratorService {
       where: { id: userId },
       select: { companyId: true, manageMultipleCompanies: true },
     });
-    if (!user?.companyId) throw new CompanyNotFoundException();
 
     // 🆕 Admin multi-entreprises : cible une entreprise précise depuis la vue
     // portefeuille. Appartenance déjà vérifiée par PortfolioPayrollService.
+    // ⚠️ Le check "a-t-il une entreprise ?" doit porter sur le résultat final
+    // (companyId), pas sur user.companyId seul — sinon un admin portefeuille
+    // qui n'a jamais basculé sur aucune entreprise (companyId=null) se fait
+    // bloquer même quand overrideCompanyId est valide.
     const companyId =
-      overrideCompanyId && user.manageMultipleCompanies
+      overrideCompanyId && user?.manageMultipleCompanies
         ? overrideCompanyId
-        : user.companyId;
+        : user?.companyId;
+    if (!companyId) throw new CompanyNotFoundException();
 
     await this.subscriptionGuard.checkFeatureAccess(
       companyId,

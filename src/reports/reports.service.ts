@@ -184,12 +184,18 @@ export class ReportsService {
   // ============================================================
   // ANALYSE PAIE
   // ============================================================
-  async getPayrollAnalysis(userId: string, overrideCompanyId?: string) {
+  async getPayrollAnalysis(
+    userId: string,
+    overrideCompanyId?: string,
+    month?: number,
+    year?: number,
+  ) {
     const companyId = await this.resolveCompanyId(userId, overrideCompanyId);
     if (!companyId) return {};
 
-    const currentYear = new Date().getFullYear();
-    const currentMonth = new Date().getMonth() + 1;
+    const now = new Date();
+    const currentYear = year ?? now.getFullYear();
+    const currentMonth = month ?? now.getMonth() + 1;
 
     const totalPayroll = await this.prisma.payroll.aggregate({
       where: { companyId, month: currentMonth, year: currentYear },
@@ -208,7 +214,7 @@ export class ReportsService {
       where: { companyId, year: currentYear },
       _sum: { grossSalary: true, netSalary: true, totalEmployerCost: true },
       orderBy: { month: 'asc' },
-      take: 6,
+      take: 12,
     });
 
     const trend = trendData.map((t) => ({
@@ -1140,17 +1146,20 @@ export class ReportsService {
     COMPENSATORY: 'Récupération',
   };
 
-  async getLeaveAnalysis(userId: string, overrideCompanyId?: string) {
+  async getLeaveAnalysis(
+    userId: string,
+    overrideCompanyId?: string,
+    year?: number,
+  ) {
     const companyId = await this.resolveCompanyId(userId, overrideCompanyId);
     if (!companyId) return {};
 
     const now = new Date();
-    const currentYear = now.getFullYear();
-    const yearAgo = new Date(
-      now.getFullYear() - 1,
-      now.getMonth(),
-      now.getDate(),
-    );
+    const targetYear = year ?? now.getFullYear();
+    // ✅ Année choisie : fenêtre calendaire pleine (1er janvier → 31
+    // décembre), plus figée sur "les 12 derniers mois glissants".
+    const yearStart = new Date(targetYear, 0, 1);
+    const yearEnd = new Date(targetYear, 11, 31, 23, 59, 59);
 
     const [
       leaveStats,
@@ -1162,18 +1171,40 @@ export class ReportsService {
     ] = await Promise.all([
       this.prisma.leave.groupBy({
         by: ['type'],
-        where: { companyId, status: 'APPROVED' },
+        where: {
+          companyId,
+          status: 'APPROVED',
+          startDate: { gte: yearStart, lte: yearEnd },
+        },
         _count: { id: true },
       }),
-      this.prisma.leave.count({ where: { companyId, status: 'PENDING' } }),
-      this.prisma.leave.count({ where: { companyId, status: 'REJECTED' } }),
-      this.prisma.leave.count({ where: { companyId, status: 'APPROVED' } }),
+      this.prisma.leave.count({
+        where: {
+          companyId,
+          status: 'PENDING',
+          startDate: { gte: yearStart, lte: yearEnd },
+        },
+      }),
+      this.prisma.leave.count({
+        where: {
+          companyId,
+          status: 'REJECTED',
+          startDate: { gte: yearStart, lte: yearEnd },
+        },
+      }),
+      this.prisma.leave.count({
+        where: {
+          companyId,
+          status: 'APPROVED',
+          startDate: { gte: yearStart, lte: yearEnd },
+        },
+      }),
       this.prisma.leaveBalance.findMany({
-        where: { year: currentYear, employee: { companyId, status: 'ACTIVE' } },
+        where: { year: targetYear, employee: { companyId, status: 'ACTIVE' } },
         select: { annualRemaining: true },
       }),
       this.prisma.leave.findMany({
-        where: { companyId, status: 'APPROVED', startDate: { gte: yearAgo } },
+        where: { companyId, status: 'APPROVED', startDate: { gte: yearStart, lte: yearEnd } },
         select: { type: true, startDate: true },
       }),
     ]);
@@ -1187,7 +1218,7 @@ export class ReportsService {
       }))
       .sort((a, b) => b.value - a.value);
 
-    // ── Solde moyen réel (LeaveBalance.annualRemaining, année en cours) ──────
+    // ── Solde moyen réel (LeaveBalance.annualRemaining, année choisie) ──────
     const avgBalance =
       balances.length > 0
         ? Math.round(
@@ -1202,12 +1233,11 @@ export class ReportsService {
     const approvalRate =
       decided > 0 ? Math.round((approvedCount / decided) * 1000) / 10 : 0;
 
-    // ── Saisonnalité réelle — 12 derniers mois, Annual vs Sick (clés attendues par le frontend) ──
+    // ── Saisonnalité — les 12 mois de l'année choisie, Annual vs Sick ──────
     const seasonal: { month: string; Annual: number; Sick: number }[] = [];
-    for (let i = 11; i >= 0; i--) {
-      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
-      const mStart = new Date(d.getFullYear(), d.getMonth(), 1);
-      const mEnd = new Date(d.getFullYear(), d.getMonth() + 1, 0);
+    for (let m = 0; m <= 11; m++) {
+      const mStart = new Date(targetYear, m, 1);
+      const mEnd = new Date(targetYear, m + 1, 0);
       const inMonth = leaves12mo.filter(
         (l) => new Date(l.startDate) >= mStart && new Date(l.startDate) <= mEnd,
       );
@@ -1228,7 +1258,7 @@ export class ReportsService {
         {
           label: 'Solde Moyen',
           value: `${avgBalance}j`,
-          sub: `${currentYear}`,
+          sub: `${targetYear}`,
         },
         { label: 'En attente', value: pendingCount.toString() },
         { label: "Taux d'approbation", value: `${approvalRate}%` },
@@ -1244,13 +1274,18 @@ export class ReportsService {
   // ============================================================
   // 🆕 INDICATEURS PERFORMANCE — Objectifs (Goal) & Entretiens (PerformanceReview)
   // ============================================================
-  async getPerformanceIndicators(userId: string, overrideCompanyId?: string) {
+  async getPerformanceIndicators(
+    userId: string,
+    overrideCompanyId?: string,
+    year?: number,
+  ) {
     const companyId = await this.resolveCompanyId(userId, overrideCompanyId);
     if (!companyId) return {};
 
     const now = new Date();
-    const currentYear = now.getFullYear();
-    const yearStart = new Date(currentYear, 0, 1);
+    const targetYear = year ?? now.getFullYear();
+    const yearStart = new Date(targetYear, 0, 1);
+    const yearEnd = new Date(targetYear, 11, 31, 23, 59, 59);
 
     const [activeEmployees, goals, reviews] = await Promise.all([
       this.prisma.employee.findMany({
@@ -1262,7 +1297,7 @@ export class ReportsService {
         select: { status: true, progress: true, endDate: true },
       }),
       this.prisma.performanceReview.findMany({
-        where: { employee: { companyId }, date: { gte: yearStart } },
+        where: { employee: { companyId }, date: { gte: yearStart, lte: yearEnd } },
         select: {
           employeeId: true,
           status: true,
@@ -1379,12 +1414,20 @@ export class ReportsService {
   // ============================================================
   // 🆕 INDICATEURS RECRUTEMENT — Offres (JobOffer) & Candidatures (Candidate)
   // ============================================================
-  async getRecruitmentIndicators(userId: string, overrideCompanyId?: string) {
+  async getRecruitmentIndicators(
+    userId: string,
+    overrideCompanyId?: string,
+    year?: number,
+  ) {
     const companyId = await this.resolveCompanyId(userId, overrideCompanyId);
     if (!companyId) return {};
 
     const now = new Date();
-    const sixMonthsAgo = new Date(now.getFullYear(), now.getMonth() - 5, 1);
+    const targetYear = year ?? now.getFullYear();
+    // ✅ Année choisie : fenêtre calendaire pleine, plus figée sur "les 6
+    // derniers mois glissants".
+    const yearStart = new Date(targetYear, 0, 1);
+    const yearEnd = new Date(targetYear, 11, 31, 23, 59, 59);
 
     const [offers, candidates] = await Promise.all([
       this.prisma.jobOffer.findMany({
@@ -1392,7 +1435,7 @@ export class ReportsService {
         select: { status: true },
       }),
       this.prisma.candidate.findMany({
-        where: { jobOffer: { companyId }, createdAt: { gte: sixMonthsAgo } },
+        where: { jobOffer: { companyId }, createdAt: { gte: yearStart, lte: yearEnd } },
         select: { hrDecision: true, aiSuggestion: true, createdAt: true },
       }),
     ]);
@@ -1432,12 +1475,11 @@ export class ReportsService {
       count,
     }));
 
-    // ── Candidatures reçues — 6 derniers mois ────────────────────────────
+    // ── Candidatures reçues — les 12 mois de l'année choisie ─────────────
     const candidatesTrend: { month: string; count: number }[] = [];
-    for (let i = 5; i >= 0; i--) {
-      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
-      const mStart = new Date(d.getFullYear(), d.getMonth(), 1);
-      const mEnd = new Date(d.getFullYear(), d.getMonth() + 1, 0);
+    for (let m = 0; m <= 11; m++) {
+      const mStart = new Date(targetYear, m, 1);
+      const mEnd = new Date(targetYear, m + 1, 0);
       candidatesTrend.push({
         month: mEnd.toLocaleDateString('fr-FR', { month: 'short' }),
         count: candidates.filter(
@@ -1459,12 +1501,24 @@ export class ReportsService {
   // ============================================================
   // 🆕 INDICATEURS FORMATION — TrainingCourse & EmployeeTraining
   // ============================================================
-  async getTrainingIndicators(userId: string, overrideCompanyId?: string) {
+  async getTrainingIndicators(
+    userId: string,
+    overrideCompanyId?: string,
+    year?: number,
+  ) {
     const companyId = await this.resolveCompanyId(userId, overrideCompanyId);
     if (!companyId) return {};
 
+    const now = new Date();
+    const targetYear = year ?? now.getFullYear();
+    const yearStart = new Date(targetYear, 0, 1);
+    const yearEnd = new Date(targetYear, 11, 31, 23, 59, 59);
+
     const sessions = await this.prisma.employeeTraining.findMany({
-      where: { course: { companyId } },
+      where: {
+        course: { companyId },
+        startDate: { gte: yearStart, lte: yearEnd },
+      },
       select: {
         status: true,
         course: { select: { category: true, cost: true, durationHours: true } },
@@ -1618,12 +1672,17 @@ export class ReportsService {
   // ============================================================
   // ANALYSE PAR DÉPARTEMENT
   // ============================================================
-  async getDepartmentAnalysis(userId: string, overrideCompanyId?: string) {
+  async getDepartmentAnalysis(
+    userId: string,
+    overrideCompanyId?: string,
+    month?: number,
+    year?: number,
+  ) {
     const companyId = await this.resolveCompanyId(userId, overrideCompanyId);
     if (!companyId) return [];
 
-    const currentMonth = new Date().getMonth() + 1;
-    const currentYear = new Date().getFullYear();
+    const currentMonth = month ?? new Date().getMonth() + 1;
+    const currentYear = year ?? new Date().getFullYear();
 
     const departments = await this.prisma.department.findMany({
       where: { companyId },
@@ -2129,53 +2188,67 @@ export class ReportsService {
   // ============================================================
   // TOP EMPLOYÉS
   // ============================================================
-  async getTopEmployeesReport(userId: string, overrideCompanyId?: string) {
+  async getTopEmployeesReport(
+    userId: string,
+    overrideCompanyId?: string,
+    year?: number,
+  ) {
     const companyId = await this.resolveCompanyId(userId, overrideCompanyId);
     if (!companyId) return { topOvertime: [], topLeaves: [] };
+
+    const now = new Date();
+    const targetYear = year ?? now.getFullYear();
+    const yearStart = new Date(targetYear, 0, 1);
+    const yearEnd = new Date(targetYear, 11, 31, 23, 59, 59);
 
     const employees = await this.prisma.employee.findMany({
       where: { companyId, status: 'ACTIVE' },
       include: {
-        payrolls: { take: 1, orderBy: { createdAt: 'desc' } },
-        leaves: { where: { status: 'APPROVED' } },
+        // ✅ Toutes les paies VALIDÉES de l'année choisie (plus seulement la
+        // dernière tout court) — pour un vrai cumul annuel d'heures sup.
+        payrolls: {
+          where: { year: targetYear, status: { in: ['VALIDATED', 'PAID'] } },
+        },
+        leaves: {
+          where: {
+            status: 'APPROVED',
+            startDate: { gte: yearStart, lte: yearEnd },
+          },
+        },
         department: { select: { name: true } },
       },
     });
 
     const withOvertime = employees
-      .filter((emp) => {
-        const p = emp.payrolls[0] as any;
-        if (!p) return false;
-        return (
-          Number(p.overtimeHours10 || 0) +
-            Number(p.overtimeHours25 || 0) +
-            Number(p.overtimeHours50 || 0) +
-            Number(p.overtimeHours100 || 0) >
-          0
-        );
-      })
       .map((emp) => {
-        const p = emp.payrolls[0] as any;
-        const h10 = Number(p.overtimeHours10 || 0);
-        const h25 = Number(p.overtimeHours25 || 0);
-        const h50 = Number(p.overtimeHours50 || 0);
-        const h100 = Number(p.overtimeHours100 || 0);
-        const a10 = Number(p.overtimeAmount10 || 0);
-        const a25 = Number(p.overtimeAmount25 || 0);
-        const a50 = Number(p.overtimeAmount50 || 0);
-        const a100 = Number(p.overtimeAmount100 || 0);
-        return {
-          id: emp.id,
-          name: `${emp.firstName} ${emp.lastName}`,
-          department: emp.department?.name || 'N/A',
-          overtime10: h10,
-          overtime25: h25,
-          overtime50: h50,
-          overtime100: h100,
-          totalOvertime: h10 + h25 + h50 + h100,
-          overtimeAmount: a10 + a25 + a50 + a100,
-        };
+        const totals = emp.payrolls.reduce(
+          (acc, p: any) => {
+            acc.h10 += Number(p.overtimeHours10 || 0);
+            acc.h25 += Number(p.overtimeHours25 || 0);
+            acc.h50 += Number(p.overtimeHours50 || 0);
+            acc.h100 += Number(p.overtimeHours100 || 0);
+            acc.a10 += Number(p.overtimeAmount10 || 0);
+            acc.a25 += Number(p.overtimeAmount25 || 0);
+            acc.a50 += Number(p.overtimeAmount50 || 0);
+            acc.a100 += Number(p.overtimeAmount100 || 0);
+            return acc;
+          },
+          { h10: 0, h25: 0, h50: 0, h100: 0, a10: 0, a25: 0, a50: 0, a100: 0 },
+        );
+        return { emp, totals };
       })
+      .filter(({ totals }) => totals.h10 + totals.h25 + totals.h50 + totals.h100 > 0)
+      .map(({ emp, totals }) => ({
+        id: emp.id,
+        name: `${emp.firstName} ${emp.lastName}`,
+        department: emp.department?.name || 'N/A',
+        overtime10: totals.h10,
+        overtime25: totals.h25,
+        overtime50: totals.h50,
+        overtime100: totals.h100,
+        totalOvertime: totals.h10 + totals.h25 + totals.h50 + totals.h100,
+        overtimeAmount: totals.a10 + totals.a25 + totals.a50 + totals.a100,
+      }))
       .sort((a, b) => b.totalOvertime - a.totalOvertime);
 
     const withMostLeaves = employees

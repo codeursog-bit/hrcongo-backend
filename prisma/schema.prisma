@@ -110,6 +110,8 @@ model User {
 
   blogPosts      BlogPost[]
   blogLikes      BlogLike[]
+  kioskDevices KioskDevice[]
+  kioskDeviceCompanyLinks KioskDeviceCompany[]
   ownedCompanies UserCompany[]
 
   @@index([email])
@@ -269,6 +271,10 @@ model Company {
 
   contractRuptures ContractRupture[] // ← AJOUTER si absent
   pseProcedures    PSEProcedure[]    // ← AJOUTER
+
+  checkinCredentials CheckinCredential[]
+  kioskDevices       KioskDevice[]
+  kioskDeviceCompanyLinks KioskDeviceCompany[]
 
   cabinetCompanies      CabinetCompany[]
   ownerLinks UserCompany[]
@@ -492,6 +498,7 @@ model Employee {
   assets              Asset[]             @relation("AssignedAssets")
   attendanceSummaries AttendanceSummary[]
     // 🆕 NOUVELLE RELATION
+  checkinCredentials CheckinCredential[]
   bonuses EmployeeBonus[]
   contracts         EmployeeContract[]
   pseSalaries PSESalarie[] // ← AJOUTER
@@ -1298,6 +1305,66 @@ enum ClosureReason {
   @@map("closure_reason")
 }
 
+
+enum CheckinCredentialType {
+  NFC_BADGE
+  QR_CODE
+}
+
+model CheckinCredential {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  type       CheckinCredentialType
+  identifier String   @unique @db.VarChar(255)
+  isActive   Boolean  @default(true)
+  createdAt  DateTime @default(now()) @db.Timestamptz
+  revokedAt  DateTime?
+
+  employeeId String   @db.Uuid
+  employee   Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+
+  companyId  String   @db.Uuid
+  company    Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+}
+
+model KioskDevice {
+  id         String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name       String    @db.VarChar(100)
+  apiKey     String    @unique @db.VarChar(255)
+  isActive   Boolean   @default(true)
+  lastSeenAt DateTime?
+  createdAt  DateTime  @default(now()) @db.Timestamptz
+
+  actingUserId String @db.Uuid
+  actingUser   User   @relation(fields: [actingUserId], references: [id])
+
+  midDayStartHour Int? @db.SmallInt
+  midDayEndHour   Int? @db.SmallInt
+
+  additionalCompanies KioskDeviceCompany[]
+
+  companyId  String    @db.Uuid
+  company    Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+}
+
+model KioskDeviceCompany {
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+
+  deviceId String      @db.Uuid
+  device   KioskDevice @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  companyId String  @db.Uuid
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  actingUserId String @db.Uuid
+  actingUser   User   @relation(fields: [actingUserId], references: [id])
+
+  createdAt DateTime @default(now()) @db.Timestamptz
+
+  @@unique([deviceId, companyId])
+  @@index([deviceId])
+  @@index([companyId])
+}
+
 // ============================================================================
 // 9️⃣ JOURS FÉRIÉS
 // ============================================================================
@@ -2016,6 +2083,7 @@ model Loan {
   amount           Decimal @db.Decimal(15, 2)
   monthlyRepayment Decimal @db.Decimal(15, 2)
   remainingBalance Decimal @db.Decimal(15, 2)
+  nature LoanNature?   // ← à ajouter (nullable
 
   startDate DateTime @db.Date
   endDate   DateTime @db.Date
@@ -2061,14 +2129,16 @@ drhDecision    ApprovalDecision?
   @@map("loans")
 }
 
-// enum LoanStatus {
-//   PENDING
-//   ACTIVE
-//   PAID
-//   CANCELLED
+enum LoanNature {       // ← nouvel enum à ajouter
+  SOCIAL
+  SCOLARITE
+  LOGEMENT
+  EXCEPTIONNEL
+  AUTRE
+  @@map("loan_nature")
+}
 
-//   @@map("loan_status")
-// }
+
 enum LoanStatus {
     PENDING
   PENDING_DG   // DRH a dit oui, en attente de la décision du Directeur Général
@@ -2103,6 +2173,7 @@ enum RepaymentMethod {
 enum DocumentTemplate {
   DEFAULT
   ORCA
+  STANDARD   // ← à ajouter
 
   @@map("document_template")
 }

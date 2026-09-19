@@ -57,6 +57,7 @@ export class LoansRequestsService {
       data: {
         employeeId: employee.id,
         type: data.type ?? 'ARGENT',
+        nature: data.nature,
         amount: data.amount,
         monthlyRepayment: data.monthlyRepayment,
         remainingBalance: data.amount,
@@ -194,6 +195,7 @@ export class LoansRequestsService {
         startDate: dto.startDate ? new Date(dto.startDate) : undefined,
         endDate: dto.endDate ? new Date(dto.endDate) : undefined,
         reason: dto.reason,
+        nature: dto.nature,
       },
     });
   }
@@ -217,12 +219,28 @@ export class LoansRequestsService {
     return { success: true };
   }
 
-  /** Annulation d'un prêt ACTIF — conserve l'historique de remboursement déjà effectué, arrête les futures déductions. */
+  /**
+   * Annulation d'un prêt ACTIF — conserve l'historique de remboursement déjà effectué, arrête les futures déductions.
+   * ✅ RH/Admin : peuvent annuler à tout moment (comme avant).
+   * ✅ Employé : peut annuler UNIQUEMENT sa propre demande, et UNIQUEMENT
+   *    tant qu'elle est encore en attente (PENDING/PENDING_DG) — une fois
+   *    validée, seul RH/Admin peut agir dessus (pour ne pas fausser la paie).
+   */
   async cancelLoan(id: string, userId: string, overrideCompanyId?: string) {
     const user = await this.common.getVerifiedUser(userId);
     this.common.applyCompanyOverride(user, overrideCompanyId);
-    this.common.requireFinanceAccess(user.role);
     const loan = await this.common.getOwnedLoanOrThrow(id, user.companyId);
+
+    const isFinance = FINANCE_ROLES.includes(user.role);
+    const isOwnerCancellingPending = loan.requestedByUserId === userId && ['PENDING', 'PENDING_DG'].includes(loan.status);
+
+    if (!isFinance && !isOwnerCancellingPending) {
+      throw new ForbiddenException(
+        loan.requestedByUserId === userId
+          ? 'Cette demande a déjà été traitée — seuls un administrateur ou les RH peuvent encore agir dessus.'
+          : "La gestion des prêts et avances est réservée à l'administration et aux RH.",
+      );
+    }
     if (loan.status === 'PAID' && !FULL_ADMIN_ROLES.includes(user.role)) throw new BadRequestException('Ce prêt est déjà soldé');
 
     return this.prisma.loan.update({ where: { id }, data: { status: 'CANCELLED' } });
@@ -394,11 +412,25 @@ export class LoansRequestsService {
     return { success: true };
   }
 
+  /**
+   * Même règle que cancelLoan : RH/Admin à tout moment, ou l'employé
+   * lui-même mais seulement sur sa propre demande encore PENDING.
+   */
   async cancelAdvance(id: string, userId: string, overrideCompanyId?: string) {
     const user = await this.common.getVerifiedUser(userId);
     this.common.applyCompanyOverride(user, overrideCompanyId);
-    this.common.requireFinanceAccess(user.role);
     const advance = await this.common.getOwnedAdvanceOrThrow(id, user.companyId);
+
+    const isFinance = FINANCE_ROLES.includes(user.role);
+    const isOwnerCancellingPending = advance.requestedByUserId === userId && advance.status === 'PENDING';
+
+    if (!isFinance && !isOwnerCancellingPending) {
+      throw new ForbiddenException(
+        advance.requestedByUserId === userId
+          ? 'Cette demande a déjà été traitée — seuls un administrateur ou les RH peuvent encore agir dessus.'
+          : "La gestion des prêts et avances est réservée à l'administration et aux RH.",
+      );
+    }
     if (['DEDUCTED', 'PAID'].includes(advance.status) && !FULL_ADMIN_ROLES.includes(user.role)) {
       throw new BadRequestException('Cette avance a déjà été traitée sur la paie');
     }

@@ -57,6 +57,7 @@ import { UnpaidSalaryModule } from './unpaid-salary/unpaid-salary.module';
 import { AffiliateModule } from './affiliate/affiliate.module';
 import { BulletinTemplateModule } from './bulletin-template/bulletin-template.module';
 import { AbsenceRequestsModule } from './absence-requests/absence-requests.module';
+import { CheckinDevicesModule } from './checkin-devices/checkin-devices.module';
 
 import { BlogModule } from './blog/blog.module';
 import { ContactModule } from './contact/contact.module';
@@ -150,6 +151,7 @@ import { PortfolioModule } from './portfolio/portfolio.module';
     BlogModule,
     ContactModule,
     AbsenceTrackingModule,
+    CheckinDevicesModule,
   ],
   controllers: [AppController],
   providers: [
