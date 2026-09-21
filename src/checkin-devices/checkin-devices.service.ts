@@ -110,16 +110,15 @@ export class CheckinDevicesService {
     });
   }
 
-  async deactivateDevice(companyId: string, id: string) {
+  async deleteDevice(companyId: string, id: string) {
     const device = await this.prisma.kioskDevice.findFirst({
       where: { id, companyId },
     });
     if (!device) throw new NotFoundException('Tablette introuvable.');
 
-    await this.prisma.kioskDevice.update({
-      where: { id },
-      data: { isActive: false },
-    });
+    // Suppression réelle — les entreprises supplémentaires liées (table
+    // KioskDeviceCompany) partent avec, grâce au onDelete: Cascade du schéma.
+    await this.prisma.kioskDevice.delete({ where: { id } });
     return { success: true };
   }
 
@@ -129,6 +128,29 @@ export class CheckinDevicesService {
   // Seul l'admin de l'entreprise PRINCIPALE de la tablette peut gérer ses
   // entreprises supplémentaires — évite qu'un admin d'une autre société ne
   // vienne modifier une tablette qui ne lui appartient pas.
+
+  // Liste les admins/RH d'une entreprise donnée — UNIQUEMENT si l'utilisateur
+  // qui demande a effectivement accès à cette entreprise dans son portefeuille
+  // (table UserCompany, la même que /auth/my-companies). Remplace le besoin
+  // de coller un ID à la main par un vrai sélecteur de noms côté front.
+  async listCompanyAdmins(requestingUserId: string, companyId: string) {
+    const hasAccess = await this.prisma.userCompany.findFirst({
+      where: { userId: requestingUserId, companyId },
+    });
+    if (!hasAccess) {
+      throw new ForbiddenException("Vous n'avez pas accès à cette entreprise.");
+    }
+
+    return this.prisma.user.findMany({
+      where: {
+        companyId,
+        role: { in: ['ADMIN', 'HR_MANAGER', 'SUPER_ADMIN'] },
+        isActive: true,
+      },
+      select: { id: true, firstName: true, lastName: true, role: true },
+      orderBy: [{ firstName: 'asc' }, { lastName: 'asc' }],
+    });
+  }
 
   async listAdditionalCompanies(ownerCompanyId: string, deviceId: string) {
     const device = await this.prisma.kioskDevice.findFirst({
@@ -291,16 +313,13 @@ export class CheckinDevicesService {
     });
   }
 
-  async revokeCredential(companyId: string, id: string) {
+  async deleteCredential(companyId: string, id: string) {
     const credential = await this.prisma.checkinCredential.findFirst({
       where: { id, companyId },
     });
     if (!credential) throw new NotFoundException('Identifiant introuvable.');
 
-    await this.prisma.checkinCredential.update({
-      where: { id },
-      data: { isActive: false, revokedAt: new Date() },
-    });
+    await this.prisma.checkinCredential.delete({ where: { id } });
     return { success: true };
   }
 

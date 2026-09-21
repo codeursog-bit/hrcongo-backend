@@ -52,8 +52,8 @@ export class CheckinDevicesController {
   @Delete('devices/:id')
   @UseGuards(AuthGuard('jwt'), RolesGuard)
   @Roles('ADMIN', 'HR_MANAGER', 'SUPER_ADMIN')
-  async deactivateDevice(@Param('id') id: string, @Request() req) {
-    return this.service.deactivateDevice(req.user.companyId, id);
+  async deleteDevice(@Param('id') id: string, @Request() req) {
+    return this.service.deleteDevice(req.user.companyId, id);
   }
 
   @Post('devices/:id/midday')
@@ -65,6 +65,13 @@ export class CheckinDevicesController {
     @Request() req,
   ) {
     return this.service.updateMidDay(req.user.companyId, id, body.midDayStartHour, body.midDayEndHour);
+  }
+
+  @Get('company-admins')
+  @UseGuards(AuthGuard('jwt'), RolesGuard)
+  @Roles('ADMIN', 'HR_MANAGER', 'SUPER_ADMIN')
+  async listCompanyAdmins(@Query('companyId') companyId: string, @Request() req) {
+    return this.service.listCompanyAdmins(req.user.id, companyId);
   }
 
   // ========================================
@@ -145,8 +152,8 @@ export class CheckinDevicesController {
   @Delete('credentials/:id')
   @UseGuards(AuthGuard('jwt'), RolesGuard)
   @Roles('ADMIN', 'HR_MANAGER', 'SUPER_ADMIN')
-  async revokeCredential(@Param('id') id: string, @Request() req) {
-    return this.service.revokeCredential(req.user.companyId, id);
+  async deleteCredential(@Param('id') id: string, @Request() req) {
+    return this.service.deleteCredential(req.user.companyId, id);
   }
 
   // ========================================
@@ -156,21 +163,24 @@ export class CheckinDevicesController {
   @Get('schedule')
   @UseGuards(KioskApiKeyGuard)
   async getSchedule(@Request() req) {
-    const companyIds = Array.from<string>(req.kioskDevice.companyPorters.keys());
+    const companyPorters = req.kioskDevice.companyPorters as Map<string, string>;
+    const companyIds = Array.from(companyPorters.keys());
     return this.service.getSchedule(companyIds, req.kioskDevice.id);
   }
 
   @Get('employees')
   @UseGuards(KioskApiKeyGuard)
   async listEmployeesForKiosk(@Request() req) {
-    const companyIds = Array.from<string>(req.kioskDevice.companyPorters.keys());
+    const companyPorters = req.kioskDevice.companyPorters as Map<string, string>;
+    const companyIds = Array.from(companyPorters.keys());
     return this.service.listEmployeesForKiosk(companyIds);
   }
 
   @Get('lookup')
   @UseGuards(KioskApiKeyGuard)
   async lookup(@Query('identifier') identifier: string, @Request() req) {
-    const companyIds = Array.from<string>(req.kioskDevice.companyPorters.keys());
+    const companyPorters = req.kioskDevice.companyPorters as Map<string, string>;
+    const companyIds = Array.from(companyPorters.keys());
     return this.service.lookupIdentifier(companyIds, identifier);
   }
 
@@ -178,7 +188,8 @@ export class CheckinDevicesController {
   @UseGuards(KioskApiKeyGuard)
   async enroll(@Body() dto: RegisterCredentialDto, @Request() req) {
     try {
-      const companyIds = Array.from<string>(req.kioskDevice.companyPorters.keys());
+      const companyPorters = req.kioskDevice.companyPorters as Map<string, string>;
+      const companyIds = Array.from(companyPorters.keys());
       return await this.service.enrollFromKiosk(companyIds, dto);
     } catch (error: any) {
       throw new HttpException(
