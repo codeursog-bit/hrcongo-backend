@@ -71,6 +71,7 @@ export class PayrollsController {
       year: number;
       employeeIds?: string[];
       customWorkDays?: number;
+      daysOverrides?: Record<string, number>;
     },
     @Request() req: any,
   ) {
@@ -80,6 +81,9 @@ export class PayrollsController {
       body.year,
       body.employeeIds,
       body.customWorkDays,
+      undefined,
+      undefined,
+      body.daysOverrides,
     );
   }
 
@@ -105,6 +109,7 @@ export class PayrollsController {
       year: number;
       employeeIds?: string[];
       customWorkDays?: number;
+      daysOverrides?: Record<string, number>;
     },
     @Request() req: any,
     @Res() res: Response,
@@ -130,6 +135,8 @@ export class PayrollsController {
         body.employeeIds,
         body.customWorkDays,
         (detail) => writeLine({ type: 'detail', ...detail }),
+        undefined,
+        body.daysOverrides,
       );
       writeLine({ type: 'summary', ...summary });
     } catch (error: any) {
@@ -211,7 +218,14 @@ export class PayrollsController {
   @UseGuards(RolesGuard)
   @Roles(...PAYROLL_ROLES)
   simulateBatch(
-    @Body() body: { employeeIds: string[]; month: number; year: number },
+    @Body()
+    body: {
+      employeeIds: string[];
+      month: number;
+      year: number;
+      workDays?: number;
+      daysOverrides?: Record<string, number>;
+    },
     @Request() req: any,
   ) {
     return this.payrollsService.simulateBatchPayroll(
@@ -219,6 +233,7 @@ export class PayrollsController {
       body.month,
       body.year,
       req.user.userId,
+      { workDays: body.workDays, daysOverrides: body.daysOverrides },
     );
   }
 

@@ -94,6 +94,8 @@ export class UpdateCompanyDto extends PartialType(CreateCompanyDto) {
   @IsString()
   leaveReferenceCycle?: 'JANUARY' | 'HIRE_DATE' | 'JUNE';
   @IsBoolean() @IsOptional() appliesSeniorityLeaveBonus?: boolean;
+  // Prime d'ancienneté proratisée selon les jours travaillés (défaut : non)
+  @IsBoolean() @IsOptional() seniorityProrata?: boolean;
   @IsString() @IsOptional() leaveConventionKey?: string;
 
   // 🆕 DOCUMENTS PERSONNALISÉS (ex. modèles client Orca)
@@ -103,7 +105,7 @@ export class UpdateCompanyDto extends PartialType(CreateCompanyDto) {
 
   @IsOptional()
   @IsString()
-  documentTemplate?: string; // 'DEFAULT' | 'ORCA'
+  documentTemplate?: string; // 'DEFAULT' | 'ORCA' | 'STANDARD'
 
   @IsOptional()
   @IsString()

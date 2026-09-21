@@ -150,7 +150,7 @@ model Company {
   cnssRegisteredAt       DateTime? @db.Date 
   taxNumber  String? @db.VarChar(50)
   legalForm String? @db.VarChar(100) // "SARL", "SA"... — utilisé dans les contrats de prestation
-  
+  seniorityProrata Boolean @default(false)
   // Coordonnées
   address String  @db.Text
   city    String  @db.VarChar(100)
@@ -973,6 +973,8 @@ enum AbsenceSubType {
   MARIAGE
   DECES
   NAISSANCE
+  RETRAIT_DEUIL   // ← ajouté
+  DEMENAGEMENT    // ← ajouté
   AUTRE
 }
 enum AbsenceRequestStatus {
@@ -2084,6 +2086,7 @@ model Loan {
   monthlyRepayment Decimal @db.Decimal(15, 2)
   remainingBalance Decimal @db.Decimal(15, 2)
   nature LoanNature?   // ← à ajouter (nullable
+  attachmentUrl String? @db.Text // ← ajouté
 
   startDate DateTime @db.Date
   endDate   DateTime @db.Date
@@ -2129,7 +2132,7 @@ drhDecision    ApprovalDecision?
   @@map("loans")
 }
 
-enum LoanNature {       // ← nouvel enum à ajouter
+enum LoanNature {
   SOCIAL
   SCOLARITE
   LOGEMENT
@@ -2173,8 +2176,7 @@ enum RepaymentMethod {
 enum DocumentTemplate {
   DEFAULT
   ORCA
-  STANDARD   // ← à ajouter
-
+  STANDARD   // ← ajouté
   @@map("document_template")
 }
 // ============================================================================

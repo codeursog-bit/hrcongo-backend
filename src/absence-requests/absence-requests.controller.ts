@@ -40,6 +40,18 @@ export class AbsenceRequestsController {
     return this.absenceRequestsService.findMine(req.user.userId);
   }
 
+  // ══════════════════════════════════════════════════════════════════════
+  // 📋 Catalogue de motifs "Modèle 2" — calculé depuis la convention
+  // collective de l'entreprise, aucune donnée à gérer. Route FIXE, doit
+  // rester avant ':id' sinon interprétée comme un id de demande.
+  // ══════════════════════════════════════════════════════════════════════
+
+  /** Catalogue de l'entreprise (tous les rôles — sert à peupler le formulaire de demande). */
+  @Get('motifs')
+  listMotifs(@Request() req) {
+    return this.absenceRequestsService.listMotifs(req.user.userId);
+  }
+
   /**
    * Calcule automatiquement la date de retour à partir d'une date de départ
    * et d'un nombre de jours ouvrables.

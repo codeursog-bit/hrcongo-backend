@@ -68,6 +68,7 @@ export class LoansDocumentsService {
       createdAt: loan.createdAt,
       reason: loan.reason,
       recoverViaPayroll: loan.recoverViaPayroll,
+      attachmentUrl: loan.attachmentUrl,
       status: loan.status,
       drhDecision: loan.drhDecision,
       dgDecision: loan.dgDecision,

@@ -15,6 +15,7 @@ import {
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateAbsenceRequestDto, SUBTYPES_BY_ABSENCE_TYPE } from './dto/create-absence-request.dto';
+import { getMotifsForCompany, findMotifByKey, getAnnualCeiling } from '../conventions/absence-motifs-grille';
 import { EmployeeNotFoundException, CompanyNotFoundException } from '../exceptions/business.exceptions';
 import { NotificationType } from '@prisma/client';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -99,7 +100,8 @@ private async getUserWithCompany(userId: string, overrideCompanyId?: string): Pr
   private subTypeLabel(subType?: string | null): string {
     const labels: Record<string, string> = {
       MALADIE: 'Maladie', MATERNITE: 'Maternité', PATERNITE: 'Paternité',
-      MARIAGE: 'Mariage', DECES: 'Décès', NAISSANCE: 'Naissance', AUTRE: 'Autre',
+      MARIAGE: 'Mariage', DECES: 'Décès', NAISSANCE: 'Naissance',
+      RETRAIT_DEUIL: 'Retrait de deuil', DEMENAGEMENT: 'Déménagement', AUTRE: 'Autre',
     };
     return subType ? (labels[subType] ?? subType) : '';
   }
@@ -150,18 +152,76 @@ private async getUserWithCompany(userId: string, overrideCompanyId?: string): Pr
       throw new BadRequestException(dto.employeeId ? "Le dossier de cet employé n'est pas actif" : "Votre dossier n'est pas actif");
     }
 
+    // ✅ Catalogue calculé "Modèle 2" — la ligne vient de la convention
+    // collective de l'entreprise (company.collectiveAgreement), calculée à
+    // la volée : aucune table, aucune donnée dupliquée à maintenir. Dérive
+    // type/subType/reason/endDate/workingDays automatiquement ; sinon
+    // (motifKey absent) comportement DEFAULT strictement inchangé.
+    let motif: { label: string; subType: string; days: number } | null = null;
+    let companyConvention: string | null = null;
+    if (dto.motifKey) {
+      const companyForConvention = await this.prisma.company.findUnique({
+        where: { id: employee.companyId },
+        select: { collectiveAgreement: true },
+      });
+      companyConvention = companyForConvention?.collectiveAgreement ?? null;
+      motif = findMotifByKey(companyConvention, dto.motifKey);
+      if (!motif) throw new BadRequestException("Motif introuvable pour la convention de votre entreprise");
+    } else if (!dto.type || !dto.subType || !dto.endDate || !dto.reason) {
+      throw new BadRequestException('type, subType, endDate et reason sont obligatoires hors catalogue de motifs');
+    }
+
+    const type = motif ? 'EXCEPTIONNELLE' : dto.type!;
+    const subType = motif ? (motif.subType as any) : dto.subType!;
+    const reason = motif ? motif.label : dto.reason!;
+
+    // ✅ Plafond annuel (convention collective) — seulement quand la
+    // demande vient du catalogue ET que la convention en définit un.
+    // Comportement DEFAULT (motif texte libre) jamais concerné.
+    if (motif) {
+      const ceiling = getAnnualCeiling(companyConvention);
+      if (ceiling != null) {
+        const yearStart = new Date(new Date(dto.startDate).getFullYear(), 0, 1);
+        const yearEnd = new Date(new Date(dto.startDate).getFullYear(), 11, 31, 23, 59, 59);
+        const usedThisYear = await this.prisma.absenceRequest.aggregate({
+          where: {
+            employeeId: employee.id,
+            type: 'EXCEPTIONNELLE',
+            status: { in: ['PENDING', 'APPROVED'] },
+            startDate: { gte: yearStart, lte: yearEnd },
+          },
+          _sum: { workingDays: true },
+        });
+        const already = Number(usedThisYear._sum.workingDays ?? 0);
+        if (already + motif.days > ceiling) {
+          throw new BadRequestException(
+            `Plafond annuel de permissions exceptionnelles dépassé : ${already} jour(s) déjà pris/en attente sur ${ceiling} autorisés cette année, cette demande (${motif.days}j) le dépasserait.`,
+          );
+        }
+      }
+    }
+
     const start = new Date(dto.startDate);
-    const end   = new Date(dto.endDate);
+    // Avec un motif du catalogue, la date de reprise est déduite du nombre
+    // de jours conventionnels fixes (jours calendaires consécutifs depuis le
+    // départ) — l'employé ne saisit que la date de départ pour ce cas-là.
+    const end = motif
+      ? new Date(start.getTime() + (motif.days - 1) * 86400000)
+      : new Date(dto.endDate!);
     if (end < start) throw new BadRequestException('La date de reprise doit être après la date de départ');
 
-    const validSubTypes = SUBTYPES_BY_ABSENCE_TYPE[dto.type];
-    if (!validSubTypes?.includes(dto.subType)) {
+    const validSubTypes = SUBTYPES_BY_ABSENCE_TYPE[type as keyof typeof SUBTYPES_BY_ABSENCE_TYPE];
+    if (!motif && !validSubTypes?.includes(subType)) {
       throw new BadRequestException(
-        `Le sous-motif "${dto.subType}" n'est pas valide pour le type "${dto.type}". Sous-motifs acceptés : ${validSubTypes?.join(', ')}.`,
+        `Le sous-motif "${subType}" n'est pas valide pour le type "${type}". Sous-motifs acceptés : ${validSubTypes?.join(', ')}.`,
       );
     }
 
-    const workingDays = await WorkingDays.calculateWorkingDays(this.prisma, employee.companyId, start, end);
+    // Motif du catalogue : le nombre de jours est un droit fixe (convention),
+    // pas un calcul en jours ouvrables — on ne recalcule pas via WorkingDays.
+    const workingDays = motif
+      ? motif.days
+      : await WorkingDays.calculateWorkingDays(this.prisma, employee.companyId, start, end);
 
     // ✅ RH/Admin qui crée une demande pour un autre employé (comme pour les congés
     // et permissions) : pas de circuit d'attente à faire suivre à soi-même, la
@@ -173,12 +233,12 @@ private async getUserWithCompany(userId: string, overrideCompanyId?: string): Pr
       data: {
         employeeId:    employee.id,
         companyId:     employee.companyId,
-        type:          dto.type,
-        subType:       dto.subType,
+        type:          type as any,
+        subType:       subType as any,
         startDate:     start,
         endDate:       end,
         workingDays,
-        reason:        dto.reason,
+        reason,
         isPaid:        dto.isPaid ?? false,
         attachmentUrl: dto.attachmentUrl,
         status:        autoApprove ? 'APPROVED' : 'PENDING',
@@ -198,7 +258,7 @@ private async getUserWithCompany(userId: string, overrideCompanyId?: string): Pr
           userId:  employeeUser.id,
           type:    'ABSENCE_APPROVED' as NotificationType,
           title:   '✅ Absence enregistrée',
-          message: `Une absence (${this.typeLabel(dto.type)} — ${this.subTypeLabel(dto.subType)}) a été enregistrée pour vous du ${start.toLocaleDateString('fr-FR')} au ${end.toLocaleDateString('fr-FR')} — ${workingDays} jour(s) ouvrable(s)`,
+          message: `Une absence (${this.typeLabel(type as any)} — ${this.subTypeLabel(subType as any)}) a été enregistrée pour vous du ${start.toLocaleDateString('fr-FR')} au ${end.toLocaleDateString('fr-FR')} — ${workingDays} jour(s)`,
           link:    '/presences/absences/mon-espace',
           metadata: { absenceRequestId: absenceRequest.id, status: 'APPROVED' },
         });
@@ -210,9 +270,9 @@ private async getUserWithCompany(userId: string, overrideCompanyId?: string): Pr
     await this.notificationsService.createForGroup(employee.companyId, HR_ROLES, {
       type:    'ABSENCE_REQUEST' as NotificationType,
       title:   '📋 Nouvelle demande d\'absence',
-      message: `${employee.firstName} ${employee.lastName} demande une autorisation d'absence (${this.typeLabel(dto.type)} — ${this.subTypeLabel(dto.subType)}) du ${start.toLocaleDateString('fr-FR')} au ${end.toLocaleDateString('fr-FR')} — ${workingDays} jour(s) ouvrable(s)`,
+      message: `${employee.firstName} ${employee.lastName} demande une autorisation d'absence (${this.typeLabel(type as any)} — ${this.subTypeLabel(subType as any)}) du ${start.toLocaleDateString('fr-FR')} au ${end.toLocaleDateString('fr-FR')} — ${workingDays} jour(s)`,
       link:    '/presences/absences',
-      metadata: { absenceRequestId: absenceRequest.id, employeeId: employee.id, type: dto.type, startDate: start.toISOString(), endDate: end.toISOString(), workingDays },
+      metadata: { absenceRequestId: absenceRequest.id, employeeId: employee.id, type, startDate: start.toISOString(), endDate: end.toISOString(), workingDays },
     });
 
     if (employee.department?.managerId) {
@@ -373,6 +433,7 @@ private async getUserWithCompany(userId: string, overrideCompanyId?: string): Pr
           select: {
             firstName: true,
             lastName: true,
+            employeeNumber: true,
             position: true,
             department: { select: { name: true, managerId: true } },
           },
@@ -385,11 +446,14 @@ private async getUserWithCompany(userId: string, overrideCompanyId?: string): Pr
             taxNumber: true,
             address: true,
             city: true,
+            country: true,
             phone: true,
+            email: true,
             logo: true,
             cachetUrl: true,
             documentTemplate: true,
             documentFooterText: true,
+            collectiveAgreement: true,
           },
         },
       },
@@ -402,10 +466,20 @@ private async getUserWithCompany(userId: string, overrideCompanyId?: string): Pr
       request.employee.department?.managerId,
     );
 
+    // Catalogue calculé depuis la convention (pas de table à lire) — la
+    // ligne cochée est retrouvée en comparant le motif texte enregistré
+    // (= le libellé exact de la convention au moment de la demande).
+    const catalog = request.company?.documentTemplate === 'STANDARD'
+      ? getMotifsForCompany(request.company?.collectiveAgreement)
+      : [];
+    const motifKey = catalog.find((m) => m.label === request.reason)?.key;
+
     return {
       id: request.id,
       type: request.type,
       subType: request.subType,
+      motifKey,
+      catalog,
       isPaid: request.isPaid,
       startDate: request.startDate,
       endDate: request.endDate,
@@ -416,12 +490,23 @@ private async getUserWithCompany(userId: string, overrideCompanyId?: string): Pr
       employee: {
         firstName: request.employee.firstName,
         lastName: request.employee.lastName,
+        employeeNumber: request.employee.employeeNumber,
         position: request.employee.position,
         departmentName: request.employee.department?.name ?? '',
       },
       responsableName,
       company: request.company,
     };
+  }
+
+  /** Catalogue calculé de l'entreprise — pour peupler le formulaire de demande (tous les rôles). */
+  async listMotifs(userId: string, overrideCompanyId?: string) {
+    const user = await this.getUserWithCompany(userId, overrideCompanyId);
+    const company = await this.prisma.company.findUnique({
+      where: { id: user.companyId },
+      select: { collectiveAgreement: true },
+    });
+    return getMotifsForCompany(company?.collectiveAgreement);
   }
 
   /**

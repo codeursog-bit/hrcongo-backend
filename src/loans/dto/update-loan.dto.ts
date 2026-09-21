@@ -39,4 +39,8 @@ export class UpdateLoanDto {
   @IsEnum(LoanNature)
   @IsOptional()
   nature?: LoanNature;
+
+  @IsString()
+  @IsOptional()
+  attachmentUrl?: string;
 }

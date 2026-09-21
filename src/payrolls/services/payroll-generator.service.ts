@@ -463,6 +463,10 @@ export class PayrollGeneratorService {
     // est identique avec ou sans callback.
     onProgress?: (detail: PayrollGenerationDetail) => void,
     overrideCompanyId?: string,
+    // ✅ Jours travaillés saisis à la main avant lancement { employeeId: jours }.
+    // Remplace summary.daysToPay pour cet employé : le salaire ajusté ET les
+    // primes/indemnités proratisées suivent (tout part de summary.daysToPay).
+    daysOverrides?: Record<string, number>,
   ) {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
@@ -500,6 +504,7 @@ export class PayrollGeneratorService {
           appliesCnssEmployer: true,
           cnssEmployerRate: true,
           isSubjectToTus: true,
+          seniorityMode: true, // ✅ était lu plus bas mais jamais sélectionné (toujours 'AUTO')
         },
       }),
       this.companyTaxService.findActive(companyId),
@@ -636,7 +641,30 @@ export class PayrollGeneratorService {
     // (calculatedBonuses inclus), qui n'est connu qu'À L'INTÉRIEUR de la
     // boucle, par employé. Voir plus bas (leaveImpactsByEmployee retiré).
 
-    for (const summary of summaries) {
+    // ✅ Applique les jours saisis manuellement (bornés entre 0 et les jours
+    // théoriques du lot) avant tout calcul.
+    const batchWorkDays = customWorkDays || settings.workDaysPerMonth;
+    const effectiveSummaries = summaries.map((s) => {
+      const raw = daysOverrides?.[s.employeeId];
+      if (raw == null || raw === ('' as any) || !Number.isFinite(Number(raw))) {
+        return s;
+      }
+      const days =
+        Math.round(Math.min(Math.max(0, Number(raw)), batchWorkDays) * 100) /
+        100;
+      if (days !== Number(s.daysToPay)) {
+        this.logger.log(
+          `✏️ Jours ajustés manuellement ${s.employeeId}: ${s.daysToPay} → ${days}`,
+        );
+      }
+      return {
+        ...s,
+        daysToPay: days,
+        daysToDeduct: Math.max(0, batchWorkDays - days),
+      };
+    });
+
+    for (const summary of effectiveSummaries) {
       try {
         if (existingEmployeeIds.has(summary.employeeId)) {
           results.skipped++;

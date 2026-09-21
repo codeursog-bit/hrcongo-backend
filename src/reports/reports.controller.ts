@@ -16,6 +16,7 @@ import { ReportsService } from './reports.service';
 import { PayrollRecapService } from './payroll-recap.service';
 import { PayrollRecapExportService } from './payroll-recap-export.service';
 import { Das1DeclarationService } from './das1-declaration.service';
+import { WorkforceMovementExportService } from './workforce-movement-export.service';
 import { fillBulletinAnnuelTemplate } from './export-bulletin-annuel-template';
 import { AuthGuard } from '@nestjs/passport';
 
@@ -27,6 +28,7 @@ export class ReportsController {
     private readonly payrollRecapService: PayrollRecapService,
     private readonly payrollRecapExportService: PayrollRecapExportService,
     private readonly das1Service: Das1DeclarationService,
+    private readonly workforceMovementExportService: WorkforceMovementExportService,
   ) {}
 
   /**
@@ -187,6 +189,70 @@ export class ReportsController {
       nationality,
       year: year ? parseInt(year, 10) : undefined,
     });
+  }
+
+  /**
+   * 🆕 État des mouvements d'effectif par département (initial/entrées/
+   * sorties/final) — mensuel ou annuel.
+   * GET /reports/workforce-movement?mode=MOIS&month=9&year=2026&companyId=xxx
+   * GET /reports/workforce-movement?mode=ANNEE&year=2026&companyId=xxx
+   */
+  @Get('workforce-movement')
+  getWorkforceMovement(
+    @Request() req,
+    @Query('companyId') companyId?: string,
+    @Query('mode') mode?: string,
+    @Query('month') month?: string,
+    @Query('year') year?: string,
+  ) {
+    return this.reportsService.getWorkforceMovement(
+      req.user.userId,
+      companyId,
+      mode === 'ANNEE' ? 'ANNEE' : 'MOIS',
+      month ? parseInt(month, 10) : undefined,
+      year ? parseInt(year, 10) : undefined,
+    );
+  }
+
+  /**
+   * 🆕 Export Excel dynamique de l'état des mouvements d'effectif —
+   * formules SUM/calcul, jamais un nombre en dur.
+   * GET /reports/workforce-movement/export?mode=MOIS&month=9&year=2026&companyId=xxx
+   */
+  @Get('workforce-movement/export')
+  async exportWorkforceMovement(
+    @Request() req,
+    @Response() res: any,
+    @Query('companyId') companyId?: string,
+    @Query('mode') mode?: string,
+    @Query('month') month?: string,
+    @Query('year') year?: string,
+  ) {
+    const resolvedMode = mode === 'ANNEE' ? 'ANNEE' : 'MOIS';
+    const [data, companyName] = await Promise.all([
+      this.reportsService.getWorkforceMovement(
+        req.user.userId,
+        companyId,
+        resolvedMode,
+        month ? parseInt(month, 10) : undefined,
+        year ? parseInt(year, 10) : undefined,
+      ),
+      this.payrollRecapService.getCompanyName(req.user.userId, companyId),
+    ]);
+    if (!data) {
+      res.status(404).send({ message: 'Entreprise introuvable' });
+      return;
+    }
+    const buffer = await this.workforceMovementExportService.export(data, companyName);
+    const suffix = resolvedMode === 'ANNEE' ? `${data.year}` : `${String(data.month).padStart(2, '0')}_${data.year}`;
+
+    res.set({
+      'Content-Type':
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'Content-Disposition': `attachment; filename="effectif_${suffix}.xlsx"`,
+      'Cache-Control': 'no-cache',
+    });
+    res.send(buffer);
   }
 
   /**

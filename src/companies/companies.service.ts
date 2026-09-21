@@ -384,7 +384,12 @@ export class CompaniesService {
         ...rest,
         // documentTemplate arrive en string depuis le DTO ; Prisma attend l'enum généré DocumentTemplate
         documentTemplate: rest.documentTemplate as any,
-        seniorityLinearConfig: seniorityLinearConfig ?? Prisma.JsonNull,
+        // ✅ undefined = champ non envoyé → on ne touche pas (avant : remis à null,
+        // ce qui effaçait la formule d'ancienneté à chaque sauvegarde de la page
+        // Entreprise). null explicite = effacement voulu.
+        ...(seniorityLinearConfig !== undefined && {
+          seniorityLinearConfig: seniorityLinearConfig ?? Prisma.JsonNull,
+        }),
       },
     });
   }

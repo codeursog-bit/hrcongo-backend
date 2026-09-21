@@ -89,6 +89,19 @@ export class PayrollBonusesService {
     hireDate?: Date | null,
     seniorityMode: 'AUTO' | 'MANUAL' = 'AUTO',
   ): Promise<CalculatedBonus[]> {
+    // ── 0. Option entreprise : prime d'ancienneté proratisée aux jours ─────
+    // Lue seulement quand un prorata est possible (jours < jours théoriques),
+    // donc aucune requête en plus pour un mois complet.
+    const canProrate = workDaysTotal > 0 && daysToPay < workDaysTotal;
+    let seniorityProrata = false;
+    if (canProrate && companyId) {
+      const co = await this.prisma.company.findUnique({
+        where: { id: companyId },
+        select: { seniorityProrata: true } as any,
+      });
+      seniorityProrata = !!(co as any)?.seniorityProrata;
+    }
+
     // ── 1. Primes saisies en BDD (manuelles ou templates) ─────────────────
     const dbBonuses = await this.prisma.employeeBonus.findMany({
       where: { employeeId, isActive: true },
@@ -172,8 +185,12 @@ export class PayrollBonusesService {
       // (jamais appliqué en mode FREE : le montant saisi ce mois-là reflète
       // déjà la réalité — ex. quantité réduite si l'employé n'a fait qu'une
       // semaine — le proratiser en plus serait une double déduction)
+      // + option entreprise « ancienneté proratisée » : force le prorata sur
+      // les primes d'ancienneté saisies à la main (comme sur l'auto plus bas)
       const isProratized =
-        quantityModeField !== 'FREE' && ((b as any).isProratized ?? false);
+        quantityModeField !== 'FREE' &&
+        (((b as any).isProratized ?? false) ||
+          (seniorityProrata && isSeniorityBonus));
       let finalAmount = amount;
       let _proratized = false;
 
@@ -255,6 +272,18 @@ export class PayrollBonusesService {
       );
       const seniorityBonus = this.seniority.toCalculatedBonus(result);
       if (seniorityBonus) {
+        // ✅ Entreprise qui proratise l'ancienneté : montant × jours / jours théoriques
+        // (arrondi au franc le plus proche, comme les autres primes proratisées).
+        // Sinon : droit acquis, montant plein (comportement historique).
+        if (seniorityProrata) {
+          const original = Number(seniorityBonus.amount) || 0;
+          seniorityBonus.amount = Math.round(
+            (original * daysToPay) / workDaysTotal + 1e-9,
+          );
+          seniorityBonus.isProratized = true;
+          seniorityBonus._proratized = true;
+          seniorityBonus._originalAmount = original;
+        }
         resolved.push(seniorityBonus as CalculatedBonus);
       }
     }

@@ -25,6 +25,10 @@ export class GenerateBatchDto {
   @Max(31)
   @Type(() => Number)
   workDays?: number; // Jours ouvrés personnalisés (optionnel = défaut 26)
+
+  // Jours travaillés ajustés à la main par employé { employeeId: jours }
+  @IsOptional()
+  daysOverrides?: Record<string, number>;
 }
 
 // import { IsInt, IsArray, IsOptional, Min, Max } from 'class-validator';

@@ -115,11 +115,13 @@ export class PayrollItemsService {
         items.push({
           payrollId,
           code: 'ABS_DEDUCT',
-          label: `Déduction absences (${absenceDays} jour${absenceDays > 1 ? 's' : ''})`,
+          label: 'Déduction absences',
           type: 'DEDUCTION',
           base: null,
           rate: null,
-          quantity: null,
+          // ✅ Le nombre de jours reste visible — via la colonne Nombre,
+          // plus besoin de le répéter entre parenthèses dans le libellé.
+          quantity: absenceDays,
           amount: calc.absenceDeduction,
           isTaxable: false,
           isCnss: false,
@@ -136,11 +138,13 @@ export class PayrollItemsService {
       items.push({
         payrollId,
         code: 'ABS_CONGE',
-        label: `Absence ${leaveData.isPaidLeave ? 'congé payé' : 'congé sans solde'} (${leaveData.leaveDays} jour${leaveData.leaveDays > 1 ? 's' : ''})`,
+        label: `Absence ${leaveData.isPaidLeave ? 'congé payé' : 'congé sans solde'}`,
         type: 'DEDUCTION',
         base: null,
         rate: null,
-        quantity: null,
+        // ✅ Nombre de jours visible via la colonne Nombre plutôt qu'entre
+        // parenthèses dans le libellé.
+        quantity: leaveData.leaveDays,
         amount: leaveData.absenceDeduction,
         isTaxable: false,
         isCnss: false,
@@ -260,7 +264,7 @@ export class PayrollItemsService {
       items.push({
         payrollId,
         code: 'HS_10',
-        label: `Heures supplémentaires +10% (${Number(summary.overtime10Hours)}h) — 5 premières heures`,
+        label: 'Heures supplémentaires +10%',
         type: 'GAIN',
         base: Math.round(hourlyRate * 1.1), // ✅ taux horaire majoré (+10%)
         rate: null,
@@ -276,7 +280,7 @@ export class PayrollItemsService {
       items.push({
         payrollId,
         code: 'HS_25',
-        label: `Heures supplémentaires +25% (${Number(summary.overtime25Hours)}h) — heures suivantes`,
+        label: 'Heures supplémentaires +25%',
         type: 'GAIN',
         base: Math.round(hourlyRate * 1.25), // ✅ taux horaire majoré (+25%)
         rate: null,
@@ -292,7 +296,7 @@ export class PayrollItemsService {
       items.push({
         payrollId,
         code: 'HS_50',
-        label: `Heures supplémentaires +50% (${Number(summary.overtime50Hours)}h) — nuit/repos/férié`,
+        label: 'Heures supplémentaires +50%',
         type: 'GAIN',
         base: Math.round(hourlyRate * 1.5), // ✅ taux horaire majoré (+50%)
         rate: null,
@@ -308,7 +312,7 @@ export class PayrollItemsService {
       items.push({
         payrollId,
         code: 'HS_100',
-        label: `Heures supplémentaires +100% (${Number(summary.overtime100Hours)}h) — nuit dimanche/férié`,
+        label: 'Heures supplémentaires +100%',
         type: 'GAIN',
         base: Math.round(hourlyRate * 2.0), // ✅ taux horaire majoré (+100%)
         rate: null,
@@ -457,7 +461,7 @@ export class PayrollItemsService {
       items.push({
         payrollId,
         code: 'CNSS_EMP_AT',
-        label: 'CNSS patronale — Accidents du travail (2,25%)',
+        label: 'CNSS Accidents',
         type: 'EMPLOYER_COST',
         base: calc.grossSalary,
         rate: 0.0225,
@@ -475,7 +479,7 @@ export class PayrollItemsService {
         items.push({
           payrollId,
           code: 'CNSS_EMP_PENSION',
-          label: 'CNSS patronale — Pension vieillesse (8%)',
+          label: 'CNSS Pension',
           type: 'EMPLOYER_COST',
           base: calc.grossSalary,
           rate: 0.08,
@@ -492,7 +496,7 @@ export class PayrollItemsService {
         items.push({
           payrollId,
           code: 'CNSS_EMP_FAM',
-          label: 'CNSS patronale — Prestations familiales (10,03%)',
+          label: 'CNSS Famille',
           type: 'EMPLOYER_COST',
           base: calc.grossSalary,
           rate: 0.1003,
@@ -509,7 +513,7 @@ export class PayrollItemsService {
         items.push({
           payrollId,
           code: 'CNSS_EMP_AT',
-          label: 'CNSS patronale — Accidents du travail (2,25%)',
+          label: 'CNSS Accidents',
           type: 'EMPLOYER_COST',
           base: calc.grossSalary,
           rate: 0.0225,
@@ -529,7 +533,7 @@ export class PayrollItemsService {
       items.push({
         payrollId,
         code: 'TUS_DGI',
-        label: 'TUS — Part DGI (2,025%)',
+        label: 'TUS DGI',
         type: 'EMPLOYER_COST',
         base: calc.grossSalary,
         rate: 0.02025,
@@ -546,7 +550,7 @@ export class PayrollItemsService {
       items.push({
         payrollId,
         code: 'TUS_CNSS',
-        label: 'TUS — Part CNSS (5,475%)',
+        label: 'TUS CNSS',
         type: 'EMPLOYER_COST',
         base: calc.grossSalary,
         rate: 0.05475,
@@ -567,7 +571,7 @@ export class PayrollItemsService {
           items.push({
             payrollId,
             code: `CTAX_EMP_${tax.code}`,
-            label: `${tax.name} (part patronale)`,
+            label: tax.name,
             type: 'EMPLOYER_COST',
             base: tax.base > 0 ? tax.base : null,
             rate: null,

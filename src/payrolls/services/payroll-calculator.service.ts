@@ -63,10 +63,18 @@ export class PayrollCalculatorService {
     );
 
     // 1. Absences
-    const absenceDays = Math.max(0, expectedWorkDays - daysToPay);
-    const dailyRate = baseSalary / expectedWorkDays;
-    const absenceDeduction = Math.floor(absenceDays * dailyRate);
-    const adjustedBase = baseSalary - absenceDeduction;
+    // ✅ Arrondi au franc le plus proche (0,5 → supérieur), fait UNE seule fois
+    // sur le salaire proratisé (base × jours payés ÷ jours théoriques).
+    // Avant : la déduction était arrondie à l'inférieur (Math.floor), ce qui
+    // faisait ressortir le salaire ajusté 1 F trop haut dès que la partie
+    // décimale était < 0,5. La déduction = base − salaire ajusté (cohérent).
+    const paidDays = Math.max(0, daysToPay);
+    const absenceDays = Math.max(0, expectedWorkDays - paidDays);
+    const adjustedBase =
+      absenceDays > 0
+        ? Math.round((baseSalary * paidDays) / expectedWorkDays + 1e-9)
+        : baseSalary;
+    const absenceDeduction = baseSalary - adjustedBase;
 
     // 2. Heures sup
     const hourlyRate = baseSalary / LEGAL_WORK_HOURS_PER_MONTH; // ✅ toujours sur salaire contractuel, pas l'ajusté

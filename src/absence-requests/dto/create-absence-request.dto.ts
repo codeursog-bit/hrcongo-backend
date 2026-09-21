@@ -31,6 +31,9 @@ export enum AbsenceSubType {
   MARIAGE = 'MARIAGE',
   DECES = 'DECES',
   NAISSANCE = 'NAISSANCE',
+  // ✅ Nouveaux — vus sur les modèles clients (catalogue "Modèle 2")
+  RETRAIT_DEUIL = 'RETRAIT_DEUIL',
+  DEMENAGEMENT = 'DEMENAGEMENT',
   // Commun aux deux types
   AUTRE = 'AUTRE',
 }
@@ -50,30 +53,41 @@ export const SUBTYPES_BY_ABSENCE_TYPE: Record<
     AbsenceSubType.MARIAGE,
     AbsenceSubType.DECES,
     AbsenceSubType.NAISSANCE,
+    AbsenceSubType.RETRAIT_DEUIL,
+    AbsenceSubType.DEMENAGEMENT,
     AbsenceSubType.AUTRE,
   ],
 };
 
 export class CreateAbsenceRequestDto {
+  // ✅ Catalogue calculé "Modèle 2" — clé d'une ligne de la table de
+  //    référence de la convention collective de l'entreprise (voir
+  //    absence-motifs-grille.ts). Quand fourni, type/subType/reason/endDate
+  //    sont dérivés automatiquement. Sinon, comportement DEFAULT inchangé :
+  //    tout est obligatoire ci-dessous.
+  @IsString()
+  @IsOptional()
+  motifKey?: string;
+
   @IsEnum(CreatableAbsenceType)
-  @IsNotEmpty()
-  type: CreatableAbsenceType;
+  @IsOptional()
+  type?: CreatableAbsenceType;
 
   @IsEnum(AbsenceSubType)
-  @IsNotEmpty()
-  subType: AbsenceSubType;
+  @IsOptional()
+  subType?: AbsenceSubType;
 
   @IsDateString()
   @IsNotEmpty()
   startDate: string;
 
   @IsDateString()
-  @IsNotEmpty()
-  endDate: string;
+  @IsOptional()
+  endDate?: string;
 
   @IsString()
-  @IsNotEmpty()
-  reason: string; // Motif de l'absence
+  @IsOptional()
+  reason?: string; // Motif de l'absence — obligatoire seulement hors catalogue (voir service)
 
   @IsBoolean()
   @IsOptional()

@@ -42,6 +42,11 @@ export class CreateLoanDto {
   @IsOptional()
   nature?: LoanNature;
 
+  /** Justificatif joint (devis, certificat...) — voir "Pièces jointes" du modèle papier. */
+  @IsString()
+  @IsOptional()
+  attachmentUrl?: string;
+
   @IsNotEmpty()
   @IsNumber()
   @Min(1)

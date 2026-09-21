@@ -12,6 +12,23 @@ import {
 } from '../conventions/conventions.service';
 import { classifyFiscalCategory } from './payroll-recap.service';
 
+// 🆕 Export nommé pour workforce-movement-export.service.ts
+export interface WorkforceMovementDept {
+  name: string;
+  initial: number;
+  hires: number;
+  departures: number;
+  final: number;
+}
+export interface WorkforceMovement {
+  mode: 'MOIS' | 'ANNEE';
+  month: number;
+  year: number;
+  periodLabel: string;
+  departments: WorkforceMovementDept[];
+  totals: { initial: number; hires: number; departures: number; final: number };
+}
+
 @Injectable()
 export class ReportsService {
   private readonly logger = new Logger(ReportsService.name);
@@ -965,6 +982,108 @@ export class ReportsService {
       turnoverDetail, // 🆕 étape 3
       absenteeism, // 🆕 étape 3
     };
+  }
+
+  // ══════════════════════════════════════════════════════════════════════
+  // 🆕 État des mouvements d'effectif par département — mensuel ou annuel.
+  // Pour une période donnée : effectif initial, entrées, sorties, effectif
+  // final, par département + total entreprise. Inspiré d'un modèle Excel
+  // RH classique (colonnes = départements, lignes = initial/entrées/
+  // sorties/final).
+  // ══════════════════════════════════════════════════════════════════════
+  async getWorkforceMovement(
+    userId: string,
+    overrideCompanyId?: string,
+    mode: 'MOIS' | 'ANNEE' = 'MOIS',
+    month?: number,
+    year?: number,
+  ): Promise<WorkforceMovement | null> {
+    const companyId = await this.resolveCompanyId(userId, overrideCompanyId);
+    if (!companyId) return null;
+
+    const now = new Date();
+    const targetYear = year ?? now.getFullYear();
+    const targetMonth = month ?? now.getMonth() + 1;
+
+    const periodStart =
+      mode === 'ANNEE'
+        ? new Date(targetYear, 0, 1)
+        : new Date(targetYear, targetMonth - 1, 1);
+    const periodEnd =
+      mode === 'ANNEE'
+        ? new Date(targetYear, 11, 31, 23, 59, 59)
+        : new Date(targetYear, targetMonth, 0, 23, 59, 59);
+    // Effectif "initial" = effectif à la toute fin de la veille du début
+    // de période (donc juste avant qu'une entrée du jour J ne compte).
+    const dayBeforeStart = new Date(periodStart.getTime() - 1);
+
+    const employees = await this.prisma.employee.findMany({
+      where: { companyId },
+      select: {
+        id: true,
+        hireDate: true,
+        terminationDate: true,
+        department: { select: { id: true, name: true } },
+      },
+    });
+
+    const headcountAt = (list: typeof employees, date: Date) =>
+      list.filter(
+        (e) =>
+          e.hireDate &&
+          new Date(e.hireDate) <= date &&
+          (!e.terminationDate || new Date(e.terminationDate) > date),
+      ).length;
+
+    // Regroupement par département (+ "Sans département")
+    const deptMap = new Map<string, typeof employees>();
+    for (const e of employees) {
+      const key = e.department?.name ?? 'Sans département';
+      const list = deptMap.get(key) ?? [];
+      list.push(e);
+      deptMap.set(key, list);
+    }
+
+    const departments = Array.from(deptMap.entries())
+      .map(([name, list]) => {
+        const initial = headcountAt(list, dayBeforeStart);
+        const hires = list.filter(
+          (e) =>
+            e.hireDate &&
+            new Date(e.hireDate) >= periodStart &&
+            new Date(e.hireDate) <= periodEnd,
+        ).length;
+        const departures = list.filter(
+          (e) =>
+            e.terminationDate &&
+            new Date(e.terminationDate) >= periodStart &&
+            new Date(e.terminationDate) <= periodEnd,
+        ).length;
+        const final = headcountAt(list, periodEnd);
+        return { name, initial, hires, departures, final };
+      })
+      // ✅ On n'affiche pas les départements totalement inactifs sur la
+      // période (aucun effectif à aucun moment) pour ne pas polluer le
+      // tableau avec des colonnes à zéro partout.
+      .filter((d) => d.initial + d.hires + d.departures + d.final > 0)
+      .sort((a, b) => b.final - a.final);
+
+    const totals = departments.reduce(
+      (acc, d) => ({
+        initial: acc.initial + d.initial,
+        hires: acc.hires + d.hires,
+        departures: acc.departures + d.departures,
+        final: acc.final + d.final,
+      }),
+      { initial: 0, hires: 0, departures: 0, final: 0 },
+    );
+
+    const periodLabel =
+      mode === 'ANNEE'
+        ? `Année ${targetYear}`
+        : periodStart.toLocaleDateString('fr-FR', { month: 'long', year: 'numeric' });
+
+    return { mode, month: targetMonth, year: targetYear, periodLabel, departments, totals };
   }
 
   /**

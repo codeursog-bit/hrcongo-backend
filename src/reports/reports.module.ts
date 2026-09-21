@@ -4,6 +4,7 @@ import { ExportService } from '../payrolls/export.service';
 import { PayrollRecapService } from './payroll-recap.service';
 import { PayrollRecapExportService } from './payroll-recap-export.service';
 import { Das1DeclarationService } from './das1-declaration.service';
+import { WorkforceMovementExportService } from './workforce-movement-export.service';
 import { ReportsController } from './reports.controller';
 import { PrismaModule } from '../prisma/prisma.module';
 import { ConventionsModule } from '../conventions/conventions.module';
@@ -17,6 +18,7 @@ import { ConventionsModule } from '../conventions/conventions.module';
     PayrollRecapService,
     PayrollRecapExportService,
     Das1DeclarationService,
+    WorkforceMovementExportService,
   ],
   exports: [
     ReportsService,
@@ -24,6 +26,7 @@ import { ConventionsModule } from '../conventions/conventions.module';
     PayrollRecapService,
     PayrollRecapExportService,
     Das1DeclarationService,
+    WorkforceMovementExportService,
   ],
 })
 export class ReportsModule {}

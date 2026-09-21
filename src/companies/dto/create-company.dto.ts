@@ -128,6 +128,8 @@ export class CreateCompanyDto {
   leaveReferenceCycle?: 'JANUARY' | 'HIRE_DATE' | 'JUNE';
 
   @IsBoolean() @IsOptional() appliesSeniorityLeaveBonus?: boolean;
+  // Prime d'ancienneté proratisée selon les jours travaillés (défaut : non)
+  @IsBoolean() @IsOptional() seniorityProrata?: boolean;
   @IsString() @IsOptional() leaveConventionKey?: string;
   @IsBoolean() @IsOptional() echelonReminderEnabled?: boolean;
 }

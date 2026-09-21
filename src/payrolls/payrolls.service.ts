@@ -1163,6 +1163,8 @@ import {
 export interface SimulatePayrollOverrides {
   baseSalary?: number;
   workedDays?: number;
+  // ✅ Jours théoriques du mois (ex: 24 saisi à l'étape période de la paie en masse)
+  workDays?: number;
   overtimeHours10?: number;
   overtimeHours25?: number;
   overtimeHours50?: number;
@@ -1794,6 +1796,7 @@ export class PayrollsService {
     customWorkDays?: number,
     onProgress?: (detail: any) => void,
     overrideCompanyId?: string,
+    daysOverrides?: Record<string, number>,
   ) {
     return this.generator.generate(
       userId,
@@ -1803,6 +1806,7 @@ export class PayrollsService {
       customWorkDays,
       onProgress,
       overrideCompanyId,
+      daysOverrides,
     );
   }
 
@@ -2711,6 +2715,7 @@ export class PayrollsService {
           tolZone: true,
           contractType: true,
           isResident: true,
+          hireDate: true, // ✅ sinon l'ancienneté auto n'était jamais calculée dans la simulation
         },
       }),
       this.prisma.company.findUnique({
@@ -2719,15 +2724,20 @@ export class PayrollsService {
           appliesCnssEmployer: true,
           cnssEmployerRate: true,
           isSubjectToTus: true,
+          seniorityMode: true, // ✅ idem : lu plus bas mais jamais sélectionné
         },
       }),
     ]);
     if (!employee) throw new EmployeeNotFoundException(employeeId);
 
-    const [settings, companyTaxes] = await Promise.all([
+    const [settingsBase, companyTaxes] = await Promise.all([
       this.payrollSettingsService.getSettingsByCompanyId(user.companyId),
       this.companyTaxService.findActive(user.companyId), // ✅
     ]);
+    // ✅ Même base de jours que la génération réelle (customWorkDays)
+    const settings = overrides?.workDays
+      ? { ...settingsBase, workDaysPerMonth: overrides.workDays }
+      : settingsBase;
 
     let daysToPay = settings.workDaysPerMonth;
     let att10 = 0,
@@ -3011,9 +3021,24 @@ export class PayrollsService {
     month: number,
     year: number,
     userId: string,
+    opts?: { workDays?: number; daysOverrides?: Record<string, number> },
   ) {
     const simulations = await Promise.allSettled(
-      employeeIds.map((id) => this.simulatePayroll(id, month, year, userId)),
+      employeeIds.map((id) => {
+        const workedDays = opts?.daysOverrides?.[id];
+        const overrides: SimulatePayrollOverrides = {};
+        if (workedDays != null && Number.isFinite(Number(workedDays))) {
+          overrides.workedDays = Number(workedDays);
+        }
+        if (opts?.workDays) overrides.workDays = opts.workDays;
+        return this.simulatePayroll(
+          id,
+          month,
+          year,
+          userId,
+          Object.keys(overrides).length ? overrides : undefined,
+        );
+      }),
     );
     const results = simulations.map((result, index) => {
       if (result.status === 'fulfilled')

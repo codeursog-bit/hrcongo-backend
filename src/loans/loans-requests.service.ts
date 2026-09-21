@@ -58,6 +58,7 @@ export class LoansRequestsService {
         employeeId: employee.id,
         type: data.type ?? 'ARGENT',
         nature: data.nature,
+        attachmentUrl: data.attachmentUrl,
         amount: data.amount,
         monthlyRepayment: data.monthlyRepayment,
         remainingBalance: data.amount,
@@ -196,6 +197,7 @@ export class LoansRequestsService {
         endDate: dto.endDate ? new Date(dto.endDate) : undefined,
         reason: dto.reason,
         nature: dto.nature,
+        attachmentUrl: dto.attachmentUrl,
       },
     });
   }
