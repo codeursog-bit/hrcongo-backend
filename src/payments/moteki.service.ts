@@ -1,9 +1,29 @@
 // ============================================================================
 // 🛒 MOTEKI SERVICE — remplace YabetooPay pour la COLLECTE de paiements
 // (checkout des abonnements). Les VERSEMENTS (commissions affiliés) restent
-// sur YabetooPayService.createDisbursement pour l'instant — la doc Moteki
-// fournie ne documente pas d'équivalent "disbursement". Voir le message
-// accompagnant ce code pour ce point ouvert.
+// sur YabetooPayService.createDisbursement — Moteki ne documente pas
+// d'équivalent "disbursement".
+//
+// ⚠️ MIGRATION v1 → v2 (Merchant Payments API) — voir doc "Paiements
+// marchands" fournie par Moteki. La doc confirme que v1 (/storefront/
+// digital-products/{uuid}/subscribe) reste fonctionnelle et n'a PAS changé,
+// mais en pratique le flux v1 posait des soucis de fiabilité en prod (pas
+// d'idempotence, pas de re-vérification serveur du montant/opérateur,
+// commandes orphelines si le paiement échouait juste après création). Le
+// flux v2 corrige tout ça : création atomique (intention + commande d'un
+// coup, zéro orphelin en cas d'échec), Idempotency-Key obligatoire (rejeu
+// sûr), montant figé et re-résolu serveur, MSISDN figé à l'intention et
+// re-vérifié au confirm. On utilise donc v2 pour TOUT le checkout —
+// initiateSubscriptionCheckout/getOrderStatus (v1) sont retirés au profit
+// de createPaymentIntent/confirmPayment/getPaymentStatus (v2).
+//
+// GET /subscriptions/{uuid} et POST /subscriptions/{uuid}/cancel restent en
+// v1 (pas d'équivalent v2 documenté) — mais on ne s'en sert plus pour piloter
+// l'accès KonzaRH : exactement comme pour Chariow, la source de vérité pour
+// la date de fin d'abonnement reste 100% interne à l'app
+// (SubscriptionsService.activateUpgrade), Moteki n'étant qu'un rail de
+// paiement. getSubscriptionStatus/cancelSubscription ci-dessous ne sont
+// conservés que pour un éventuel usage de suivi/support côté Moteki.
 // ============================================================================
 
 import { Injectable, Logger, BadRequestException } from '@nestjs/common';
@@ -17,27 +37,50 @@ import * as crypto from 'crypto';
 
 export type MotekiPaymentMethod = 'mobile_money' | 'card' | 'aggregator';
 
-export interface InitiateSubscriptionCheckoutDto {
-  digitalProductUuid: string;
+export interface CreateMotekiPaymentIntentDto {
+  productUuid: string; // UUID du produit digital "subscription" côté Moteki
   planIndex: number;
   customerFirstName: string;
   customerLastName?: string;
   customerEmail: string;
-  customerPhone?: string;
-  paymentMethod: MotekiPaymentMethod;
-  paymentOperator?: string; // ex: "mtn-cg", "visa", "cinetpay"...
+  customerCountry: string; // iso2 minuscule, ex: "cg"
+  customerPhoneE164: string; // ex: "+242061234567"
+  operator: string; // ex: "mtn" (SANS suffixe pays — voir splitOperatorCountry)
+  merchantReference?: string;
 }
 
-export interface MotekiOrderResponse {
-  id: string; // "ord-uuid"
-  order_number: string; // "MOT-123456"
-  status: string;
+export interface MotekiPaymentIntentResponse {
+  payment_reference: string; // "pi_xxx" — clé de corrélation pour confirm/poll
+  order_number: string;
+  order_uuid: string;
+  status: 'awaiting_confirmation' | string;
   payment_status: string;
-  payment_method: string;
-  payment_operator?: string;
-  total_amount: number;
-  redirect_url: string;
-  checkout_url: string;
+  amount: number; // montant figé/re-résolu SERVEUR — fait foi, pas celui envoyé
+  currency: string;
+  next_step: { action: string; confirm_url: string; expires_at: string };
+}
+
+export interface MotekiConfirmResponse {
+  payment_reference: string;
+  order_number: string;
+  status: 'processing' | 'succeeded' | 'failed' | string;
+  payment_status: 'pending' | 'paid' | 'failed' | string;
+  amount?: number;
+  currency?: string;
+  poll_url?: string; // présent si status="processing"
+  code?: string; // ex: "PUSH_DENIED" — présent si status="failed"
+  message?: string; // message d'échec lisible, présent si status="failed"
+}
+
+export interface MotekiPaymentStatusResponse {
+  payment_reference: string;
+  order_number: string;
+  order_uuid: string;
+  status: 'awaiting_confirmation' | 'processing' | 'succeeded' | 'failed' | 'expired' | string;
+  payment_status: 'pending' | 'paid' | 'failed' | string;
+  amount: number;
+  currency: string;
+  expires_at?: string;
 }
 
 export interface MotekiSubscriptionResponse {
@@ -64,7 +107,7 @@ export interface MotekiSubscriptionResponse {
 
 export interface MotekiPaymentMethodOption {
   payment_method: MotekiPaymentMethod;
-  payment_operators: string[];
+  payment_operators: string[]; // ex: ["mtn-cg", "orange-cg"] — voir splitOperatorCountry
 }
 
 // ============================================================================
@@ -77,44 +120,59 @@ export class MotekiService {
   private readonly client: AxiosInstance;
   private readonly secretKey: string;
 
-  // 🐛 CORRECTIF : avant, l'absence de MOTEKI_SECRET_KEY faisait planter TOUT
-  // le serveur au démarrage (throw dans le constructeur d'un provider Nest
-  // instancié au boot). Pour permettre le mode "bascule automatique" (voir
-  // isMotekiConfigured() dans moteki.config.ts), on doit pouvoir démarrer
-  // sans clé Moteki — l'erreur ne doit remonter qu'au moment où on essaie
-  // VRAIMENT d'appeler l'API Moteki, pas avant.
   constructor(private configService: ConfigService) {
+    // 🧪 MODE TEST TEMPORAIRE — décommente la ligne suivante pour forcer la
+    // clé en dur et vérifier si le problème vient de ConfigService/l'env,
+    // ou de la clé elle-même. À RETIRER une fois le diagnostic fait.
+    // const secretKey = 'sk_2gUfizdaI10JCzacRtYVeYTnSjV7HUye6Ujb4K8Y4R9cnaYZ';
+
     const secretKey = this.configService.get<string>('MOTEKI_SECRET_KEY');
     this.secretKey = secretKey ?? '';
 
-    // 🔍 LOG TEMPORAIRE DE DEBUG — à retirer une fois le problème résolu.
-    // Affiche ce qui est VRAIMENT chargé en mémoire (pas ce qu'il y a dans
-    // le fichier .env) pour confirmer si une variable d'environnement
-    // système/session écrase la valeur du .env, ou si le .env lui-même
-    // contient une valeur inattendue (mauvaise clé, caractère invisible...).
-    this.logger.warn(
-      `🔑 [DEBUG TEMPORAIRE] Clé Moteki chargée — longueur: ${this.secretKey.length}, ` +
-        `termine par: ...${this.secretKey.slice(-8)}, ` +
-        `commence par: ${this.secretKey.slice(0, 6)}...`,
-    );
-
     if (!secretKey) {
       this.logger.warn(
-        '⚠️  MOTEKI_SECRET_KEY absent de la config (.env) — MotekiService inactif, YabetooPay prend le relais si configuré.',
+        '⚠️  MOTEKI_SECRET_KEY absent de la config (.env) — MotekiService inactif, un autre prestataire prend le relais si configuré.',
       );
     }
 
+    // 🔍 DIAGNOSTIC — ne jamais logger la clé en clair, juste sa "forme".
+    // Compare la longueur et le préfixe avec ce que montre le dashboard
+    // Moteki. Si ça ne matche pas ici, le souci est la valeur/le chargement
+    // de la variable (env du conteneur pas à jour, ordre ConfigModule, etc.)
+    // — pas le code d'appel HTTP plus bas.
+    this.logger.debug(
+      `🔍 MOTEKI_SECRET_KEY chargée — longueur: ${this.secretKey.length}, ` +
+        `début: "${this.secretKey.slice(0, 6)}", fin: "${this.secretKey.slice(-4)}", ` +
+        `contient espace/retour-ligne: ${/\s/.test(this.secretKey)}`,
+    );
+
+    // ⚠️ baseURL = racine du domaine, PAS /api/v1 — v1 (/api/v1/...) et v2
+    // (/api/v2/...) n'ont pas le même préfixe, donc chaque méthode qualifie
+    // son propre chemin complet ci-dessous plutôt que de dépendre d'un
+    // préfixe unique dans baseURL (piège classique qui doublerait /api/v1
+    // sur tous les appels v2 sinon).
     const baseURL =
       this.configService.get<string>('MOTEKI_API_BASE_URL') ??
-      'https://api.moteki.co/api/v1';
+      'https://api.moteki.co';
 
     this.client = axios.create({
       baseURL,
       headers: {
-        'Content-Type': 'application/json',
         Authorization: `Bearer ${this.secretKey}`,
       },
       timeout: 30000,
+    });
+
+    // 🔍 DIAGNOSTIC — confirme le header EXACT envoyé à chaque requête (utile
+    // si tu soupçonnes un intercepteur ou une config qui écrase le header
+    // après coup). À retirer une fois le diagnostic terminé.
+    this.client.interceptors.request.use((config) => {
+      const authHeader = config.headers?.Authorization as string | undefined;
+      this.logger.debug(
+        `🔍 [Moteki] Requête ${config.method?.toUpperCase()} ${config.url} — ` +
+          `Authorization présent: ${!!authHeader}, longueur: ${authHeader?.length ?? 0}`,
+      );
+      return config;
     });
 
     this.logger.log(`🔧 MotekiService initialisé — base URL: ${baseURL}`);
@@ -134,146 +192,222 @@ export class MotekiService {
   }
 
   // ==========================================================================
-  // 💳 INITIER UN CHECKOUT D'ABONNEMENT
-  // POST /storefront/digital-products/{uuid}/subscribe
+  // 🔀 401 vs 403 — voir doc "Dépannage API" : un 401 n'est JAMAIS un problème
+  // de scope (ça c'est 403) ; le corps du 401 dit précisément la cause. On
+  // relaie ce message tel quel plutôt que notre propre texte générique, pour
+  // que ce soit diagnosticable direct côté KonzaRH sans avoir à checker les
+  // logs serveur Moteki.
   // ==========================================================================
 
-  async initiateSubscriptionCheckout(
-    dto: InitiateSubscriptionCheckoutDto,
-  ): Promise<MotekiOrderResponse> {
+  private explainMotekiError(error: any): string {
+    const status = error.response?.status;
+    const body = error.response?.data;
+    const bodyMsg: string | undefined = body?.message || body?.error;
+
+    if (status === 401) {
+      // On relaie le message exact de Moteki — il distingue déjà
+      // "API key required" / "Invalid or revoked API key" / "API key expired"
+      return `Clé Moteki refusée : ${bodyMsg ?? 'raison inconnue'} — vérifiez MOTEKI_SECRET_KEY.`;
+    }
+    if (status === 403) {
+      return `Scope manquant sur la clé Moteki (${bodyMsg ?? 'ability requise absente'}) — ajoutez le scope nécessaire depuis le dashboard Moteki (Plus → Développeur).`;
+    }
+    if (status === 409) {
+      return bodyMsg ?? 'Conflit : référence déjà utilisée ou intention déjà dans un état final.';
+    }
+    if (status === 422) {
+      return bodyMsg ?? 'Validation échouée (montant, opérateur, ou Idempotency-Key rejouée avec un payload différent).';
+    }
+    if (status === 429) {
+      return 'Limite de débit Moteki dépassée, réessayez dans quelques instants.';
+    }
+    return bodyMsg ?? 'Erreur de communication avec Moteki.';
+  }
+
+  // ==========================================================================
+  // 🔧 Les opérateurs renvoyés par /storefront/payment-methods (v1, ex:
+  // "mtn-cg") ont un format différent de celui attendu par confirm (v2, ex:
+  // "mtn" + country "cg" séparés). On découpe sur le dernier "-".
+  // ⚠️ À vérifier en pratique dès le 1er test réel : si Moteki renvoie déjà
+  // des opérateurs SANS suffixe pays pour votre boutique, cette fonction est
+  // un no-op sûr (elle renvoie l'opérateur tel quel + le pays par défaut).
+  // ==========================================================================
+
+  splitOperatorCountry(
+    operatorWithSuffix: string,
+    defaultCountry = 'cg',
+  ): { operator: string; country: string } {
+    const lastDash = operatorWithSuffix.lastIndexOf('-');
+    if (lastDash === -1) {
+      return { operator: operatorWithSuffix, country: defaultCountry };
+    }
+    return {
+      operator: operatorWithSuffix.slice(0, lastDash),
+      country: operatorWithSuffix.slice(lastDash + 1),
+    };
+  }
+
+  // ==========================================================================
+  // 1️⃣ CRÉER L'INTENTION DE PAIEMENT (v2)
+  // POST /api/v2/storefront/payments
+  // ==========================================================================
+
+  async createPaymentIntent(
+    dto: CreateMotekiPaymentIntentDto,
+  ): Promise<MotekiPaymentIntentResponse> {
     this.assertConfigured();
+    const idempotencyKey = crypto.randomUUID();
     try {
       this.logger.log(
-        `💳 Initiation checkout Moteki — produit ${dto.digitalProductUuid}, plan #${dto.planIndex}, ${dto.paymentMethod}`,
+        `💳 [Moteki v2] Création intention — produit ${dto.productUuid}, plan #${dto.planIndex}, ${dto.customerEmail}`,
       );
 
       const payload = {
-        plan_index: dto.planIndex,
-        customer_first_name: dto.customerFirstName,
-        customer_last_name: dto.customerLastName,
-        customer_email: dto.customerEmail,
-        customer_phone: dto.customerPhone,
-        payment_method: dto.paymentMethod,
-        payment_operator: dto.paymentOperator,
+        customer: {
+          first_name: dto.customerFirstName,
+          last_name: dto.customerLastName,
+          email: dto.customerEmail,
+          phone: dto.customerPhoneE164,
+          country: dto.customerCountry,
+        },
+        order: {
+          currency: 'XAF',
+          items: [{ product_uuid: dto.productUuid, quantity: 1, plan_index: dto.planIndex }],
+          coupon_code: null,
+          merchant_reference: dto.merchantReference,
+        },
+        payment: {
+          method: 'mobile_money',
+          operator: dto.operator,
+        },
       };
 
-      const response = await this.client.post<MotekiOrderResponse>(
-        `/storefront/digital-products/${dto.digitalProductUuid}/subscribe`,
+      const response = await this.client.post<MotekiPaymentIntentResponse>(
+        '/api/v2/storefront/payments',
         payload,
+        { headers: { 'Idempotency-Key': idempotencyKey } },
       );
 
       this.logger.log(
-        `✅ Commande Moteki créée: ${response.data.order_number} (${response.data.status})`,
+        `✅ [Moteki v2] Intention créée: ${response.data.payment_reference} (commande ${response.data.order_number})`,
       );
-
       return response.data;
     } catch (error: any) {
-      this.logger.error('❌ Échec initiation checkout Moteki:');
-      this.logger.error(
-        JSON.stringify(error.response?.data, null, 2) || error.message,
-      );
-
-      const errMsg =
-        error.response?.data?.message ||
-        (error.response?.status === 400
-          ? 'Ce moyen de paiement n’est pas activé sur la boutique Moteki.'
-          : error.response?.status === 422
-            ? 'Plan invalide ou produit non abonnement.'
-            : 'Erreur lors de l’initiation du paiement.');
-
-      throw new BadRequestException(errMsg);
+      this.logger.error('❌ [Moteki v2] Échec création intention:', error.response?.data || error.message);
+      throw new BadRequestException(this.explainMotekiError(error));
     }
   }
 
   // ==========================================================================
-  // 🔍 STATUT D'UNE COMMANDE (pour le polling — remplace la dépendance au
-  // webhook tant qu'il n'est pas encore fiable côté Moteki)
-  //
-  // 🐛 CORRECTIF : l'ancien code appelait GET /orders/{id}, qui n'existe pas
-  // dans la doc Moteki — d'où l'échec silencieux systématique du polling.
-  // Le vrai endpoint (doc "Statut des commandes") est GET
-  // /storefront/orders/{order_number}, avec le NUMÉRO de commande
-  // ("MOT-xxx"/"ORD-xxx"), pas l'UUID interne — scope read:store, qu'on a déjà.
+  // 2️⃣ CONFIRMER LE PAIEMENT (v2) — déclenche le push Mobile Money
+  // POST /api/v2/storefront/payments/{payment_reference}/confirm
   // ==========================================================================
 
-  async getOrderStatus(orderNumber: string): Promise<{
-    id: string;
-    order_number: string;
-    status: string; // pending | processing | completed | cancelled | refunded
-    payment_status: string; // pending | awaiting_payment | paid | failed | refunded
-    payment_method: string;
-    total_amount: number;
-    created_at: string;
-  }> {
+  async confirmPayment(
+    paymentReference: string,
+    msisdnE164: string,
+    country: string,
+    operator: string,
+  ): Promise<MotekiConfirmResponse> {
+    this.assertConfigured();
+    const idempotencyKey = crypto.randomUUID();
     try {
-      this.assertConfigured();
-      const response = await this.client.get(`/storefront/orders/${orderNumber}`);
+      this.logger.log(`📲 [Moteki v2] Confirmation ${paymentReference} — push vers ${operator}`);
+
+      const response = await this.client.post<MotekiConfirmResponse>(
+        `/api/v2/storefront/payments/${paymentReference}/confirm`,
+        { msisdn: msisdnE164, country, operator },
+        { headers: { 'Idempotency-Key': idempotencyKey } },
+      );
+
+      this.logger.log(
+        `📲 [Moteki v2] Confirm ${paymentReference} → status: ${response.data.status}`,
+      );
       return response.data;
     } catch (error: any) {
       this.logger.error(
-        `❌ Échec récupération statut commande Moteki ${orderNumber}:`,
+        `❌ [Moteki v2] Échec confirmation ${paymentReference}:`,
         error.response?.data || error.message,
       );
-      throw new BadRequestException(
-        'Erreur lors de la vérification du statut de la commande',
-      );
+      throw new BadRequestException(this.explainMotekiError(error));
     }
   }
 
   // ==========================================================================
-  // 🔍 STATUT D'UN ABONNEMENT
+  // 🔍 STATUT D'UN PAIEMENT (v2, pour le polling)
+  // GET /api/v2/storefront/payments/{payment_reference}
+  //
+  // ⚠️ La doc est explicite : "Pas de webhook pour l'instant... le polling
+  // fait foi." Donc contrairement à v1 (qui documentait un X-Moteki-Signature
+  // webhook), on ne dépend QUE de cet appel pour savoir si c'est payé.
+  // États terminaux : succeeded | failed | expired. Non-terminaux :
+  // awaiting_confirmation | processing.
+  // ==========================================================================
+
+  async getPaymentStatus(paymentReference: string): Promise<MotekiPaymentStatusResponse> {
+    this.assertConfigured();
+    try {
+      const response = await this.client.get<MotekiPaymentStatusResponse>(
+        `/api/v2/storefront/payments/${paymentReference}`,
+      );
+      return response.data;
+    } catch (error: any) {
+      this.logger.error(
+        `❌ [Moteki v2] Échec récupération statut ${paymentReference}:`,
+        error.response?.data || error.message,
+      );
+      throw new BadRequestException(this.explainMotekiError(error));
+    }
+  }
+
+  isPaymentSucceeded(p: { status: string }): boolean {
+    return p.status === 'succeeded';
+  }
+
+  isPaymentFailed(p: { status: string }): boolean {
+    return p.status === 'failed' || p.status === 'expired';
+  }
+
+  // ==========================================================================
+  // 🔍 STATUT D'UN ABONNEMENT CÔTÉ MOTEKI (v1, suivi/support uniquement —
+  // jamais utilisé pour piloter l'accès KonzaRH, voir note en tête de fichier)
   // GET /subscriptions/{uuid}
   // ==========================================================================
 
-  async getSubscriptionStatus(
-    subscriptionUuid: string,
-  ): Promise<MotekiSubscriptionResponse> {
+  async getSubscriptionStatus(subscriptionUuid: string): Promise<MotekiSubscriptionResponse> {
+    this.assertConfigured();
     try {
-      this.assertConfigured();
       const response = await this.client.get<MotekiSubscriptionResponse>(
-        `/subscriptions/${subscriptionUuid}`,
+        `/api/v1/subscriptions/${subscriptionUuid}`,
       );
       return response.data;
     } catch (error: any) {
-      this.logger.error(
-        '❌ Échec récupération statut abonnement Moteki:',
-        error.response?.data || error.message,
-      );
-      throw new BadRequestException(
-        "Erreur lors de la vérification du statut de l'abonnement",
-      );
+      this.logger.error('❌ Échec récupération statut abonnement Moteki:', error.response?.data || error.message);
+      throw new BadRequestException(this.explainMotekiError(error));
     }
   }
 
   // ==========================================================================
-  // ❌ ANNULER UN ABONNEMENT
-  // POST /subscriptions/{uuid}/cancel — accès conservé jusqu'à ends_at
+  // ❌ ANNULER UN ABONNEMENT CÔTÉ MOTEKI (v1 — accès conservé jusqu'à ends_at)
+  // POST /subscriptions/{uuid}/cancel
   // ==========================================================================
 
-  async cancelSubscription(
-    subscriptionUuid: string,
-    reason?: string,
-  ): Promise<MotekiSubscriptionResponse> {
+  async cancelSubscription(subscriptionUuid: string, reason?: string): Promise<MotekiSubscriptionResponse> {
+    this.assertConfigured();
     try {
-      this.assertConfigured();
       const response = await this.client.post<MotekiSubscriptionResponse>(
-        `/subscriptions/${subscriptionUuid}/cancel`,
-        { reason },
+        `/api/v1/subscriptions/${subscriptionUuid}/cancel`,
+        { note: reason },
       );
       return response.data;
     } catch (error: any) {
-      this.logger.error(
-        '❌ Échec annulation abonnement Moteki:',
-        error.response?.data || error.message,
-      );
-      throw new BadRequestException(
-        "Erreur lors de l'annulation de l'abonnement",
-      );
+      this.logger.error('❌ Échec annulation abonnement Moteki:', error.response?.data || error.message);
+      throw new BadRequestException(this.explainMotekiError(error));
     }
   }
 
   // ==========================================================================
-  // 💳 MOYENS DE PAIEMENT ACTIVÉS SUR LA BOUTIQUE
+  // 💳 MOYENS DE PAIEMENT ACTIVÉS SUR LA BOUTIQUE (v1, inchangé)
   // GET /storefront/payment-methods
   // ==========================================================================
 
@@ -281,21 +415,21 @@ export class MotekiService {
     try {
       this.assertConfigured();
       const response = await this.client.get<MotekiPaymentMethodOption[]>(
-        '/storefront/payment-methods',
+        '/api/v1/storefront/payment-methods',
       );
       return response.data;
     } catch (error: any) {
-      this.logger.error(
-        '❌ Échec récupération moyens de paiement Moteki:',
-        error.response?.data || error.message,
-      );
+      this.logger.error('❌ Échec récupération moyens de paiement Moteki:', error.response?.data || error.message);
       return [];
     }
   }
 
   // ==========================================================================
-  // 🔐 VÉRIFIER LA SIGNATURE WEBHOOK
-  // Header : X-Moteki-Signature: sha256=<hmac_hex>
+  // 🔐 VÉRIFIER LA SIGNATURE WEBHOOK (v1 — X-Moteki-Signature: sha256=...)
+  // ⚠️ Conservé pour compatibilité mais peu pertinent désormais : le
+  // checkout passe maintenant par v2, qui n'a PAS de webhook documenté
+  // ("le polling fait foi" — voir SubscriptionsService.checkAndActivateMotekiOrder).
+  // Ce webhook v1 ne recevra donc plus d'événements liés à nos paiements.
   // ==========================================================================
 
   verifyWebhookSignature(

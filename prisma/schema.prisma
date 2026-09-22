@@ -2679,7 +2679,7 @@ model Payment {
   motekiOrderNumber     String? @unique @db.VarChar(100) // "MOT-123456"
   motekiSubscriptionId  String? @unique @db.VarChar(100) // connu seulement après le 1er paiement réussi (webhook)
   motekiCustomerEmail   String? @db.VarChar(255)          // clé de corrélation de secours pour le webhook
-
+   motekiPaymentReference String? @unique @db.VarChar(100) // "pi_xxx" — clé de corrélation v2
 
   chariowSaleId        String? @unique @db.VarChar(100)
   chariowProductId     String? @db.VarChar(100)

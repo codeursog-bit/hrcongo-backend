@@ -2767,8 +2767,15 @@ export class PayrollsService {
         );
         if (summaries.length > 0) {
           const s = summaries[0];
-          if (!hasWorkedDaysOverride && s.daysToPay > 0)
-            daysToPay = s.daysToPay;
+          // ✅ CORRECTIF : avant, un résumé à 0 jour (pointage non saisi,
+          // aucune présence enregistrée) gardait le fallback plein mois
+          // (26j) silencieusement. Résultat : l'estimation affichait 26j
+          // alors que la génération réelle, elle, lisait le vrai résumé
+          // (0j) et rejetait l'employé ("Aucun jour travaillé"). Décalage
+          // invisible tant qu'on ne cliquait pas "Lancer". Maintenant
+          // l'estimation reflète toujours le vrai chiffre en BDD, 0 inclus,
+          // pour que ça saute aux yeux avant de lancer, pas après.
+          if (!hasWorkedDaysOverride) daysToPay = s.daysToPay;
           if (!hasOvertimeOverride) {
             att10 = Number((s as any).overtime10Hours ?? 0);
             att25 = Number((s as any).overtime25Hours ?? 0);
@@ -2795,9 +2802,30 @@ export class PayrollsService {
         ? overrides.baseSalary
         : Number(employee.baseSalary);
 
+    // ✅ CORRECTIF : avant, envoyer ne serait-ce qu'une seule prime manuelle
+    // (overrides.manualBonuses non vide) remplaçait ENTIÈREMENT les primes
+    // déjà configurées pour l'employé (convention, ancienneté, primes
+    // récurrentes) — elles disparaissaient du calcul dès qu'on touchait au
+    // formulaire. Désormais : les primes déjà en base sont TOUJOURS
+    // résolues, et "manualBonuses" ne fait qu'ajouter/remplacer par type de
+    // prime (bonusType) — une prime tapée à l'écran avec le même libellé
+    // qu'une prime BDD écrase son montant pour ce bulletin ; les autres
+    // primes BDD non touchées continuent de s'appliquer normalement.
+    const seniorityModeS = (company as any).seniorityMode ?? 'AUTO';
+    const dbResolvedBonuses = await this.bonusesService.calculateEmployeeBonuses(
+      employeeId,
+      effectiveBaseSalary,
+      monthNum,
+      year,
+      user.companyId,
+      daysToPay,
+      settings.workDaysPerMonth,
+      (employee as any).hireDate ?? null,
+      seniorityModeS,
+    );
     let calculatedBonuses: any[], simulationMode: string;
     if (overrides?.manualBonuses && overrides.manualBonuses.length > 0) {
-      calculatedBonuses = (overrides.manualBonuses as any[]).map((b) => ({
+      const manualMapped = (overrides.manualBonuses as any[]).map((b) => ({
         id: b.id ?? `manual-${Date.now()}`,
         bonusType: b.bonusType,
         amount: Number(b.amount),
@@ -2806,20 +2834,16 @@ export class PayrollsService {
         source: 'MANUAL',
         isRecurring: true,
       }));
+      const manualTypes = new Set(
+        manualMapped.map((b) => String(b.bonusType).trim().toLowerCase()),
+      );
+      const dbNotOverridden = dbResolvedBonuses.filter(
+        (b: any) => !manualTypes.has(String(b.bonusType).trim().toLowerCase()),
+      );
+      calculatedBonuses = [...dbNotOverridden, ...manualMapped];
       simulationMode = 'MANUAL_OVERRIDE';
     } else {
-      const seniorityModeS = (company as any).seniorityMode ?? 'AUTO';
-      calculatedBonuses = await this.bonusesService.calculateEmployeeBonuses(
-        employeeId,
-        effectiveBaseSalary,
-        monthNum,
-        year,
-        user.companyId,
-        daysToPay,
-        settings.workDaysPerMonth,
-        (employee as any).hireDate ?? null,
-        seniorityModeS,
-      );
+      calculatedBonuses = dbResolvedBonuses;
       simulationMode =
         overrides && Object.keys(overrides).length > 0
           ? 'MANUAL_OVERRIDE'

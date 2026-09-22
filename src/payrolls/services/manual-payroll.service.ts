@@ -768,6 +768,8 @@ import { CompanyTaxService } from '../../company-taxes/company-tax.service';
 import { LeavesService } from '../../leaves/leaves.service';
 import { resolveCycleWindow } from '../../leaves/leaves-common.util';
 import { YtdCheckpointService } from './ytd-checkpoint.service';
+import { AttendanceSummaryService } from '../../attendance/attendance-summary.service';
+import { PayrollBonusesService } from './payroll-bonuses.service';
 import {
   CompanyNotFoundException,
   EmployeeNotFoundException,
@@ -794,7 +796,8 @@ export interface CreateManualPayrollDto {
   companyId?: string;
   month: number;
   year: number;
-  workedDays: number;
+  // ✅ optionnel : si absent, on va chercher les vrais jours en BDD (présences)
+  workedDays?: number;
   baseSalary?: number;
   overtimeHours10?: number;
   overtimeHours25?: number;
@@ -848,7 +851,98 @@ export class ManualPayrollService {
     private companyTaxService: CompanyTaxService,
     private leavesService: LeavesService,
     private ytdCheckpointService: YtdCheckpointService,
+    // ✅ pour lire les vrais jours travaillés (présences) quand l'utilisateur
+    // n'a pas saisi de jours à la main, et pour reprendre les primes déjà
+    // attribuées à l'employé en BDD (convention, ancienneté, primes récurrentes).
+    private attendanceSummary: AttendanceSummaryService,
+    private bonusesService: PayrollBonusesService,
   ) {}
+
+  // ✅ Jours réellement travaillés : si l'utilisateur a saisi un chiffre, on
+  // le garde (borné aux jours du mois) ; sinon on va chercher le vrai résumé
+  // de présence en BDD, MÊME S'IL VAUT 0 (mieux vaut le voir et ajuster que
+  // se retrouver avec un salaire plein mois calculé sur du vide).
+  private async resolveDaysToPay(
+    companyId: string,
+    employeeId: string,
+    month: number,
+    year: number,
+    workedDaysOverride: number | undefined | null,
+    workDaysPerMonth: number,
+  ): Promise<number> {
+    if (workedDaysOverride != null) {
+      return Math.min(Math.max(0, Number(workedDaysOverride)), workDaysPerMonth);
+    }
+    try {
+      await this.attendanceSummary.generateAndStoreAllMonthlySummaries(
+        companyId,
+        month,
+        year,
+      );
+      const summaries = await this.attendanceSummary.getStoredSummaries(
+        companyId,
+        month,
+        year,
+        [employeeId],
+      );
+      if (summaries.length > 0) return summaries[0].daysToPay;
+    } catch {
+      this.logger.warn(`⚠️ Pointage indisponible pour ${employeeId}`);
+    }
+    return workDaysPerMonth;
+  }
+
+  // ✅ Fusionne les primes déjà attribuées à l'employé en BDD (convention,
+  // ancienneté, primes récurrentes créées via /bonus-templates ou la fiche
+  // employé) avec celles tapées à la main dans ce bulletin. Les primes BDD
+  // sont prioritaires : une prime tapée à la main avec le même libellé est
+  // ignorée pour ne pas la payer deux fois — l'utilisateur peut toujours
+  // corriger le montant de la prime BDD depuis sa fiche/le catalogue.
+  private async mergeWithDbBonuses(
+    employeeId: string,
+    companyId: string,
+    baseSalary: number,
+    month: number,
+    year: number,
+    daysToPay: number,
+    workDaysTotal: number,
+    hireDate: Date | null,
+    seniorityMode: 'AUTO' | 'MANUAL',
+    manualBonuses: any[],
+  ) {
+    let dbBonuses: any[] = [];
+    try {
+      dbBonuses = await this.bonusesService.calculateEmployeeBonuses(
+        employeeId,
+        baseSalary,
+        month,
+        year,
+        companyId,
+        daysToPay,
+        workDaysTotal,
+        hireDate,
+        seniorityMode,
+      );
+    } catch {
+      this.logger.warn(`⚠️ Primes BDD indisponibles pour ${employeeId}`);
+    }
+    // ✅ CORRECTIF : le front pré-remplit désormais les champs primes/
+    // indemnités avec les primes déjà configurées pour l'employé (mêmes
+    // "dbBonuses" que ci-dessus). Si l'utilisateur ajuste le montant d'une
+    // de ces primes pour CE bulletin, cette correction doit être prise en
+    // compte — donc c'est le manuel (l'écran) qui l'emporte sur le type de
+    // prime (bonusType), pas l'inverse comme avant (qui écrasait
+    // silencieusement toute correction saisie à l'écran). Les primes BDD
+    // dont le type n'apparaît PAS à l'écran continuent de s'appliquer
+    // automatiquement.
+    const manualTypes = new Set(
+      manualBonuses.map((b) => String(b.bonusType).trim().toLowerCase()),
+    );
+    const dbNotOverridden = dbBonuses.filter(
+      (b) => !manualTypes.has(String(b.bonusType).trim().toLowerCase()),
+    );
+    return [...dbNotOverridden, ...manualBonuses];
+  }
 
   private async resolveCompanyId(
     userId: string,
@@ -973,8 +1067,13 @@ export class ManualPayrollService {
         ? dto.baseSalary
         : Number(employee.baseSalary);
 
-    const daysToPay = Math.min(
-      dto.workedDays ?? settings.workDaysPerMonth,
+    // ✅ Jours réels en BDD si non saisis à la main (au lieu du plein mois par défaut)
+    const daysToPay = await this.resolveDaysToPay(
+      companyId,
+      dto.employeeId,
+      dto.month,
+      dto.year,
+      dto.workedDays,
       settings.workDaysPerMonth,
     );
     const eff10 = Number(dto.overtimeHours10 ?? 0);
@@ -982,7 +1081,19 @@ export class ManualPayrollService {
     const eff50 = Number(dto.overtimeHours50 ?? 0);
     const eff100 = Number(dto.overtimeHours100 ?? 0);
 
-    const calculatedBonuses = this.buildCalculatedBonuses(dto.manualBonuses);
+    // ✅ Primes déjà attribuées à l'employé en BDD + celles tapées à la main
+    const calculatedBonuses = await this.mergeWithDbBonuses(
+      dto.employeeId,
+      companyId,
+      effectiveBaseSalary,
+      dto.month,
+      dto.year,
+      daysToPay,
+      settings.workDaysPerMonth,
+      (employee as any).hireDate ?? null,
+      (company as any).seniorityMode ?? 'AUTO',
+      this.buildCalculatedBonuses(dto.manualBonuses),
+    );
     const manualDeductionTotal = (dto.manualDeductions ?? []).reduce(
       (s, d) => s + (Number(d.amount) || 0),
       0,
@@ -1164,8 +1275,13 @@ export class ManualPayrollService {
         ? dto.baseSalary
         : Number(employee.baseSalary);
 
-    const daysToPay = Math.min(
-      dto.workedDays ?? settings.workDaysPerMonth,
+    // ✅ Jours réels en BDD si non saisis à la main (au lieu du plein mois par défaut)
+    const daysToPay = await this.resolveDaysToPay(
+      companyId,
+      dto.employeeId,
+      dto.month,
+      dto.year,
+      dto.workedDays,
       settings.workDaysPerMonth,
     );
     const eff10 = Number(dto.overtimeHours10 ?? 0);
@@ -1174,7 +1290,19 @@ export class ManualPayrollService {
     const eff100 = Number(dto.overtimeHours100 ?? 0);
     const absenceDays = Math.max(0, settings.workDaysPerMonth - daysToPay);
 
-    const calculatedBonuses = this.buildCalculatedBonuses(dto.manualBonuses);
+    // ✅ Primes déjà attribuées à l'employé en BDD + celles tapées à la main
+    const calculatedBonuses = await this.mergeWithDbBonuses(
+      dto.employeeId,
+      companyId,
+      effectiveBaseSalary,
+      dto.month,
+      dto.year,
+      daysToPay,
+      settings.workDaysPerMonth,
+      (employee as any).hireDate ?? null,
+      (company as any).seniorityMode ?? 'AUTO',
+      this.buildCalculatedBonuses(dto.manualBonuses),
+    );
     const manualDeductionTotal = (dto.manualDeductions ?? []).reduce(
       (s, d) => s + (Number(d.amount) || 0),
       0,

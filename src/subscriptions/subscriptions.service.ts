@@ -551,6 +551,7 @@ import { getChariowProductId } from './config/chariow.config';
 import { UpgradeCheckoutDto } from './dto/upgrade-checkout.dto';
 import { MotekiCheckoutDto } from './dto/moteki-checkout.dto';
 import { ChariowCheckoutDto } from './dto/chariow-checkout.dto';
+import { randomUUID } from 'crypto';
 import { AffiliateService } from '../affiliate/affiliate.service'; // ← AJOUT
 import { NotificationsService } from '../notifications/notifications.service';
 import { MailService } from '../mail/mail.service';
@@ -1038,7 +1039,7 @@ export class SubscriptionsService {
 
   async createMotekiCheckout(companyId: string, dto: MotekiCheckoutDto) {
     this.logger.log(
-      `🛒 [Moteki] Initiation checkout — company: ${companyId} — plan: ${dto.plan} (${dto.billingPeriod})`,
+      `🛒 [Moteki v2] Initiation paiement — company: ${companyId} — plan: ${dto.plan} (${dto.billingPeriod})`,
     );
 
     const currentSubscription = await this.prisma.subscription.findUnique({
@@ -1052,24 +1053,33 @@ export class SubscriptionsService {
     const expectedAmount = getPlanPrice(dto.plan, dto.billingPeriod);
     const planConfig = PLANS[dto.plan];
 
-    const order = await this.motekiService.initiateSubscriptionCheckout({
-      digitalProductUuid: planRef.digitalProductUuid,
+    // Congo-Brazzaville uniquement pour l'instant (voir profil KonzaRH) —
+    // E.164 (+242...) et pays "cg" en dur, comme pour Chariow.
+    const rawPhone = (dto.customerPhone ?? '').replace(/\D/g, '');
+    const phoneE164 = dto.customerPhone?.startsWith('+')
+      ? dto.customerPhone
+      : `+242${rawPhone}`;
+    const { operator } = this.motekiService.splitOperatorCountry(
+      dto.paymentOperator ?? '',
+      'cg',
+    );
+
+    // 1️⃣ Créer l'intention de paiement (v2) — le montant renvoyé fait foi,
+    // re-résolu serveur depuis le produit/plan, pas celui qu'on a envoyé.
+    const intent = await this.motekiService.createPaymentIntent({
+      productUuid: planRef.digitalProductUuid,
       planIndex: planRef.planIndex,
       customerFirstName: dto.customerFirstName,
       customerLastName: dto.customerLastName,
       customerEmail: dto.customerEmail,
-      customerPhone: dto.customerPhone,
-      paymentMethod: dto.paymentMethod,
-      paymentOperator: dto.paymentOperator,
+      customerCountry: 'cg',
+      customerPhoneE164: phoneE164,
+      operator,
     });
 
-    // ⚠️ Si Moteki facture un montant différent du tarif attendu côté app
-    // (produit mal configuré au dashboard, plan_index décalé, etc.), on
-    // logue fort plutôt que d'échouer silencieusement — l'argent part quand
-    // même chez Moteki, autant le savoir tout de suite.
-    if (order.total_amount && order.total_amount !== expectedAmount) {
+    if (intent.amount && intent.amount !== expectedAmount) {
       this.logger.warn(
-        `⚠️ [Moteki] Montant reçu (${order.total_amount}) ≠ tarif attendu (${expectedAmount}) pour ${dto.plan}/${dto.billingPeriod} — vérifier la config des subscription_plans sur le dashboard Moteki.`,
+        `⚠️ [Moteki v2] Montant reçu (${intent.amount}) ≠ tarif attendu (${expectedAmount}) pour ${dto.plan}/${dto.billingPeriod} — vérifier la config des subscription_plans sur le dashboard Moteki.`,
       );
     }
 
@@ -1078,13 +1088,14 @@ export class SubscriptionsService {
         subscriptionId: currentSubscription.id,
         companyId,
         provider: 'MOTEKI',
-        motekiOrderId: order.id,
-        motekiOrderNumber: order.order_number,
+        motekiOrderId: intent.order_uuid,
+        motekiOrderNumber: intent.order_number,
+        motekiPaymentReference: intent.payment_reference,
         motekiCustomerEmail: dto.customerEmail,
-        amount: order.total_amount || expectedAmount,
+        amount: intent.amount || expectedAmount,
         currency: 'XAF',
         status: 'PENDING',
-        paymentMethod: dto.paymentMethod,
+        paymentMethod: 'mobile_money',
         paymentMethodDetails: {
           paymentOperator: dto.paymentOperator,
           customerPhone: dto.customerPhone,
@@ -1093,25 +1104,57 @@ export class SubscriptionsService {
         metadata: {
           plan: dto.plan,
           billingPeriod: dto.billingPeriod,
-          motekiOrderId: order.id,
-          motekiOrderNumber: order.order_number,
+          motekiPaymentReference: intent.payment_reference,
         },
       },
     });
 
     this.logger.log(
-      `💾 [Moteki] Payment record créé: ${payment.id} — commande ${order.order_number}`,
+      `💾 [Moteki v2] Payment record créé: ${payment.id} — intention ${intent.payment_reference}`,
     );
+
+    // 2️⃣ Confirmer immédiatement — déclenche le push Mobile Money vers le
+    // client. On enchaîne les deux appels côté serveur pour garder la même
+    // UX qu'avant côté frontend (un seul clic), le client n'a rien de plus
+    // à faire que d'approuver le push sur son téléphone (code PIN/USSD).
+    const confirm = await this.motekiService.confirmPayment(
+      intent.payment_reference,
+      phoneE164,
+      'cg',
+      operator,
+    );
+
+    // 3️⃣ On laisse checkAndActivateMotekiOrder faire foi pour la décision
+    // d'activation (il rappelle GET .../payments/{ref}, la source de vérité
+    // documentée) plutôt que de dupliquer la logique ici avec le retour de
+    // confirm — même s'il est déjà synchrone dans certains cas ("succès
+    // synchrone (rare)" selon la doc). Ça évite d'avoir deux chemins de code
+    // qui décident de l'activation différemment.
+    let activationResult: { activated: boolean; status: string } = {
+      activated: false,
+      status: confirm.status,
+    };
+    try {
+      activationResult = await this.checkAndActivateMotekiOrder(payment.id);
+    } catch (err) {
+      this.logger.error(
+        `[Moteki v2] Échec vérification immédiate après confirm (${payment.id}), le cron réessaiera:`,
+        err,
+      );
+    }
 
     return {
       paymentId: payment.id,
-      orderId: order.id,
-      orderNumber: order.order_number,
-      status: order.status,
-      checkoutUrl: order.checkout_url || order.redirect_url,
+      paymentReference: intent.payment_reference,
+      orderNumber: intent.order_number,
+      status: confirm.status, // 'processing' | 'succeeded' | 'failed'
+      activated: activationResult.activated,
+      // Présents seulement si confirm a échoué tout de suite (ex: PUSH_DENIED)
+      code: confirm.code,
+      message: confirm.message,
       plan: dto.plan,
       billingPeriod: dto.billingPeriod,
-      amount: order.total_amount || expectedAmount,
+      amount: intent.amount || expectedAmount,
     };
   }
 
@@ -1128,26 +1171,16 @@ export class SubscriptionsService {
   }
 
   // ==========================================================================
-  // 🔎 MOTEKI — VÉRIFIER + ACTIVER UNE COMMANDE EN ATTENTE (POLLING)
+  // 🔎 MOTEKI v2 — VÉRIFIER + ACTIVER UN PAIEMENT EN ATTENTE (POLLING)
   // ==========================================================================
   //
-  // 🐛 CORRECTIF ARCHITECTURAL : d'après le développeur de Moteki lui-même,
-  // (1) le webhook n'est pas encore fiable ("en construction") et sert
-  // seulement à refléter un CHANGEMENT D'ÉTAT d'un abonnement déjà connu,
-  // pas à déclencher l'activation initiale ; (2) Moteki NE prélève PAS
-  // automatiquement le client à chaque échéance (contrairement à ce que
-  // laissait penser leur doc) — chaque paiement est un acte volontaire du
-  // client, exactement comme avec YabetooPay.
-  //
-  // On ne peut donc plus faire confiance à starts_at/ends_at renvoyés par
-  // Moteki (pas de renouvellement auto = pas de source de vérité côté eux).
-  // La bonne approche : interroger NOUS-MÊMES le statut de la commande via
-  // son order_id (qu'on connaît déjà depuis notre propre appel /subscribe —
-  // donc la corrélation entreprise↔commande est triviale, pas besoin du
-  // webhook pour ça), et dès que payée, réutiliser EXACTEMENT la même
-  // logique de calcul de dates que YabetooPay (activateUpgrade, avec son
-  // ancrage anti-double-comptage) puisque c'est un paiement ponctuel comme
-  // les autres.
+  // La doc v2 est explicite : "Pas de webhook pour l'instant... le polling
+  // fait foi." On interroge donc GET /api/v2/storefront/payments/{ref} —
+  // jamais starts_at/ends_at d'un éventuel abonnement Moteki, qui reste hors
+  // de notre contrôle. Dès que payé, on réutilise EXACTEMENT la même
+  // logique de calcul de dates que Chariow/YabetooPay (activateUpgrade),
+  // puisque c'est un paiement ponctuel comme les autres — Moteki n'est
+  // qu'un rail de paiement, jamais la source de vérité pour l'accès.
   // ==========================================================================
 
   async checkAndActivateMotekiOrder(paymentId: string): Promise<{
@@ -1158,7 +1191,7 @@ export class SubscriptionsService {
       where: { id: paymentId },
     });
 
-    if (!payment || payment.provider !== 'MOTEKI' || !payment.motekiOrderNumber) {
+    if (!payment || payment.provider !== 'MOTEKI' || !payment.motekiPaymentReference) {
       throw new NotFoundException('Paiement Moteki introuvable');
     }
 
@@ -1170,29 +1203,15 @@ export class SubscriptionsService {
       return { activated: false, status: 'already_failed' };
     }
 
-    // 🐛 CORRECTIF : on interroge par order_number ("MOT-xxx"), pas par
-    // l'UUID interne — voir GET /storefront/orders/{order_number} dans
-    // MotekiService.getOrderStatus.
-    const order = await this.motekiService.getOrderStatus(payment.motekiOrderNumber);
+    const intentStatus = await this.motekiService.getPaymentStatus(
+      payment.motekiPaymentReference,
+    );
 
-    // Valeurs officielles (doc "Statut des commandes") :
-    //   status         : pending | processing | completed | cancelled | refunded
-    //   payment_status : pending | awaiting_payment | paid | failed | refunded
-    // On vérifie les deux champs indépendamment plutôt qu'en cascade — un
-    // statut "cancelled" ne doit jamais être masqué par un payment_status
-    // resté à "pending".
-    const isPaid = order.payment_status === 'paid' || order.status === 'completed';
-    const isFailed =
-      order.payment_status === 'failed' ||
-      order.payment_status === 'refunded' ||
-      order.status === 'cancelled' ||
-      order.status === 'refunded';
-
-    if (isPaid) {
+    if (this.motekiService.isPaymentSucceeded(intentStatus)) {
       const { plan, billingPeriod } = (payment.metadata as any) ?? {};
       if (!plan || !billingPeriod) {
         this.logger.error(
-          `❌ [Moteki] Payment ${payment.id} sans plan/billingPeriod en metadata — activation manuelle requise.`,
+          `❌ [Moteki v2] Payment ${payment.id} sans plan/billingPeriod en metadata — activation manuelle requise.`,
         );
         return { activated: false, status: 'missing_metadata' };
       }
@@ -1202,8 +1221,6 @@ export class SubscriptionsService {
         data: { status: 'SUCCEEDED', paidAt: new Date() },
       });
 
-      // ✅ Même logique d'ancrage de date que YabetooPay — un paiement
-      // Moteki est un paiement ponctuel comme un autre.
       await this.activateUpgrade(payment.companyId, plan, billingPeriod);
 
       try {
@@ -1213,29 +1230,30 @@ export class SubscriptionsService {
       }
 
       this.logger.log(
-        `🎉 [Moteki] Commande ${payment.motekiOrderNumber} confirmée payée → abonnement activé pour company ${payment.companyId}`,
+        `🎉 [Moteki v2] Paiement ${payment.motekiPaymentReference} confirmé payé → abonnement activé pour company ${payment.companyId}`,
       );
       return { activated: true, status: 'activated' };
     }
 
-    if (isFailed) {
+    if (this.motekiService.isPaymentFailed(intentStatus)) {
       await this.prisma.payment.update({
         where: { id: payment.id },
         data: { status: 'FAILED', failedAt: new Date() },
       });
-      this.logger.warn(`❌ [Moteki] Commande ${payment.motekiOrderNumber} échouée/annulée`);
+      this.logger.warn(
+        `❌ [Moteki v2] Paiement ${payment.motekiPaymentReference} échoué/expiré (status: ${intentStatus.status})`,
+      );
       return { activated: false, status: 'failed' };
     }
 
-    // Toujours en attente — rien à faire, le prochain passage du cron
-    // (ou le prochain appel depuis /success) retentera.
+    // awaiting_confirmation / processing — rien à faire, le prochain
+    // passage du cron (ou le prochain appel depuis /success) retentera.
     return { activated: false, status: 'pending' };
   }
 
   // ==========================================================================
-  // ⏰ MOTEKI — CRON : VÉRIFIER TOUTES LES COMMANDES EN ATTENTE
-  // (filet de sécurité — tourne même si le client ne revient jamais sur
-  // /success après avoir payé)
+  // ⏰ MOTEKI v2 — CRON : VÉRIFIER TOUS LES PAIEMENTS EN ATTENTE
+  // (filet de sécurité — indispensable ici puisqu'il n'y a PAS de webhook v2)
   // ==========================================================================
 
   async checkPendingMotekiOrders() {
@@ -1246,7 +1264,7 @@ export class SubscriptionsService {
       where: {
         provider: 'MOTEKI',
         status: 'PENDING',
-        motekiOrderNumber: { not: null },
+        motekiPaymentReference: { not: null },
         createdAt: { gte: cutoff },
       },
     });
@@ -1257,13 +1275,14 @@ export class SubscriptionsService {
         const result = await this.checkAndActivateMotekiOrder(payment.id);
         if (result.activated) activated++;
       } catch (err) {
-        this.logger.error(`Erreur vérification commande Moteki ${payment.id}:`, err);
+        this.logger.error(`Erreur vérification paiement Moteki ${payment.id}:`, err);
       }
     }
 
-    // Commandes trop vieilles et toujours PENDING → on arrête de les
-    // sonder pour de bon (évite de solliciter Moteki indéfiniment pour un
-    // panier abandonné).
+    // Paiements trop vieux et toujours PENDING → on arrête de les sonder
+    // pour de bon (l'intention v2 elle-même expire de toute façon après
+    // 15-30 min selon la doc, donc ceux-là seront déjà "expired" côté
+    // Moteki bien avant qu'on atteigne les 48h).
     const stale = await this.prisma.payment.updateMany({
       where: {
         provider: 'MOTEKI',
@@ -1275,7 +1294,7 @@ export class SubscriptionsService {
 
     if (pending.length > 0 || stale.count > 0) {
       this.logger.log(
-        `🔎 [Moteki] Polling commandes en attente : ${pending.length} vérifiées, ${activated} activée(s), ${stale.count} expirée(s) sans réponse.`,
+        `🔎 [Moteki v2] Polling paiements en attente : ${pending.length} vérifiés, ${activated} activé(s), ${stale.count} expiré(s) sans réponse.`,
       );
     }
 
@@ -1333,6 +1352,16 @@ export class SubscriptionsService {
     const expectedAmount = getPlanPrice(dto.plan, dto.billingPeriod);
     const planConfig = PLANS[dto.plan];
 
+    // On pré-génère l'id du Payment AVANT d'appeler Chariow, pour pouvoir
+    // construire un redirect_url qui pointe directement sur notre page
+    // /success avec ce paymentId — contrairement à Moteki (URL de retour
+    // fixe configurée sur son dashboard), Chariow accepte un redirect_url
+    // personnalisé par requête (voir doc /checkout), donc pas besoin de
+    // sessionStorage côté front pour retrouver le contexte.
+    const paymentId = randomUUID();
+    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+    const redirectUrl = `${frontendUrl}/success?provider=chariow&paymentId=${paymentId}&plan=${dto.plan}`;
+
     const checkout = await this.chariowService.initiateCheckout({
       productId,
       customerEmail: dto.customerEmail,
@@ -1341,6 +1370,7 @@ export class SubscriptionsService {
       customerPhoneNumber: dto.customerPhoneNumber,
       customerPhoneCountryCode: dto.customerPhoneCountryCode ?? 'CG',
       discountCode: dto.discountCode,
+      redirectUrl,
       customMetadata: {
         companyId,
         plan: dto.plan,
@@ -1359,6 +1389,7 @@ export class SubscriptionsService {
 
     const payment = await this.prisma.payment.create({
       data: {
+        id: paymentId,
         subscriptionId: currentSubscription.id,
         companyId,
         provider: 'CHARIOW',

@@ -128,7 +128,10 @@ export class TrainingService {
         companyId: user.companyId,
       },
     });
+    // ✅ FIX FUITE MULTI-TENANT : companyId ajouté — sans lui, le gateway
+    // n'a aucun moyen de cibler uniquement les employés de CETTE entreprise.
     this.gateway.sendCompanyNotification({
+      companyId: user.companyId,
       type: 'INFO',
       title: '📚 Nouvelle formation disponible',
       message: `"${data.title}" est disponible dans le catalogue.`,
@@ -254,7 +257,9 @@ export class TrainingService {
         startDate: new Date(),
       },
     });
+    // ✅ FIX FUITE MULTI-TENANT
     this.gateway.sendCompanyNotification({
+      companyId: user.companyId,
       type: 'INFO',
       title: '📋 Nouvelle demande de formation',
       message: `${employee.firstName} ${employee.lastName} demande "${course.title}"`,
@@ -343,7 +348,9 @@ export class TrainingService {
         reviewNote: dto.reviewNote,
       },
     });
+    // ✅ FIX FUITE MULTI-TENANT
     this.gateway.sendCompanyNotification({
+      companyId: user.companyId,
       type: dto.status === ReviewAction.APPROVED ? 'SUCCESS' : 'ALERT',
       title: `Demande ${dto.status === ReviewAction.APPROVED ? '✅ approuvée' : '❌ refusée'}`,
       message: `"${request.course.title}" — ${request.employee.firstName} ${request.employee.lastName}`,
@@ -380,7 +387,9 @@ export class TrainingService {
         completionRequestedAt: new Date(),
       },
     });
+    // ✅ FIX FUITE MULTI-TENANT
     this.gateway.sendCompanyNotification({
+      companyId: user.companyId,
       type: 'INFO',
       title: '🎓 Validation demandée',
       message: `${employee.firstName} ${employee.lastName} a terminé "${session.course.title}"`,
@@ -485,7 +494,9 @@ export class TrainingService {
       },
     });
 
+    // ✅ FIX FUITE MULTI-TENANT
     this.gateway.sendCompanyNotification({
+      companyId: user.companyId,
       type: 'SUCCESS',
       title: '🎓 Formation certifiée !',
       message: `"${session.course.title}" — Mention : ${MENTION_LABELS[dto.mention]}`,
@@ -938,7 +949,9 @@ export class TrainingService {
       },
     });
 
+    // ✅ FIX FUITE MULTI-TENANT
     this.gateway.sendCompanyNotification({
+      companyId: user.companyId,
       type: 'INFO',
       title: '📚 Formation assignée',
       message: `"${course.title}" assignée à ${employee.firstName} ${employee.lastName}`,

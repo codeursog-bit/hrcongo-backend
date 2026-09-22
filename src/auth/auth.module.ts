@@ -21,7 +21,16 @@ import { AffiliateModule } from '../affiliate/affiliate.module';
     PassportModule,
     CabinetModule,
     AffiliateModule,
+    // ✅ global: true — JwtService devient injectable partout dans l'app sans
+    // avoir à importer JwtModule dans chaque module. Nécessaire depuis que
+    // AppGateway (redéclaré comme provider dans plusieurs modules :
+    // AttendanceModule, TrainingModule, AppModule) dépend de JwtService pour
+    // authentifier les sockets WebSocket (fix de la fuite multi-tenant sur
+    // les notifications temps réel) — sans ce `global: true`, seul AuthModule
+    // lui-même pouvait résoudre JwtService, et tout autre module qui
+    // redéclare AppGateway plantait au démarrage (UnknownDependenciesException).
     JwtModule.registerAsync({
+      global: true,
       imports: [ConfigModule],
       useFactory: async (configService: ConfigService) => ({
         secret:

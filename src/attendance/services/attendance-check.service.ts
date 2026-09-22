@@ -342,7 +342,10 @@ export class AttendanceCheckService {
         });
 
     // ── Notification admin ─────────────────────────────────────────────────
+    // ✅ FIX FUITE MULTI-TENANT : companyId ajouté — sans lui, le gateway
+    // n'a aucun moyen de cibler uniquement les admins de CETTE entreprise.
     this.gateway.sendAdminNotification({
+      companyId: user.companyId,
       type: isLate ? 'ALERT' : 'CHECK_IN',
       employeeId,
       title: isLate ? '⏰ Retard' : '✅ Pointage',
@@ -523,7 +526,9 @@ export class AttendanceCheckService {
       ot.overtime10 + ot.overtime25 + ot.overtime50 + ot.overtime100;
     const check = this.utils.validateWeeklyOvertimeLimit(weeklyOT + sessionOT);
     if (!check.isValid) {
+      // ✅ FIX FUITE MULTI-TENANT
       this.gateway.sendAdminNotification({
+        companyId: user.companyId,
         type: 'ALERT',
         employeeId,
         title: '⚠️ Limite HS semaine',
@@ -564,7 +569,9 @@ export class AttendanceCheckService {
     });
 
     // ── Notification admin ─────────────────────────────────────────────────
+    // ✅ FIX FUITE MULTI-TENANT
     this.gateway.sendAdminNotification({
+      companyId: user.companyId,
       type: 'CHECK_OUT',
       employeeId,
       title: sessionOT > 0 ? '👋 Sortie + HS' : '👋 Sortie',
@@ -704,7 +711,9 @@ export class AttendanceCheckService {
       });
     }
 
+    // ✅ FIX FUITE MULTI-TENANT
     this.gateway.sendAdminNotification({
+      companyId: user.companyId,
       type: 'ATTENDANCE_CORRECTION',
       employeeId: current.employee.id,
       title: '✏️ Correction',
@@ -778,7 +787,10 @@ export class AttendanceCheckService {
 
     await this.prisma.attendance.delete({ where: { id: attendanceId } });
 
+    // ✅ FIX FUITE MULTI-TENANT — c'était ce cas précisément que tu avais
+    // repéré : la suppression d'un pointage diffusait sans companyId.
     this.gateway.sendAdminNotification({
+      companyId: user.companyId,
       type: 'ATTENDANCE_CORRECTION',
       employeeId: attendance.employeeId,
       title: '🗑️ Pointage supprimé',
