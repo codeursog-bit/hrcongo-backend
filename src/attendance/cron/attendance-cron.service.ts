@@ -107,17 +107,19 @@ export class AttendanceCronService implements OnModuleDestroy {
   }
 
   // ============================================================================
-  // CRON 0 — Rappel AVANT l'heure officielle de début (fenêtres 0h-10h / 16h-20h)
+  // CRON 0 — Rappel AVANT l'heure officielle de début (tourne h24)
   // ----------------------------------------------------------------------------
   // Version simplifiée (11/2026) : on met de côté les shifts individuels par
   // employé pour l'instant — on se base uniquement sur l'heure officielle de
   // l'entreprise (PayrollSettings.officialStartHour). Tous les employés d'une
-  // même entreprise sont donc prévenus au même moment. Les fenêtres horaires
-  // sont directement dans l'expression cron : le job ne se déclenche même pas
-  // en dehors de 0h-10h et 16h-20h, pas besoin de vérifier l'heure en plus
-  // dans le code.
+  // même entreprise sont donc prévenus au même moment.
+  // Tourne toutes les 5 min, 24h/24 (plus de fenêtres 0-10h/16-20h) : chaque
+  // entreprise a son propre officialStartHour, calculé dynamiquement plus bas
+  // (target = officialStartHour*60 - preShiftMinutes), donc une entreprise qui
+  // démarre à 13h ou 22h doit pouvoir être notifiée aussi, pas seulement celles
+  // qui démarrent le matin ou en fin d'après-midi.
   // ============================================================================
-  @Cron('*/5 0-10,16-20 * * *', { timeZone: 'Africa/Brazzaville' })
+  @Cron('* * * * *', { timeZone: 'Africa/Brazzaville' })
   async handlePreOfficialStartReminder(): Promise<void> {
     const LOCK = 'attendance-cron:pre-start';
     if (!(await this.cronLock.acquire(LOCK, 270))) {
@@ -129,7 +131,7 @@ export class AttendanceCronService implements OnModuleDestroy {
     const startedAt = Date.now();
     const now = new Date();
     const today = this.today();
-    const nowMin = now.getHours() * 60 + now.getMinutes();
+    const { minutesOfDay: nowMin, dayOfWeek } = this.brazzavilleParts(now);
 
     try {
       const platformSettings = await this.platformSettings.get();
@@ -154,11 +156,14 @@ export class AttendanceCronService implements OnModuleDestroy {
         if (holidayCompanyIds.has(company.id)) continue;
 
         const workDays = (settings.workDays as number[]) || [1, 2, 3, 4, 5];
-        if (!workDays.includes(now.getDay())) continue;
+        if (!workDays.includes(dayOfWeek)) continue;
 
         const officialStartHour = settings.officialStartHour ?? 8;
         const target = officialStartHour * 60 - preShiftMinutes;
-        const withinTick = nowMin >= target && nowMin < target + 5;
+        // Fenêtre resserrée à 2 min (au lieu de 5) maintenant que le cron
+        // tourne toutes les minutes : ça absorbe un tick raté (lock déjà pris
+        // par un run précédent trop lent) sans laisser traîner le rappel.
+        const withinTick = nowMin >= target && nowMin < target + 2;
         if (!withinTick) continue;
 
         // Tous les employés actifs pas encore pointés aujourd'hui, prévenus
@@ -186,19 +191,23 @@ export class AttendanceCronService implements OnModuleDestroy {
         let notifiedCount = 0;
         const skipped: SystemLogSkip[] = [];
 
-        for (const emp of employees) {
+        // En parallèle plutôt qu'un `for` séquentiel : sur une entreprise à
+        // beaucoup d'employés, l'envoi un par un pouvait prendre assez de
+        // temps pour que les derniers reçoivent leur rappel plusieurs
+        // dizaines de secondes, voire minutes, après les premiers.
+        await Promise.all(employees.map(async (emp) => {
           const empName = `${emp.firstName} ${emp.lastName}`;
 
           if (!emp.user?.id) {
             skipped.push({ employeeId: emp.id, name: empName, reason: 'Aucun compte utilisateur lié' });
-            continue;
+            return;
           }
 
           const dedupKey = `pre-start:${emp.id}:${today}`;
           const canNotify = await this.notificationsService.tryClaim(dedupKey);
           if (!canNotify) {
             skipped.push({ employeeId: emp.id, name: empName, reason: 'Déjà notifié aujourd\'hui (dédoublonnage)' });
-            continue;
+            return;
           }
 
           const msg = randomItem(PRE_SHIFT_MESSAGES);
@@ -228,7 +237,7 @@ export class AttendanceCronService implements OnModuleDestroy {
           });
 
           notifiedCount++;
-        }
+        }));
 
         this.logger.log(
           `📲 Rappel pré-début → ${company.legalName} (${officialStartHour}h, -${preShiftMinutes}min) : ${notifiedCount}/${employees.length} notifiés`,
@@ -287,7 +296,7 @@ export class AttendanceCronService implements OnModuleDestroy {
     const startedAt = Date.now();
     const now = new Date();
     const today = this.today();
-    const nowMin = now.getHours() * 60 + now.getMinutes();
+    const { minutesOfDay: nowMin } = this.brazzavilleParts(now);
 
     try {
       const companies = await this.prisma.company.findMany({
@@ -985,14 +994,46 @@ export class AttendanceCronService implements OnModuleDestroy {
   }
 
   private today(): string {
-    const n = new Date();
-    return `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, '0')}-${String(n.getDate()).padStart(2, '0')}`;
+    return this.brazzavilleParts().dateStr;
   }
 
   private yesterday(): string {
-    const d = new Date();
-    d.setDate(d.getDate() - 1);
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    return this.brazzavilleParts(new Date(Date.now() - 24 * 60 * 60 * 1000)).dateStr;
+  }
+
+  /**
+   * ⚠️ Correctif fuseau horaire (Sept 2026) : `new Date().getHours()` /
+   * `.getMinutes()` / `.getDay()` renvoient l'heure LOCALE DU PROCESS NODE
+   * (TZ du serveur/conteneur — souvent UTC par défaut sur Hetzner), PAS le
+   * fuseau passé à `@Cron(..., { timeZone: 'Africa/Brazzaville' })`. Ce
+   * timeZone ne sert qu'à déclencher le tick au bon instant réel — il ne
+   * change rien à ce que `.getHours()` renvoie une fois dans le code. Si le
+   * serveur tourne en UTC (WAT = UTC+1, pas d'heure d'été), `nowMin` était
+   * décalé d'1h en permanence → les rappels "avant le début" arrivaient
+   * jusqu'à 1h en retard (parfois après le début du shift). Ce helper relit
+   * l'heure explicitement dans le fuseau du Congo, quel que soit le fuseau
+   * du serveur.
+   */
+  private brazzavilleParts(date: Date = new Date()): { dateStr: string; minutesOfDay: number; dayOfWeek: number } {
+    const fmt = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'Africa/Brazzaville',
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', hour12: false,
+      weekday: 'short',
+    });
+    const parts: Record<string, string> = {};
+    for (const p of fmt.formatToParts(date)) parts[p.type] = p.value;
+
+    // Certains moteurs JS renvoient "24" pour minuit en hour12:false — à normaliser.
+    const hour = parts.hour === '24' ? 0 : Number(parts.hour);
+    const minute = Number(parts.minute);
+    const dayMap: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+
+    return {
+      dateStr: `${parts.year}-${parts.month}-${parts.day}`,
+      minutesOfDay: hour * 60 + minute,
+      dayOfWeek: dayMap[parts.weekday],
+    };
   }
 
   // Note : le helper de lookup groupé des affectations de shift a été retiré
