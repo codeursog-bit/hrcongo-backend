@@ -1,75 +1,29 @@
-// // 📁 src/bonus-templates/bonus-templates.service.ts
-// import { Injectable, NotFoundException } from '@nestjs/common';
-// import { PrismaService } from '../prisma/prisma.service';
-
-// export interface CreateBonusTemplateDto {
-//   name:               string;
-//   defaultAmount?:     number | null;
-//   defaultPercentage?: number | null;
-//   baseCalculation?:   string | null;
-//   isRecurring?:       boolean;
-//   isTaxable?:         boolean;
-//   isCnss?:            boolean;
-//   description?:       string | null;
-// }
-
-// export interface UpdateBonusTemplateDto extends Partial<CreateBonusTemplateDto> {
-//   isActive?: boolean;
-// }
-
-// @Injectable()
-// export class BonusTemplatesService {
-//   constructor(private prisma: PrismaService) {}
-
-//   create(companyId: string, dto: CreateBonusTemplateDto) {
-//     return this.prisma.bonusTemplate.create({
-//       data: {
-//         companyId,
-//         name:              dto.name,
-//         defaultAmount:     dto.defaultAmount     ?? null,
-//         defaultPercentage: dto.defaultPercentage ?? null,
-//         baseCalculation:   dto.baseCalculation   ?? null,
-//         isRecurring:       dto.isRecurring       ?? true,
-//         isTaxable:         dto.isTaxable         ?? true,
-//         isCnss:            dto.isCnss            ?? true,
-//         description:       dto.description       ?? null,
-//         isActive:          true,
-//       },
-//     });
-//   }
-
-//   findAll(companyId: string) {
-//     return this.prisma.bonusTemplate.findMany({
-//       where:   { companyId, isActive: true },
-//       orderBy: { createdAt: 'asc' },
-//     });
-//   }
-
-//   async findOne(id: string, companyId: string) {
-//     const t = await this.prisma.bonusTemplate.findFirst({ where: { id, companyId } });
-//     if (!t) throw new NotFoundException(`Template ${id} introuvable`);
-//     return t;
-//   }
-
-//   async update(id: string, companyId: string, dto: UpdateBonusTemplateDto) {
-//     await this.findOne(id, companyId);
-//     return this.prisma.bonusTemplate.update({ where: { id }, data: dto as any });
-//   }
-
-//   async remove(id: string, companyId: string) {
-//     await this.findOne(id, companyId);
-//     return this.prisma.bonusTemplate.update({ where: { id }, data: { isActive: false } });
-//   }
-// }
-
 // ============================================================================
 // 📁 src/bonus-templates/bonus-templates.service.ts
 // ✅ Ajout : bonusCategory + isProratized + isInLeaveBase
 // ✅ Auto-remplissage des flags selon la catégorie choisie
 // ✅ Presets conventionnels enrichis (conformes Congo)
+// ✅ FIX (update) : whitelist explicite des champs envoyés à Prisma — avant,
+//    `data: { ...dto }` recopiait TOUT le payload brut du front, y compris
+//    des champs qui n'existent pas sur le modèle BonusTemplate (ex:
+//    `calculationType`, propre à EmployeeBonus), ce qui faisait planter
+//    prisma.bonusTemplate.update() avec une erreur de validation dès que le
+//    front envoyait un de ces champs.
+// ✅ FIX (update) : propagation vers les fiches employé déjà créées à partir
+//    de ce template — avant, changer "Prorata" (ou ITS/CNSS/inclus congés/
+//    catégorie) sur le catalogue n'avait aucun effet sur les EmployeeBonus
+//    déjà attribués (isProratized etc. n'étaient copiés qu'une fois, à la
+//    création). Il fallait supprimer puis réattribuer la prime pour que le
+//    changement soit pris en compte. Désormais, une mise à jour du template
+//    resynchronise automatiquement ces flags sur toutes les fiches employé
+//    actives liées à ce bonusTemplateId. Seuls les FLAGS de config sont
+//    resynchronisés (isProratized, isTaxable, isCnss, isInLeaveBase,
+//    bonusCategory, fiscalType) — le montant et la fréquence saisis sur une
+//    fiche employé restent intouchés (personnalisation par employé
+//    préservée).
 // ============================================================================
 
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { getConventionBonusPresets } from './convention-bonus-presets';
 
@@ -364,6 +318,8 @@ export interface UpdateBonusTemplateDto extends Partial<CreateBonusTemplateDto> 
 
 @Injectable()
 export class BonusTemplatesService {
+  private readonly logger = new Logger(BonusTemplatesService.name);
+
   constructor(private prisma: PrismaService) {}
 
   // ── CREATE ─────────────────────────────────────────────────────────────────
@@ -422,6 +378,34 @@ export class BonusTemplatesService {
   async update(id: string, companyId: string, dto: UpdateBonusTemplateDto) {
     await this.findOne(id, companyId);
 
+    // ✅ FIX (crash Prisma) : whitelist explicite — on ne recopie QUE les
+    // champs qui existent réellement sur le modèle BonusTemplate. Avant,
+    // `const data: any = { ...dto }` renvoyait tel quel tout ce que le front
+    // envoyait (y compris des champs propres à EmployeeBonus, comme
+    // `calculationType`), et prisma.bonusTemplate.update() plantait avec une
+    // erreur de validation dès qu'un de ces champs traînait dans le payload.
+    const data: any = {};
+    if (dto.name !== undefined) data.name = dto.name;
+    if (dto.bonusCategory !== undefined) data.bonusCategory = dto.bonusCategory;
+    if (dto.defaultAmount !== undefined) data.defaultAmount = dto.defaultAmount;
+    if (dto.defaultPercentage !== undefined)
+      data.defaultPercentage = dto.defaultPercentage;
+    if (dto.baseCalculation !== undefined)
+      data.baseCalculation = dto.baseCalculation;
+    if (dto.isRecurring !== undefined) data.isRecurring = dto.isRecurring;
+    if (dto.isTaxable !== undefined) data.isTaxable = dto.isTaxable;
+    if (dto.isCnss !== undefined) data.isCnss = dto.isCnss;
+    if (dto.isProratized !== undefined) data.isProratized = dto.isProratized;
+    if (dto.isInLeaveBase !== undefined) data.isInLeaveBase = dto.isInLeaveBase;
+    if (dto.isNature !== undefined) data.isNature = dto.isNature;
+    if (dto.description !== undefined) data.description = dto.description;
+    if (dto.isActive !== undefined) data.isActive = dto.isActive;
+    if (dto.fiscalType !== undefined) data.fiscalType = dto.fiscalType;
+    if (dto.quantityMode !== undefined) data.quantityMode = dto.quantityMode;
+    if (dto.unitAmount !== undefined) data.unitAmount = dto.unitAmount;
+    if (dto.defaultQuantity !== undefined)
+      data.defaultQuantity = dto.defaultQuantity;
+
     // Si la catégorie change, on met à jour les flags automatiquement
     // sauf si l'utilisateur les a explicitement fournis.
     // ✅ FIX : on teste `=== undefined` (non fourni) et non la valeur en
@@ -429,7 +413,6 @@ export class BonusTemplatesService {
     // choix explicite de l'admin (ex: isTaxable: false) par les valeurs par
     // défaut de la catégorie, ce qui contredit le principe "l'admin reste
     // seul responsable, aucun écrasement silencieux".
-    const data: any = { ...dto };
     if (
       dto.bonusCategory &&
       dto.isTaxable === undefined &&
@@ -442,7 +425,46 @@ export class BonusTemplatesService {
       data.isInLeaveBase = defaults.isInLeaveBase;
     }
 
-    return this.prisma.bonusTemplate.update({ where: { id }, data });
+    const updated = await this.prisma.bonusTemplate.update({
+      where: { id },
+      data,
+    });
+
+    // ✅ FIX (propagation) : resynchronise les fiches employé déjà créées à
+    // partir de ce template. Avant, cocher/décocher "Prorata" (ou changer
+    // ITS/CNSS, inclusion congés, catégorie) sur le catalogue ne changeait
+    // rien aux EmployeeBonus déjà attribués — ces flags n'étaient copiés
+    // qu'une seule fois, au moment de la création de la fiche
+    // (employee-bonuses.service.ts → create()). Il fallait supprimer puis
+    // réattribuer la prime pour que ça prenne effet.
+    //
+    // Seuls les FLAGS DE CONFIG sont propagés ici — jamais le montant ni la
+    // fréquence : un montant personnalisé saisi sur une fiche employé reste
+    // intouché, seul son comportement de calcul (prorata, fiscalité...)
+    // suit le catalogue.
+    const cascade: any = {};
+    if (data.isProratized !== undefined) cascade.isProratized = data.isProratized;
+    if (data.isTaxable !== undefined) cascade.isTaxable = data.isTaxable;
+    if (data.isCnss !== undefined) cascade.isCnss = data.isCnss;
+    if (data.isInLeaveBase !== undefined)
+      cascade.isInLeaveBase = data.isInLeaveBase;
+    if (data.bonusCategory !== undefined)
+      cascade.bonusCategory = data.bonusCategory;
+    if (data.fiscalType !== undefined) cascade.fiscalType = data.fiscalType;
+
+    if (Object.keys(cascade).length > 0) {
+      const { count } = await this.prisma.employeeBonus.updateMany({
+        where: { bonusTemplateId: id, isActive: true },
+        data: cascade,
+      });
+      if (count > 0) {
+        this.logger.log(
+          `🔄 Template "${updated.name}" modifié (${Object.keys(cascade).join(', ')}) → ${count} fiche(s) employé resynchronisée(s)`,
+        );
+      }
+    }
+
+    return updated;
   }
 
   // ── REMOVE (soft delete) ───────────────────────────────────────────────────
