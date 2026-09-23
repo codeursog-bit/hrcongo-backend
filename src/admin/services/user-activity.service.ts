@@ -154,6 +154,71 @@ export class AdminUserActivityService {
     };
   }
 
+  /**
+   * Diagnostic complet push — TOUS les utilisateurs actifs, activés ou non,
+   * avec le détail de leurs appareils. Objectif : que le super admin puisse
+   * voir en un coup d'œil qui a activé, qui n'a jamais activé, et qui a
+   * activé mais a un abonnement cassé (aucun appareil valide) — sans avoir
+   * à checker manuellement chaque compte.
+   */
+  async getPushDiagnostics() {
+    const vapidConfigured = !!(
+      process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY
+    );
+
+    const users = await this.prisma.user.findMany({
+      where: { isActive: true },
+      select: {
+        id: true,
+        firstName: true,
+        lastName: true,
+        email: true,
+        role: true,
+        pushNotifEnabled: true,
+        lastActiveAt: true,
+        company: { select: { legalName: true, tradeName: true } },
+        pushSubscriptions: {
+          select: { id: true, deviceLabel: true, createdAt: true, lastUsedAt: true },
+          orderBy: { lastUsedAt: 'desc' },
+        },
+      },
+      orderBy: [{ pushNotifEnabled: 'desc' }, { lastActiveAt: 'desc' }],
+    });
+
+    const rows = users.map((u) => {
+      const deviceCount = u.pushSubscriptions.length;
+      const status: 'active' | 'enabled_no_device' | 'disabled' =
+        !u.pushNotifEnabled ? 'disabled' : deviceCount > 0 ? 'active' : 'enabled_no_device';
+
+      return {
+        id: u.id,
+        name: `${u.firstName} ${u.lastName}`,
+        email: u.email,
+        role: u.role,
+        companyName: u.company?.tradeName || u.company?.legalName || null,
+        pushNotifEnabled: u.pushNotifEnabled,
+        lastActiveAt: u.lastActiveAt,
+        deviceCount,
+        devices: u.pushSubscriptions.map((s) => ({
+          id: s.id,
+          label: s.deviceLabel,
+          createdAt: s.createdAt,
+          lastUsedAt: s.lastUsedAt,
+        })),
+        status,
+      };
+    });
+
+    return {
+      vapidConfigured,
+      totalUsers: rows.length,
+      activeCount: rows.filter((r) => r.status === 'active').length,
+      brokenCount: rows.filter((r) => r.status === 'enabled_no_device').length,
+      disabledCount: rows.filter((r) => r.status === 'disabled').length,
+      users: rows,
+    };
+  }
+
   private periodRange(period: 'today' | 'week' | 'month') {
     const now = new Date();
     const fmt = (d: Date) =>

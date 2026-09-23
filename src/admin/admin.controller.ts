@@ -82,6 +82,16 @@ export class AdminController {
     return this.userActivityService.getMostActive(period ?? 'week');
   }
 
+  @Get('users/push-status')
+  async getUsersPushStatus() {
+    return this.userActivityService.getPushStatus();
+  }
+
+  @Get('users/push-diagnostics')
+  async getUsersPushDiagnostics() {
+    return this.userActivityService.getPushDiagnostics();
+  }
+
   // ==========================================================================
   // 🏢 SECTION COMPANIES
   // ==========================================================================

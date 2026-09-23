@@ -106,4 +106,10 @@ export class PortfolioAbsenceRequestsService {
     await this.membership.assertCompanyMembership(userId, companyId);
     return this.absenceRequestsService.cancel(id, userId, reason, companyId);
   }
+
+  async remove(userId: string, id: string) {
+    const companyId = await this.getRequestCompanyId(id);
+    await this.membership.assertCompanyMembership(userId, companyId);
+    return this.absenceRequestsService.remove(id, userId, companyId);
+  }
 }

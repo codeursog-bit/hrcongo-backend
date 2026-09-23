@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   Param,
   Patch,
@@ -62,6 +63,11 @@ export class PortfolioAbsencesController {
     @Body('reason') reason?: string,
   ) {
     return this.requests.cancel(userId, id, reason);
+  }
+
+  @Delete('requests/:id')
+  remove(@GetUser('id') userId: string, @Param('id') id: string) {
+    return this.requests.remove(userId, id);
   }
 
   // ==================== Tableaux de bord (une entreprise à la fois) ====================

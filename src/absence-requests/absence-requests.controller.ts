@@ -3,7 +3,7 @@
 // ============================================================================
 
 import {
-  Controller, Get, Post, Patch,
+  Controller, Get, Post, Patch, Delete,
   Body, Param, Query, Request, Res, UseGuards,
 } from '@nestjs/common';
 import type { Response } from 'express';
@@ -110,6 +110,14 @@ export class AbsenceRequestsController {
   @Patch(':id/cancel')
   cancel(@Param('id') id: string, @Body('reason') reason: string, @Request() req) {
     return this.absenceRequestsService.cancel(id, req.user.userId, reason);
+  }
+
+  /** Supprimer définitivement une demande — réservé RH/Admin. */
+  @Delete(':id')
+  @UseGuards(RolesGuard)
+  @Roles('ADMIN', 'HR_MANAGER', 'SUPER_ADMIN')
+  remove(@Param('id') id: string, @Request() req) {
+    return this.absenceRequestsService.remove(id, req.user.userId);
   }
 
   /**

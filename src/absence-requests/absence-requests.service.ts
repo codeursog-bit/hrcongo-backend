@@ -422,6 +422,23 @@ private async getUserWithCompany(userId: string, overrideCompanyId?: string): Pr
   }
 
   /**
+   * Supprime définitivement une demande (contrairement à cancel(), qui ne
+   * fait que passer le statut à CANCELLED). Utilisé par la page de gestion
+   * pour nettoyer une demande créée par erreur — tous statuts confondus,
+   * même logique d'accès que cancel()/updateStatus().
+   */
+  async remove(id: string, userId: string, overrideCompanyId?: string) {
+    const user = await this.getUserWithCompany(userId, overrideCompanyId);
+    const absenceRequest = await this.prisma.absenceRequest.findUnique({ where: { id } });
+
+    if (!absenceRequest) throw new NotFoundException('Demande introuvable');
+    if (absenceRequest.companyId !== user.companyId) throw new ForbiddenException('Accès refusé');
+
+    await this.prisma.absenceRequest.delete({ where: { id } });
+    return { success: true };
+  }
+
+  /**
    * Données entièrement résolues pour le rendu du document imprimable
    * (modèle générique ou modèle client type Orca).
    */
