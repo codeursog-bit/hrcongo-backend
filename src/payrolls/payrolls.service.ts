@@ -1228,6 +1228,14 @@ export class PayrollsService {
     companyId: string,
     month: number,
     year: number,
+    // ✅ CORRECTIF (bug confirmé) : quand l'admin saisit les jours travaillés
+    // à la main (ex : oubli de pointage, employé qui se souvient de ses
+    // jours a posteriori), cette fonction rejetait quand même le bulletin
+    // avec "Aucun jour travaillé" car elle ne regardait QUE le pointage en
+    // BDD, sans jamais recevoir la saisie manuelle du front. La saisie
+    // manuelle prime désormais sur le pointage — comme déjà le cas côté
+    // paie en masse / bulletin manuel (resolveDaysToPay).
+    workedDaysOverride?: number | null,
   ) {
     await this.attendanceSummary.generateAndStoreAllMonthlySummaries(
       companyId,
@@ -1240,14 +1248,25 @@ export class PayrollsService {
       year,
       [employeeId],
     );
-    if (summaries.length === 0)
+    const summary = summaries.length > 0 ? summaries[0] : null;
+
+    if (workedDaysOverride != null) {
+      const days = Math.max(0, Number(workedDaysOverride));
+      return {
+        shouldPay: days > 0,
+        daysToPay: days,
+        summary,
+        reason: days > 0 ? undefined : `Aucun jour travaillé (saisi manuellement)`,
+      };
+    }
+
+    if (!summary)
       return {
         shouldPay: false,
         daysToPay: 0,
         summary: null,
         reason: 'Aucun pointage enregistré pour ce mois',
       };
-    const summary = summaries[0];
     if (summary.daysToPay <= 0)
       return {
         shouldPay: false,
@@ -1477,6 +1496,8 @@ export class PayrollsService {
         effectiveCompanyId,
         monthNum,
         year,
+        // ✅ jours saisis à la main par l'admin (voir shouldEmployeeBePaid)
+        workedDays,
       );
     if (!shouldPay)
       throw new Error(`❌ Impossible de créer le bulletin : ${reason}`);
@@ -1489,11 +1510,11 @@ export class PayrollsService {
     const eff10 =
       overtime10 != null
         ? Number(overtime10)
-        : Number((summary as any).overtime10Hours ?? 0);
+        : Number((summary as any)?.overtime10Hours ?? 0);
     const eff25 =
       overtime25 != null
         ? Number(overtime25)
-        : Number((summary as any).overtime25Hours ?? 0);
+        : Number((summary as any)?.overtime25Hours ?? 0);
     const eff50 =
       overtime50 != null
         ? Number(overtime50)
@@ -1501,7 +1522,7 @@ export class PayrollsService {
     const eff100 =
       overtime100 != null
         ? Number(overtime100)
-        : Number((summary as any).overtime100Hours ?? 0);
+        : Number((summary as any)?.overtime100Hours ?? 0);
 
     const seniorityMode = (company as any).seniorityMode ?? 'AUTO';
     const calculatedBonuses =
