@@ -1149,6 +1149,9 @@ import { LoansService } from '../loans/loans.service';
 import { AttendanceSummaryService } from '../attendance/attendance-summary.service';
 import { PayrollSettingsService } from '../payroll/settings/settings.service';
 import { YtdCheckpointService } from './services/ytd-checkpoint.service';
+// ✅ Réutilise la même classification ITS/BNC10/BNC20 que les rapports —
+// jamais recalculée différemment d'un endroit à l'autre.
+import { classifyFiscalCategory } from '../reports/payroll-recap.service';
 
 import { CreatePayrollDto } from './dto/create-payroll.dto';
 import { UpdatePayrollDto } from './dto/update-payroll.dto';
@@ -1373,17 +1376,14 @@ export class PayrollsService {
 
     // ✅ FIX BUG 6: CABINET_ADMIN n'a pas de companyId sur son User
     // Il fournit le companyId directement dans le DTO (front l'envoie déjà)
-    // 🆕 Admin multi-entreprises : override UNIQUEMENT si companyId est
-    // fourni dans le DTO (appel venant du portefeuille) — sinon on retombe
-    // sur son entreprise active (user.companyId), comme n'importe quel
-    // admin normal. Sans ce `&&`, un admin multi-entreprises utilisant la
-    // page paie normale (qui n'envoie pas companyId) perdait son entreprise.
+    // 🆕 Même principe étendu à l'admin multi-entreprises (manageMultipleCompanies) —
+    // l'appartenance à ce companyId est vérifiée en amont par PortfolioPayrollService.
     const isCabinet =
       user?.role === 'CABINET_ADMIN' || user?.role === 'CABINET_GESTIONNAIRE';
-    const dtoCompanyId = (createPayrollDto as any).companyId;
-    const effectiveCompanyId = isCabinet
-      ? dtoCompanyId
-      : (user?.manageMultipleCompanies && dtoCompanyId) || user?.companyId;
+    const canOverride = isCabinet || user?.manageMultipleCompanies;
+    const effectiveCompanyId = canOverride
+      ? (createPayrollDto as any).companyId
+      : user?.companyId;
 
     if (!effectiveCompanyId) throw new CompanyNotFoundException();
 
@@ -1796,6 +1796,8 @@ export class PayrollsService {
     customWorkDays?: number,
     onProgress?: (detail: any) => void,
     overrideCompanyId?: string,
+    // ✅ Jours travaillés ajustés à la main par employé { employeeId: jours },
+    // saisis avant le lancement de la paie en masse.
     daysOverrides?: Record<string, number>,
   ) {
     return this.generator.generate(
@@ -3245,7 +3247,13 @@ export class PayrollsService {
       where: { companyId: user.companyId, month, year },
       include: {
         employee: {
-          select: { employeeNumber: true, firstName: true, lastName: true },
+          select: {
+            employeeNumber: true,
+            firstName: true,
+            lastName: true,
+            contractType: true,
+            isResident: true,
+          },
         },
       },
     });
@@ -3277,21 +3285,49 @@ export class PayrollsService {
           date: p.periodEnd,
           journal: 'PAIE',
           piece,
-          account: '447200',
-          label: `ITS/IRPP retenu - ${name}`,
-          debit: 0,
-          credit: Number(p.its),
-        },
-        {
-          date: p.periodEnd,
-          journal: 'PAIE',
-          piece,
           account: '422100',
           label: `Rémunération due - ${name}`,
           debit: 0,
           credit: Number(p.netSalary),
         },
       );
+
+      // ── ✅ ITS ou BNC — jamais le même compte, jamais le même libellé.
+      // p.its contient soit un vrai ITS (CDI/CDD), soit une retenue BNC
+      // 10%/20% (prestataires) selon payroll-calculator.service.ts — on
+      // reclasse ici pour ne jamais les confondre dans le journal.
+      const fiscalCategory = classifyFiscalCategory(
+        (p.employee as any).contractType,
+        (p.employee as any).isResident,
+      );
+      const itsOrBncAmount = Number(p.its);
+      if (itsOrBncAmount > 0) {
+        if (fiscalCategory === 'BNC_10' || fiscalCategory === 'BNC_20') {
+          const rate = fiscalCategory === 'BNC_10' ? '10%' : '20%';
+          entries.push({
+            date: p.periodEnd,
+            journal: 'PAIE',
+            piece,
+            // ⚠️ Compte distinct de l'ITS (447200) — à faire confirmer par
+            // votre comptable si vous avez déjà un compte BNC dédié dans
+            // votre plan comptable, sinon ce sous-compte convient.
+            account: '447450',
+            label: `Retenue BNC ${rate} (prestataire) - ${name}`,
+            debit: 0,
+            credit: itsOrBncAmount,
+          });
+        } else {
+          entries.push({
+            date: p.periodEnd,
+            journal: 'PAIE',
+            piece,
+            account: '447200',
+            label: `ITS/IRPP retenu - ${name}`,
+            debit: 0,
+            credit: itsOrBncAmount,
+          });
+        }
+      }
       // ── Écriture 2 : Charges patronales (OHADA 664 & 641 & 431) ────────
       if (Number(p.cnssEmployer) > 0) {
         entries.push(
@@ -3333,7 +3369,10 @@ export class PayrollsService {
             date: p.periodEnd,
             journal: 'PAIE',
             piece,
-            account: '447200',
+            // ⚠️ Distinct de 447200 (ITS) — les deux étaient confondus sur
+            // le même compte avant, ce qui rendait le TUS-DGI impossible à
+            // isoler de l'ITS dans la balance.
+            account: '447500',
             label: `TUS-DGI à reverser - ${name}`,
             debit: 0,
             credit: tusDgi,
@@ -3342,7 +3381,10 @@ export class PayrollsService {
             date: p.periodEnd,
             journal: 'PAIE',
             piece,
-            account: '431300',
+            // ⚠️ Distinct de 431300 (CNSS employeur) — même souci que
+            // ci-dessus, les deux passifs étaient mélangés sur un seul
+            // compte.
+            account: '431400',
             label: `TUS-CNSS à reverser - ${name}`,
             debit: 0,
             credit: tusCnss,
@@ -3359,6 +3401,9 @@ export class PayrollsService {
   async getDeclarationsSummary(companyId: string, month: number, year: number) {
     const payrolls = await this.prisma.payroll.findMany({
       where: { companyId, month, year, status: { not: 'CANCELLED' } },
+      include: {
+        employee: { select: { contractType: true, isResident: true } },
+      },
     });
 
     if (payrolls.length === 0) return null;
@@ -3375,7 +3420,22 @@ export class PayrollsService {
     const tusDgiAmount = sum('tusDgiAmount');
     const tusCnssAmount = sum('tusCnssAmount');
     const tusTotal = sum('tusTotal');
-    const totalIts = sum('its');
+    const totalIts = sum('its'); // ⚠️ mélange ITS + BNC — gardé pour compat, voir ventilation ci-dessous
+
+    // ✅ Ventilation réelle ITS / BNC 10% / BNC 20% — ne jamais lire
+    // totalIts seul pour représenter "l'ITS" si des prestataires existent.
+    let totalItsReel = 0;
+    let totalBnc10 = 0;
+    let totalBnc20 = 0;
+    for (const p of payrolls) {
+      const emp = (p as any).employee;
+      const amount = Number((p as any).its ?? 0);
+      if (!emp) { totalItsReel += amount; continue; }
+      const category = classifyFiscalCategory(emp.contractType, emp.isResident);
+      if (category === 'BNC_10') totalBnc10 += amount;
+      else if (category === 'BNC_20') totalBnc20 += amount;
+      else totalItsReel += amount;
+    }
 
     // Agréger les taxes custom (stockées en JSON dans customTaxDetails)
     const customMap: Record<
@@ -3426,6 +3486,9 @@ export class PayrollsService {
       tusCnssAmount,
       tusTotal,
       totalIts,
+      totalItsReel,
+      totalBnc10,
+      totalBnc20,
       customTaxDetails: Object.values(customMap),
       totalSalarialDeductions,
       totalEmployerCharges,
