@@ -1376,14 +1376,23 @@ export class PayrollsService {
 
     // ✅ FIX BUG 6: CABINET_ADMIN n'a pas de companyId sur son User
     // Il fournit le companyId directement dans le DTO (front l'envoie déjà)
-    // 🆕 Même principe étendu à l'admin multi-entreprises (manageMultipleCompanies) —
-    // l'appartenance à ce companyId est vérifiée en amont par PortfolioPayrollService.
+    // ✅ CORRECTIF (bug confirmé) : l'admin multi-entreprises (manageMultipleCompanies)
+    // a bien un user.companyId valide (son entreprise "active"). L'ancienne
+    // condition (`canOverride ? dto.companyId : user.companyId`) l'ignorait
+    // dès que canOverride était vrai, MÊME quand le DTO n'envoyait aucun
+    // companyId (cas de la paie individuelle classique, qui n'a jamais
+    // connu la notion de portefeuille) → effectiveCompanyId devenait
+    // undefined → "Entreprise introuvable ou accès refusé". Le DTO ne
+    // prime désormais que s'il fournit réellement un companyId (appel venant
+    // du portefeuille) ; sinon on retombe sur user.companyId, comme
+    // n'importe quel admin. Un vrai CABINET_ADMIN (user.companyId toujours
+    // null) garde le même comportement qu'avant.
     const isCabinet =
       user?.role === 'CABINET_ADMIN' || user?.role === 'CABINET_GESTIONNAIRE';
     const canOverride = isCabinet || user?.manageMultipleCompanies;
-    const effectiveCompanyId = canOverride
-      ? (createPayrollDto as any).companyId
-      : user?.companyId;
+    const dtoCompanyId = (createPayrollDto as any).companyId;
+    const effectiveCompanyId =
+      (canOverride && dtoCompanyId) || user?.companyId;
 
     if (!effectiveCompanyId) throw new CompanyNotFoundException();
 
