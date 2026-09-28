@@ -633,13 +633,93 @@
 // ✅ Export PDF déclarations CNSS + TUS + ITS
 // ============================================================================
 
-import { Injectable } from '@nestjs/common';
+import { Injectable, ForbiddenException } from '@nestjs/common';
 import * as ExcelJS from 'exceljs';
 import { PrismaService } from '../prisma/prisma.service';
 
 @Injectable()
 export class ExportService {
   constructor(private prisma: PrismaService) {}
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // 🔒 CORRECTIF SÉCURITÉ (audit) — companyId(s) réellement autorisés pour
+  // l'utilisateur appelant, à ne JAMAIS remplacer par un companyId envoyé
+  // tel quel par le client. Réutilise les mêmes relations que
+  // switchCompany (userCompany) et CabinetCompanyIsolationGuard
+  // (cabinetUser → cabinetCompany actif).
+  //   - Utilisateur "simple" (une seule entreprise) → uniquement la sienne.
+  //   - CABINET_ADMIN/CABINET_GESTIONNAIRE → toutes les entreprises liées
+  //     activement à un cabinet dont il est membre.
+  //   - manageMultipleCompanies (portefeuille) → toutes les entreprises
+  //     liées via userCompany.
+  //   - SUPER_ADMIN → pas de restriction (undefined = aucun filtre).
+  // À terme, à remplacer par la fonction centrale prévue pour
+  // employees/leaves une fois définie, pour éviter la duplication.
+  // ═══════════════════════════════════════════════════════════════════════
+  private async getAllowedCompanyIds(
+    requestingUserId: string,
+  ): Promise<string[] | undefined> {
+    const requester = await this.prisma.user.findUnique({
+      where: { id: requestingUserId },
+      select: { id: true, companyId: true, role: true, manageMultipleCompanies: true },
+    });
+    if (!requester) throw new ForbiddenException('Utilisateur introuvable.');
+    if (requester.role === 'SUPER_ADMIN') return undefined; // aucun filtre
+
+    const ids = new Set<string>();
+    if (requester.companyId) ids.add(requester.companyId);
+
+    if (requester.role === 'CABINET_ADMIN' || requester.role === 'CABINET_GESTIONNAIRE') {
+      const memberships = await this.prisma.cabinetUser.findMany({
+        where: { userId: requester.id },
+        select: { cabinetId: true },
+      });
+      if (memberships.length > 0) {
+        const links = await this.prisma.cabinetCompany.findMany({
+          where: {
+            cabinetId: { in: memberships.map((m) => m.cabinetId) },
+            isActive: true,
+          },
+          select: { companyId: true },
+        });
+        links.forEach((l) => ids.add(l.companyId));
+      }
+    }
+
+    if (requester.manageMultipleCompanies) {
+      const links = await this.prisma.userCompany.findMany({
+        where: { userId: requester.id },
+        select: { companyId: true },
+      });
+      links.forEach((l) => ids.add(l.companyId));
+    }
+
+    if (ids.size === 0) {
+      throw new ForbiddenException("Vous n'avez accès à aucune entreprise.");
+    }
+    return Array.from(ids);
+  }
+
+  // 🔒 Vérifie qu'un companyId demandé par le client fait bien partie des
+  // entreprises autorisées ; sinon rejette. `undefined` en retour de
+  // getAllowedCompanyIds signifie "pas de filtre" (SUPER_ADMIN).
+  private async assertCompanyAccess(
+    requestingUserId: string,
+    requestedCompanyId: string | undefined,
+  ): Promise<string> {
+    const allowed = await this.getAllowedCompanyIds(requestingUserId);
+    if (allowed === undefined) {
+      if (!requestedCompanyId) {
+        throw new ForbiddenException('companyId manquant.');
+      }
+      return requestedCompanyId;
+    }
+    if (!requestedCompanyId) return allowed[0];
+    if (!allowed.includes(requestedCompanyId)) {
+      throw new ForbiddenException("Vous n'avez pas accès à cette entreprise.");
+    }
+    return requestedCompanyId;
+  }
 
   // ═══════════════════════════════════════════════════════════════════════
   // EXCEL STANDARD — Feuille de paie complète
@@ -1399,8 +1479,14 @@ export class ExportService {
   // ═══════════════════════════════════════════════════════════════════════
   async exportToSageByIds(
     payrollIds: string[],
-    companyId: string,
+    requestedCompanyId: string | undefined,
+    requestingUserId: string,
   ): Promise<string> {
+    const companyId = await this.assertCompanyAccess(
+      requestingUserId,
+      requestedCompanyId,
+    );
+
     const payrolls = await this.prisma.payroll.findMany({
       where: { id: { in: payrollIds }, companyId },
       include: {
@@ -1460,9 +1546,17 @@ export class ExportService {
   // Export PDF groupé de bulletins (batch-pdf → XLSX)
   // Génère un XLSX récapitulatif avec les données de chaque bulletin
   // ═══════════════════════════════════════════════════════════════════════
-  async exportBatchPdf(payrollIds: string[]): Promise<Buffer> {
+  async exportBatchPdf(
+    payrollIds: string[],
+    requestingUserId: string,
+  ): Promise<Buffer> {
+    const allowedCompanyIds = await this.getAllowedCompanyIds(requestingUserId);
+
     const payrolls = await this.prisma.payroll.findMany({
-      where: { id: { in: payrollIds } },
+      where: {
+        id: { in: payrollIds },
+        ...(allowedCompanyIds ? { companyId: { in: allowedCompanyIds } } : {}),
+      },
       include: {
         employee: {
           select: {
@@ -1523,10 +1617,16 @@ export class ExportService {
   // Export PDF déclarations CNSS + TUS + ITS (→ XLSX multi-feuilles)
   // ═══════════════════════════════════════════════════════════════════════
   async exportDeclarationsPdf(
-    companyId: string,
+    requestedCompanyId: string | undefined,
     month: number,
     year: number,
+    requestingUserId: string,
   ): Promise<Buffer> {
+    const companyId = await this.assertCompanyAccess(
+      requestingUserId,
+      requestedCompanyId,
+    );
+
     const payrolls = await this.prisma.payroll.findMany({
       where: { companyId, month, year, status: { not: 'CANCELLED' } },
       include: {

@@ -1,13 +1,28 @@
 // src/subscriptions/webhooks.controller.ts
 // ============================================================================
-// AJOUT : handler disbursement.completed
-// Tout le reste (intent.succeeded, intent.failed) est INCHANGÉ.
-// ============================================================================
-// Events gérés :
-//   intent.succeeded       → paiement cabinet ou entreprise réussi
-//   intent.failed          → paiement échoué
-//   disbursement.completed → versement affilié confirmé par Yabetoo
-//                            → commissions PME + Cabinet → PAID
+// 🔒 CORRECTIF SÉCURITÉ (audit) — deux failles corrigées :
+//
+// 1. SIGNATURE CONTOURNABLE : avant, `if (this.webhookSecret && signature)`
+//    sautait complètement la vérification si le header était juste absent
+//    — un attaquant n'avait qu'à ne PAS envoyer x-yabetoo-signature. La
+//    signature est désormais OBLIGATOIRE : header absent, secret non
+//    configuré, ou signature invalide → rejet (400) dans tous les cas.
+//
+// 2. CONFIANCE AVEUGLE AU PAYLOAD : avant, `activatePaymentByWebhook` et
+//    `handleWebhookSuccess` marquaient le paiement SUCCEEDED directement
+//    depuis `charge.status` du payload, sans jamais revérifier auprès de
+//    Yabetoo. Pire, si l'intentId ne matchait aucun paiement, un fallback
+//    cherchait un paiement PENDING par MONTANT + DEVISE — donc un
+//    attaquant pouvait créer un checkout à bas prix (PENDING) puis envoyer
+//    un webhook forgé avec juste le bon montant pour l'activer gratuitement
+//    (et déclencher une vraie commission affilié en argent réel).
+//
+//    Le webhook ne sert plus QUE de déclencheur : `intentId`/`disbursementId`
+//    servent uniquement à savoir LEQUEL paiement re-vérifier. Le statut réel
+//    est toujours redemandé server-to-server à Yabetoo (authentifié avec
+//    notre propre clé secrète), exactement le même principe que
+//    checkAndActivateChariowSale / checkAndActivateMotekiOrder déjà en place
+//    pour les 2 autres prestataires. Plus AUCUN fallback par montant.
 // ============================================================================
 
 import {
@@ -27,6 +42,7 @@ import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
 import { SubscriptionsService } from './subscriptions.service';
 import { CabinetSubscriptionService } from '../cabinet/services/cabinet-subscription.service';
+import { YabetooPayService } from '../payments/yabetoopay.service';
 
 @Controller('webhooks/yabetoopay')
 export class WebhooksController {
@@ -37,13 +53,18 @@ export class WebhooksController {
     private readonly prisma: PrismaService,
     private readonly subscriptionsService: SubscriptionsService,
     private readonly cabinetSubscriptionService: CabinetSubscriptionService,
+    private readonly yabetooPayService: YabetooPayService,
     private readonly configService: ConfigService,
   ) {
     this.webhookSecret =
       this.configService.get<string>('YABETOOPAY_WEBHOOK_SECRET') ?? '';
     if (!this.webhookSecret) {
-      this.logger.warn(
-        '⚠️  YABETOOPAY_WEBHOOK_SECRET non défini — vérification signature désactivée',
+      // ⚠️ Ce n'est plus un simple avertissement dégradé : sans secret
+      // configuré, TOUS les webhooks seront désormais rejetés (voir
+      // handleWebhook ci-dessous) — voulu, pour ne jamais traiter un
+      // webhook qu'on ne peut pas authentifier.
+      this.logger.error(
+        '🚨 YABETOOPAY_WEBHOOK_SECRET non défini — TOUS les webhooks entrants seront rejetés jusqu\'à configuration.',
       );
     }
   }
@@ -60,45 +81,41 @@ export class WebhooksController {
     @Body() payload: any,
   ) {
     this.logger.log('🔔 Webhook YaBetooPay reçu');
-    this.logger.log(`📦 Payload: ${JSON.stringify(payload, null, 2)}`);
 
-    // ── Vérification signature ───────────────────────────────────────────
-    if (this.webhookSecret && signature) {
-      const valid = this._verifySignature(request.rawBody, signature);
-      if (!valid) {
-        this.logger.error('❌ Signature invalide — webhook rejeté');
-        throw new BadRequestException('Invalid signature');
-      }
-      this.logger.log('✅ Signature vérifiée');
+    // ── Vérification signature — OBLIGATOIRE, plus jamais optionnelle ──────
+    if (!this.webhookSecret) {
+      this.logger.error('❌ Webhook rejeté — YABETOOPAY_WEBHOOK_SECRET non configuré');
+      throw new BadRequestException('Webhook non configuré côté serveur');
     }
+    if (!signature) {
+      this.logger.error('❌ Webhook rejeté — header x-yabetoo-signature absent');
+      throw new BadRequestException('Signature manquante');
+    }
+    if (!this._verifySignature(request.rawBody, signature)) {
+      this.logger.error('❌ Webhook rejeté — signature invalide');
+      throw new BadRequestException('Invalid signature');
+    }
+    this.logger.log('✅ Signature vérifiée');
 
     const eventType = payload.type;
-    this.logger.log(`📋 Event: ${eventType}`);
+    this.logger.log(`📋 Event: ${eventType} (utilisé uniquement comme déclencheur — voir note en tête de fichier)`);
 
     try {
       switch (eventType) {
-        // ── Paiements entrants — INCHANGÉS ──────────────────────────────
-        case 'intent.succeeded': {
-          const charge = payload.data?.charge;
-          const intentId = charge?.intentId;
-          if (charge?.status === 'succeeded' && intentId) {
-            await this._routeSucceededPayment(charge, intentId);
-          }
-          break;
-        }
-
+        // ── Paiements entrants — succeeded ET failed traités PAREIL : le
+        // payload ne sert qu'à identifier le paiement, jamais son statut.
+        case 'intent.succeeded':
         case 'intent.failed': {
-          const charge = payload.data?.charge;
-          const intentId = charge?.intentId;
-          if (intentId) await this._routeFailedPayment(intentId);
+          const intentId = payload.data?.charge?.intentId;
+          if (!intentId) {
+            this.logger.warn(`⚠️ ${eventType} sans intentId exploitable — ignoré`);
+            break;
+          }
+          await this._reverifyIntentPayment(intentId);
           break;
         }
 
-        // ── Disbursement affilié — NOUVEAU ──────────────────────────────
-        // Yabetoo envoie l'objet disbursement directement dans le payload
-        // (ou dans payload.data selon la version). On tente les deux.
-        // L'objet disbursement contient : id, status ("succeeded" ou "failed"),
-        // financialTransactionId, firstName, lastName, phone, etc.
+        // ── Disbursement affilié — re-vérifié via l'API, jamais depuis le payload
         case 'disbursement.completed': {
           const disbursement = payload.data ?? payload;
           const disbursementId = disbursement?.id;
@@ -108,10 +125,7 @@ export class WebhooksController {
             break;
           }
 
-          this.logger.log(
-            `💸 disbursement.completed — id: ${disbursementId} — status: ${disbursement.status}`,
-          );
-          await this._handleDisbursementCompleted(disbursementId, disbursement);
+          await this._reverifyDisbursement(disbursementId);
           break;
         }
 
@@ -119,7 +133,9 @@ export class WebhooksController {
           this.logger.warn(`⚠️  Event non géré: ${eventType}`);
       }
     } catch (err: any) {
-      // Toujours retourner 200 — évite les re-envois en boucle Yabetoo
+      // Toujours retourner 200 après ce point — évite les re-envois en
+      // boucle Yabetoo. Le rejet pour signature invalide/absente, lui,
+      // reste un vrai code d'erreur (voir plus haut, avant le try).
       this.logger.error(
         `❌ Erreur traitement webhook [${eventType}]: ${err.message}`,
       );
@@ -129,11 +145,50 @@ export class WebhooksController {
   }
 
   // ==========================================================================
-  // disbursement.completed — NOUVEAU
+  // 🔒 RE-VÉRIFICATION SERVEUR-À-SERVEUR D'UN PAIEMENT (intent.succeeded/failed)
+  // ==========================================================================
+  // intentId ne sert qu'à retrouver LEQUEL paiement re-vérifier — jamais son
+  // statut, qui vient toujours de GET /payment-intents/{id} via notre clé.
+  // Aucun fallback par montant : si l'intentId ne matche rien, on ignore.
   // ==========================================================================
 
-  private async _handleDisbursementCompleted(disbursementId: string, raw: any) {
-    // Retrouver la demande de retrait liée à ce disbursementId
+  private async _reverifyIntentPayment(intentId: string) {
+    const cabinetPayment = await this.prisma.cabinetPayment.findFirst({
+      where: { yabetopayIntentId: intentId },
+    });
+
+    if (cabinetPayment) {
+      this.logger.log(`🏛️  CABINET — paiement ${cabinetPayment.id} (intentId: ${intentId})`);
+      const result = await this.cabinetSubscriptionService.checkAndActivateCabinetPayment(
+        cabinetPayment.id,
+      );
+      this.logger.log(`🏛️  Résultat re-vérification: ${result.status}`);
+      return;
+    }
+
+    const enterprisePayment = await this.prisma.payment.findFirst({
+      where: { yabetooIntentId: intentId },
+    });
+
+    if (enterprisePayment) {
+      this.logger.log(`🏢 ENTREPRISE — paiement ${enterprisePayment.id} (intentId: ${intentId})`);
+      const result = await this.subscriptionsService.checkAndActivateYabetooPayment(
+        enterprisePayment.id,
+      );
+      this.logger.log(`🏢 Résultat re-vérification: ${result.status}`);
+      return;
+    }
+
+    // ⚠️ Plus AUCUN fallback par montant ici — voir note en tête de fichier.
+    // Si l'intentId ne matche rien, on n'active RIEN, on log et on s'arrête.
+    this.logger.error(`❌ Aucun paiement trouvé pour intentId: ${intentId} — ignoré (aucune action)`);
+  }
+
+  // ==========================================================================
+  // 🔒 RE-VÉRIFICATION SERVEUR-À-SERVEUR D'UN DISBURSEMENT
+  // ==========================================================================
+
+  private async _reverifyDisbursement(disbursementId: string) {
     const withdrawalRequest = await (
       this.prisma as any
     ).affiliateWithdrawalRequest.findFirst({
@@ -147,154 +202,59 @@ export class WebhooksController {
       return;
     }
 
-    // Idempotence
     if (withdrawalRequest.status === 'PAID') {
-      this.logger.log(
-        `ℹ️  Déjà PAID — idempotence OK (disbursementId: ${disbursementId})`,
-      );
+      this.logger.log(`ℹ️  Déjà PAID — idempotence OK (disbursementId: ${disbursementId})`);
       return;
     }
 
+    // 🔒 On redemande le statut réel à Yabetoo plutôt que de faire confiance
+    // au payload webhook.
+    const realStatus = await this.yabetooPayService.getDisbursement(disbursementId);
+
     const affiliateId = withdrawalRequest.affiliateId;
     const now = new Date();
-    const yabetooStatus = raw?.status ?? 'succeeded'; // "succeeded" ou "failed"
 
-    if (yabetooStatus === 'succeeded') {
-      // Transaction atomique : toutes les commissions PENDING → PAID
+    if (realStatus.status === 'succeeded') {
       await this.prisma.$transaction(async (tx: any) => {
-        // Commissions PME
         await tx.affiliateCommission.updateMany({
           where: { affiliateId, status: 'PENDING' },
           data: { status: 'PAID', paidAt: now, paymentRef: disbursementId },
         });
-
-        // Commissions Cabinet
         await tx.affiliateCabinetCommission.updateMany({
           where: { affiliateId, status: 'PENDING' },
           data: { status: 'PAID', paidAt: now, paymentRef: disbursementId },
         });
-
-        // Demande de retrait
         await tx.affiliateWithdrawalRequest.update({
           where: { id: withdrawalRequest.id },
-          data: {
-            status: 'PAID',
-            disbursementStatus: 'succeeded',
-            paidAt: now,
-          },
+          data: { status: 'PAID', disbursementStatus: 'succeeded', paidAt: now },
         });
       });
 
       this.logger.log(
-        `✅ Affilié ${affiliateId} — toutes les commissions PAID via disbursement ${disbursementId}`,
+        `✅ Affilié ${affiliateId} — commissions PAID via disbursement ${disbursementId} (re-vérifié serveur)`,
       );
-    } else {
-      // Disbursement échoué — remettre en PENDING pour permettre un réessai
+    } else if (realStatus.status === 'failed') {
       this.logger.warn(
-        `❌ Disbursement ${disbursementId} échoué (status: ${yabetooStatus}) — remise en PENDING`,
+        `❌ Disbursement ${disbursementId} échoué (re-vérifié serveur) — remise en PENDING`,
       );
-
       await (this.prisma as any).affiliateWithdrawalRequest.update({
         where: { id: withdrawalRequest.id },
         data: {
-          status: 'PENDING', // l'affilié peut re-demander
-          disbursementId: null, // reset pour permettre un nouvel essai
+          status: 'PENDING',
+          disbursementId: null,
           disbursementStatus: 'failed',
           processedAt: null,
         },
       });
+    } else {
+      this.logger.log(
+        `ℹ️  Disbursement ${disbursementId} toujours en cours (status: ${realStatus.status}) — rien à faire`,
+      );
     }
   }
 
   // ==========================================================================
-  // Paiement entrant réussi — INCHANGÉ
-  // ==========================================================================
-
-  private async _routeSucceededPayment(charge: any, intentId: string) {
-    // 1. Cabinet
-    const cabinetPayment = await this.prisma.cabinetPayment.findFirst({
-      where: { yabetopayIntentId: intentId },
-      include: { subscription: { select: { cabinetId: true } } },
-    });
-
-    if (cabinetPayment) {
-      this.logger.log(
-        `🏛️  CABINET — cabinetId: ${cabinetPayment.subscription.cabinetId}`,
-      );
-      if (cabinetPayment.status === 'SUCCEEDED') {
-        this.logger.log('ℹ️  Déjà traité — idempotence OK');
-        return;
-      }
-      await this.cabinetSubscriptionService.handleWebhookSuccess(
-        cabinetPayment.id,
-      );
-      this.logger.log('✅ Plan cabinet activé + commission affilié traitée');
-      return;
-    }
-
-    // 2. Entreprise
-    const enterprisePayment = await this.prisma.payment.findFirst({
-      where: { yabetooIntentId: intentId },
-    });
-
-    if (enterprisePayment) {
-      this.logger.log(
-        `🏢 ENTREPRISE — companyId: ${enterprisePayment.companyId}`,
-      );
-      if (enterprisePayment.status === 'SUCCEEDED') {
-        this.logger.log('ℹ️  Déjà traité — idempotence OK');
-        return;
-      }
-      await this.subscriptionsService.activatePaymentByWebhook({
-        intentId,
-        chargeId: charge.id,
-        transactionId: charge.transactionId,
-        financialTransactionId: charge.financialTransactionId,
-        amount: charge.amount,
-        currency: charge.currency,
-        status: charge.status,
-      });
-      this.logger.log(
-        '✅ Abonnement entreprise activé + commission affilié traitée',
-      );
-      return;
-    }
-
-    this.logger.error(`❌ Aucun paiement trouvé pour intentId: ${intentId}`);
-  }
-
-  // ==========================================================================
-  // Paiement échoué — INCHANGÉ
-  // ==========================================================================
-
-  private async _routeFailedPayment(intentId: string) {
-    const [cab, ent] = await Promise.all([
-      this.prisma.cabinetPayment.findFirst({
-        where: { yabetopayIntentId: intentId },
-      }),
-      this.prisma.payment.findFirst({ where: { yabetooIntentId: intentId } }),
-    ]);
-    if (cab) {
-      await this.prisma.cabinetPayment.update({
-        where: { id: cab.id },
-        data: { status: 'FAILED' },
-      });
-      this.logger.warn(`⚠️  Paiement cabinet FAILED — ${intentId}`);
-    }
-    if (ent) {
-      await this.prisma.payment.update({
-        where: { id: ent.id },
-        data: { status: 'FAILED' },
-      });
-      this.logger.warn(`⚠️  Paiement entreprise FAILED — ${intentId}`);
-    }
-    if (!cab && !ent) {
-      this.logger.warn(`⚠️  Aucun paiement trouvé pour FAILED — ${intentId}`);
-    }
-  }
-
-  // ==========================================================================
-  // Signature HMAC-SHA256 — INCHANGÉ
+  // Signature HMAC-SHA256 — inchangé
   // ==========================================================================
 
   private _verifySignature(
@@ -308,10 +268,10 @@ export class WebhooksController {
         .createHmac('sha256', this.webhookSecret)
         .update(rawBody)
         .digest('hex');
-      return crypto.timingSafeEqual(
-        Buffer.from(signature),
-        Buffer.from(expected),
-      );
+      const sigBuf = Buffer.from(signature);
+      const expBuf = Buffer.from(expected);
+      if (sigBuf.length !== expBuf.length) return false;
+      return crypto.timingSafeEqual(sigBuf, expBuf);
     } catch {
       return false;
     }

@@ -110,4 +110,21 @@ export class LoansCommonService {
       throw new ForbiddenException('Accès refusé');
     return advance;
   }
+
+  /**
+   * Accès en lecture à un dossier (prêt/avance) : RH/Admin (FINANCE_ROLES)
+   * voient tout ce qui appartient à leur entreprise ; un simple employé ne
+   * voit que son propre dossier. Même contrôle que celui déjà appliqué dans
+   * findOneLoan/findOneAdvance (loans-requests.service.ts) — centralisé ici
+   * pour être réutilisé ailleurs (ex: document-data) sans le dupliquer.
+   */
+  async assertFinanceOrSelfAccess(user: VerifiedUser, employeeId: string) {
+    if (FINANCE_ROLES.includes(user.role)) return;
+    const selfEmployee = await this.prisma.employee.findFirst({
+      where: { email: user.email ?? undefined, companyId: user.companyId },
+    });
+    if (!selfEmployee || selfEmployee.id !== employeeId) {
+      throw new ForbiddenException('Accès refusé');
+    }
+  }
 }

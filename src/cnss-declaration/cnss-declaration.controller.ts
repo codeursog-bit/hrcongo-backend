@@ -12,10 +12,13 @@ import {
 } from '@nestjs/common';
 import type { Response } from 'express';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
+import { RolesGuard } from '../auth/guards/roles.guard';
+import { Roles } from '../auth/decorators/roles.decorator';
 import { CnssDeclarationService } from './cnss-declaration.service';
 
 @Controller('cnss-declaration')
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtAuthGuard, RolesGuard)
+@Roles('ADMIN', 'HR_MANAGER', 'SUPER_ADMIN')
 export class CnssDeclarationController {
   constructor(private readonly cnssService: CnssDeclarationService) {}
 

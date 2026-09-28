@@ -256,12 +256,14 @@ export class EmployeesController {
     @Request() req,
     @Param('id') id: string,
     @Body() body: { enabled: boolean },
+    @Query('companyId') companyId?: string,
   ) {
     try {
       return await this.employeesService.toggleSelfService(
         id,
         req.user.userId,
         !!body.enabled,
+        companyId,
       );
     } catch (error: any) {
       if (error instanceof HttpException) throw error;
@@ -374,13 +376,25 @@ export class EmployeesController {
   // ==========================================================================
   // POST /employees — Créer un employé (ADMIN, HR, SUPER_ADMIN seulement)
   // Le service lève ForbiddenException si le rôle est insuffisant
+  // 🔒 CORRECTIF (audit) : companyId maintenant passé explicitement par le
+  // front (?companyId=) pour un admin multi-entreprises, au lieu de dépendre
+  // uniquement du user.companyId en base — ce champ est partagé entre TOUTES
+  // les sessions actives du même compte (plusieurs PC/onglets), donc une
+  // bascule d'entreprise faite ailleurs pouvait faire échouer une action ici
+  // avec un "accès refusé" alors que l'utilisateur est bien lié à
+  // l'entreprise visée. Chaque requête est maintenant autonome.
   // ==========================================================================
   @Post()
-  async create(@Body() createEmployeeDto: CreateEmployeeDto, @Request() req) {
+  async create(
+    @Body() createEmployeeDto: CreateEmployeeDto,
+    @Request() req,
+    @Query('companyId') companyId?: string,
+  ) {
     try {
       return await this.employeesService.create(
         createEmployeeDto,
         req.user.userId,
+        { overrideCompanyId: companyId },
       );
     } catch (error: any) {
       if (error instanceof HttpException) throw error;
@@ -396,9 +410,13 @@ export class EmployeesController {
   // MANAGER : données expurgées (sans salaire ni fiscalité)
   // ==========================================================================
   @Get(':id')
-  async findOne(@Param('id') id: string, @Request() req) {
+  async findOne(
+    @Param('id') id: string,
+    @Request() req,
+    @Query('companyId') companyId?: string,
+  ) {
     try {
-      return await this.employeesService.findOne(id, req.user.userId);
+      return await this.employeesService.findOne(id, req.user.userId, companyId);
     } catch (error: any) {
       if (error instanceof HttpException) throw error;
       throw new HttpException(
@@ -453,12 +471,14 @@ export class EmployeesController {
     @Param('id') id: string,
     @Body() updateEmployeeDto: UpdateEmployeeDto,
     @Request() req,
+    @Query('companyId') companyId?: string,
   ) {
     try {
       return await this.employeesService.update(
         id,
         updateEmployeeDto,
         req.user.userId,
+        companyId,
       );
     } catch (error: any) {
       if (error instanceof HttpException) throw error;
@@ -477,8 +497,9 @@ export class EmployeesController {
     @Param('id') id: string,
     @Body() updateEmployeeDto: UpdateEmployeeDto,
     @Request() req,
+    @Query('companyId') companyId?: string,
   ) {
-    return this.update(id, updateEmployeeDto, req);
+    return this.update(id, updateEmployeeDto, req, companyId);
   }
 
   // ==========================================================================
@@ -486,9 +507,13 @@ export class EmployeesController {
   // Passe le statut à TERMINATED, ne supprime pas physiquement
   // ==========================================================================
   @Delete(':id')
-  async remove(@Param('id') id: string, @Request() req) {
+  async remove(
+    @Param('id') id: string,
+    @Request() req,
+    @Query('companyId') companyId?: string,
+  ) {
     try {
-      return await this.employeesService.remove(id, req.user.userId);
+      return await this.employeesService.remove(id, req.user.userId, companyId);
     } catch (error: any) {
       if (error instanceof HttpException) throw error;
       throw new HttpException(

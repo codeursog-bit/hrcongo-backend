@@ -123,8 +123,8 @@ export class LoansController {
   }
 
   @Get('advances/:id/document-data')
-  getAdvanceDocumentData(@Param('id') id: string) {
-    return this.loansService.getAdvanceDocumentData(id);
+  getAdvanceDocumentData(@Param('id') id: string, @GetUser('id') userId: string) {
+    return this.loansService.getAdvanceDocumentData(id, userId);
   }
 
   /** Export Excel générique (indépendant du format Orca) pour la page Suivi des dettes. */
@@ -177,8 +177,8 @@ export class LoansController {
   }
 
   @Patch('advances/:id/mark-deducted')
-  markDeducted(@Param('id') id: string) {
-    return this.loansService.markAdvanceAsDeducted(id);
+  markDeducted(@Param('id') id: string, @GetUser('id') userId: string) {
+    return this.loansService.markAdvanceAsDeducted(id, userId);
   }
 
   @Patch('advances/:id/print-authorization')
@@ -240,8 +240,8 @@ export class LoansController {
   }
 
   @Get(':id/document-data')
-  getLoanDocumentData(@Param('id') id: string) {
-    return this.loansService.getLoanDocumentData(id);
+  getLoanDocumentData(@Param('id') id: string, @GetUser('id') userId: string) {
+    return this.loansService.getLoanDocumentData(id, userId);
   }
 
   /** Écrit directement dans l'onglet MARCHANDISE du fichier Excel fourni par Orca et le renvoie en téléchargement. Réservé au client dont `documentTemplate === 'ORCA'`. */
@@ -280,8 +280,8 @@ export class LoansController {
   }
 
   @Patch(':id/deduct')
-  processDeduction(@Param('id') id: string) {
-    return this.loansService.processMonthlyDeduction(id);
+  processDeduction(@Param('id') id: string, @GetUser('id') userId: string) {
+    return this.loansService.processMonthlyDeduction(id, userId);
   }
 
   @Post(':id/cash-repayment')

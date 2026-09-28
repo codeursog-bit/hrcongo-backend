@@ -47,6 +47,7 @@ import { promisify } from 'util';
 import * as ExcelJS from 'exceljs';
 import { PrismaService } from '../prisma/prisma.service';
 import { LoansCommonService } from './loans-common.service';
+import { escapeHtml } from '../common/escape-html.util';
 
 const execAsync = promisify(exec);
 // Deux fichiers DISTINCTS (au lieu d'un seul fichier partagé avec suppression
@@ -499,10 +500,10 @@ export class LoansOrcaExportService {
         if (value && typeof value === 'object' && 'result' in (value as any))
           value = (value as any).result; // formule évaluée
         let display = '';
-        if (value instanceof Date) display = value.toLocaleDateString('fr-FR');
+        if (value instanceof Date) display = escapeHtml(value.toLocaleDateString('fr-FR'));
         else if (typeof value === 'number')
-          display = value.toLocaleString('fr-FR');
-        else if (value != null) display = String(value);
+          display = escapeHtml(value.toLocaleString('fr-FR'));
+        else if (value != null) display = escapeHtml(String(value));
 
         const style = [
           `border-top:${borderCss(border.top)}`,

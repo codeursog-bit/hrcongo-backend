@@ -686,6 +686,7 @@ import {
 } from '../common/utils/phone.util';
 import { normalizeNationality } from '../common/utils/nationality.util';
 import { ConventionsService } from '../conventions/conventions.service';
+import { resolveVerifiedCompanyId } from '../common/resolve-verified-company.util';
 
 // ─── Rôles autorisés ──────────────────────────────────────────────────────────
 const CAN_CREATE = ['SUPER_ADMIN', 'ADMIN', 'HR_MANAGER'];
@@ -766,17 +767,17 @@ export class EmployeesService {
     return { ...user, companyId: user.companyId ?? '' };
   }
 
-  // 🆕 Admin multi-entreprises : permet de cibler une entreprise précise depuis
-  // la vue globale (portefeuille d'entreprises). L'appartenance à cette
-  // entreprise est déjà vérifiée en amont par le service appelant
-  // (voir employees-overview.service.ts) — ici on ne fait que router.
-  private applyCompanyOverride(
-    user: { companyId: string; manageMultipleCompanies?: boolean },
+  // 🔒 CORRECTIF SÉCURITÉ (audit) : délègue à resolveVerifiedCompanyId, qui
+  // vérifie réellement l'appartenance (userCompany/cabinetCompany) avant
+  // d'accorder l'override — avant, overrideCompanyId était accepté tel quel
+  // dès que user.manageMultipleCompanies était vrai.
+  private async applyCompanyOverride(
+    user: { id: string; companyId: string; role: string; manageMultipleCompanies?: boolean },
     overrideCompanyId?: string,
   ) {
-    if (overrideCompanyId && user.manageMultipleCompanies) {
-      user.companyId = overrideCompanyId;
-    }
+    user.companyId =
+      (await resolveVerifiedCompanyId(this.prisma, user, overrideCompanyId)) ??
+      '';
   }
 
   private async getManagerDeptId(
@@ -825,7 +826,7 @@ export class EmployeesService {
     options?: { phoneOptional?: boolean; overrideCompanyId?: string },
   ) {
     const user = await this.getVerifiedUser(userId);
-    this.applyCompanyOverride(user, options?.overrideCompanyId);
+    await this.applyCompanyOverride(user, options?.overrideCompanyId);
 
     if (!CAN_CREATE.includes(user.role)) {
       throw new ForbiddenException(
@@ -1096,12 +1097,11 @@ export class EmployeesService {
       );
     }
 
-    const isCabinet =
-      user.role === 'CABINET_ADMIN' || user.role === 'CABINET_GESTIONNAIRE';
-    const effectiveCompanyId =
-      isCabinet && (pagination as any)?.companyId
-        ? (pagination as any).companyId
-        : user.companyId;
+    const effectiveCompanyId = await resolveVerifiedCompanyId(
+      this.prisma,
+      user,
+      (pagination as any)?.companyId,
+    );
 
     if (!effectiveCompanyId) {
       return { data: [], total: 0, page: 1, limit: 50, totalPages: 0 };
@@ -1418,11 +1418,11 @@ export class EmployeesService {
       throw new ForbiddenException('Accès non autorisé.');
     }
 
-    const isCab =
-      user.role === 'CABINET_ADMIN' || user.role === 'CABINET_GESTIONNAIRE';
-    const canOverride = isCab || user.manageMultipleCompanies;
-    const effCompanyId =
-      canOverride && overrideCompanyId ? overrideCompanyId : user.companyId;
+    const effCompanyId = await resolveVerifiedCompanyId(
+      this.prisma,
+      user,
+      overrideCompanyId,
+    );
     if (!effCompanyId) return [];
     const whereClause: any = { companyId: effCompanyId, status: 'ACTIVE' };
 
@@ -1450,7 +1450,7 @@ export class EmployeesService {
 
   async findOne(id: string, userId: string, overrideCompanyId?: string) {
     const user = await this.getVerifiedUser(userId);
-    this.applyCompanyOverride(user, overrideCompanyId);
+    await this.applyCompanyOverride(user, overrideCompanyId);
 
     if (!CAN_LIST.includes(user.role)) {
       throw new ForbiddenException('Accès non autorisé.');
@@ -1543,8 +1543,14 @@ export class EmployeesService {
   // ============================================================
 
   /** RH/Admin active ou désactive l'auto-service pour un employé donné. */
-  async toggleSelfService(id: string, userId: string, enabled: boolean) {
+  async toggleSelfService(
+    id: string,
+    userId: string,
+    enabled: boolean,
+    overrideCompanyId?: string,
+  ) {
     const user = await this.getVerifiedUser(userId);
+    await this.applyCompanyOverride(user, overrideCompanyId);
     if (!CAN_EDIT.includes(user.role)) {
       throw new ForbiddenException(
         "Vous n'avez pas les droits pour gérer cet accès.",
@@ -1612,7 +1618,7 @@ export class EmployeesService {
     overrideCompanyId?: string,
   ) {
     const user = await this.getVerifiedUser(userId);
-    this.applyCompanyOverride(user, overrideCompanyId);
+    await this.applyCompanyOverride(user, overrideCompanyId);
 
     if (!CAN_EDIT.includes(user.role)) {
       throw new ForbiddenException(
@@ -1804,7 +1810,7 @@ export class EmployeesService {
 
   async remove(id: string, userId: string, overrideCompanyId?: string) {
     const user = await this.getVerifiedUser(userId);
-    this.applyCompanyOverride(user, overrideCompanyId);
+    await this.applyCompanyOverride(user, overrideCompanyId);
 
     if (!CAN_DELETE.includes(user.role)) {
       throw new ForbiddenException(

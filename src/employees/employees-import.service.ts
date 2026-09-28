@@ -1,4 +1,4 @@
-import { Injectable, BadRequestException } from '@nestjs/common';
+import { Injectable, BadRequestException, ForbiddenException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import * as XLSX from 'xlsx';
 import Fuse from 'fuse.js';
@@ -1111,12 +1111,21 @@ export class EmployeesImportService {
     try {
       const user = await this.prisma.user.findUnique({
         where: { id: userId },
-        select: { companyId: true },
+        select: { companyId: true, role: true },
       });
       if (!user?.companyId)
         throw new BadRequestException(
           'Utilisateur non associé à une entreprise.',
         );
+      // 🔒 CORRECTIF (audit, mineur) : companyId était déjà correctement
+      // dérivé du compte appelant (pas de fuite cross-entreprise), mais
+      // aucun rôle n'était vérifié — un simple EMPLOYEE pouvait lancer un
+      // import en masse dans sa propre entreprise.
+      if (!['SUPER_ADMIN', 'ADMIN', 'HR_MANAGER'].includes(user.role)) {
+        throw new ForbiddenException(
+          "Vous n'avez pas les droits pour importer des employés.",
+        );
+      }
       const workbook = XLSX.read(buffer, { type: 'buffer' });
       const jsonData: any[] = XLSX.utils.sheet_to_json(
         workbook.Sheets[workbook.SheetNames[0]],

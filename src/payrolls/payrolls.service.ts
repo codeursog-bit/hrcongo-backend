@@ -1152,6 +1152,10 @@ import { YtdCheckpointService } from './services/ytd-checkpoint.service';
 // ✅ Réutilise la même classification ITS/BNC10/BNC20 que les rapports —
 // jamais recalculée différemment d'un endroit à l'autre.
 import { classifyFiscalCategory } from '../reports/payroll-recap.service';
+import {
+  resolveVerifiedCompanyId,
+  assertCompanyAccess,
+} from '../common/resolve-verified-company.util';
 
 import { CreatePayrollDto } from './dto/create-payroll.dto';
 import { UpdatePayrollDto } from './dto/update-payroll.dto';
@@ -1380,6 +1384,21 @@ export class PayrollsService {
         totalOvertimeAmount: true,
         baseSalary: true,
         netSalary: true,
+        // ⚠️ CORRECTIF — totalDeductions inclut aussi les dettes du salarié
+        // (prêts, avances, retenues diverses) et totalEmployerCost est en
+        // réalité un COÛT (grossSalary + charges, voir
+        // payroll-calculator.service.ts ligne ~457 : "totalEmployerCost =
+        // grossSalary + cnssEmployer + tusTotal + employerCustomTaxTotal").
+        // Aucun des deux ne correspond à "Charges salariales/patronales".
+        // On cumule à la place les briques exactes qui composent les vraies
+        // charges (hors dettes, hors salaire) : CNSS + ITS + taxes custom
+        // salariales d'un côté, CNSS employeur + TUS + taxes custom
+        // patronales de l'autre — mêmes champs que le calculateur utilise
+        // lui-même pour construire totalDeductions/totalEmployerCost, mais
+        // sans y mélanger salaire ou dettes.
+        employeeCustomTaxTotal: true,
+        employerCustomTaxTotal: true,
+        tusTotal: true,
       },
     });
   }
@@ -1390,7 +1409,7 @@ export class PayrollsService {
   async create(createPayrollDto: CreatePayrollDto, userId: string) {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
-      select: { companyId: true, role: true, manageMultipleCompanies: true },
+      select: { id: true, companyId: true, role: true, manageMultipleCompanies: true },
     });
 
     // ✅ FIX BUG 6: CABINET_ADMIN n'a pas de companyId sur son User
@@ -1406,12 +1425,19 @@ export class PayrollsService {
     // du portefeuille) ; sinon on retombe sur user.companyId, comme
     // n'importe quel admin. Un vrai CABINET_ADMIN (user.companyId toujours
     // null) garde le même comportement qu'avant.
+    // 🔒 CORRECTIF SÉCURITÉ (audit) : ce companyId du DTO n'était jamais
+    // vérifié contre userCompany/cabinetCompany — un compte cabinet ou
+    // multi-entreprises pouvait créer une paie dans n'importe quelle
+    // entreprise en changeant l'UUID. Rebranché sur la fonction centrale.
     const isCabinet =
       user?.role === 'CABINET_ADMIN' || user?.role === 'CABINET_GESTIONNAIRE';
-    const canOverride = isCabinet || user?.manageMultipleCompanies;
     const dtoCompanyId = (createPayrollDto as any).companyId;
-    const effectiveCompanyId =
-      (canOverride && dtoCompanyId) || user?.companyId;
+    if (!user) throw new CompanyNotFoundException();
+    const effectiveCompanyId = await resolveVerifiedCompanyId(
+      this.prisma,
+      user,
+      dtoCompanyId,
+    );
 
     if (!effectiveCompanyId) throw new CompanyNotFoundException();
 
@@ -1859,6 +1885,7 @@ export class PayrollsService {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
       select: {
+        id: true,
         companyId: true,
         role: true,
         employeeId: true,
@@ -1866,14 +1893,18 @@ export class PayrollsService {
         manageMultipleCompanies: true,
       },
     });
+    if (!user) return [];
 
-    // Pour les rôles cabinet et l'admin multi-entreprises, on utilise le
-    // companyId passé en filtre (vérifié en amont par PortfolioPayrollService).
-    const isCabinet =
-      user?.role === 'CABINET_ADMIN' || user?.role === 'CABINET_GESTIONNAIRE';
-    const canOverride = isCabinet || user?.manageMultipleCompanies;
-    const effectiveCompanyId =
-      canOverride && filters?.companyId ? filters.companyId : user?.companyId;
+    // 🔒 CORRECTIF SÉCURITÉ (audit) : filters.companyId était accepté tel
+    // quel dès que canOverride était vrai — jamais vérifié contre
+    // userCompany/cabinetCompany, malgré le commentaire affirmant une
+    // vérification "en amont par PortfolioPayrollService". Rebranché sur
+    // la même fonction centrale que employees/leaves.
+    const effectiveCompanyId = await resolveVerifiedCompanyId(
+      this.prisma,
+      user,
+      filters?.companyId,
+    );
 
     if (!effectiveCompanyId) return [];
 
@@ -2025,6 +2056,25 @@ export class PayrollsService {
       Number(ytdAgg._sum.cnssEmployer ?? 0) + ytdTusCnss + carryOverChargesPat;
     const ytdIts = Number(ytdAgg._sum.its ?? 0);
 
+    // ✅ CORRIGÉ — cumul annuel COMPLET des vraies charges (CNSS + ITS + TUS
+    // + toutes les taxes custom CTAX_*/TOL/CAMU/CTAX_EMP_*), à partir des
+    // briques exactes du calculateur (employeeCustomTaxTotal,
+    // employerCustomTaxTotal, tusTotal) — PAS de totalDeductions (inclut les
+    // dettes : prêts/avances/retenues diverses) ni de totalEmployerCost
+    // (qui est en réalité un COÛT = grossSalary + charges, pas les charges
+    // seules). Coexiste avec cnssSalarial/cnssEmployer ci-dessus (gardés
+    // pour rétrocompatibilité et pour le calcul de netImposable).
+    const ytdTotalChargesSal =
+      Number(ytdAgg._sum.cnssSalarial ?? 0) +
+      Number(ytdAgg._sum.its ?? 0) +
+      Number(ytdAgg._sum.employeeCustomTaxTotal ?? 0) +
+      carryOverChargesSal;
+    const ytdTotalChargesPat =
+      Number(ytdAgg._sum.cnssEmployer ?? 0) +
+      Number(ytdAgg._sum.tusTotal ?? 0) +
+      Number(ytdAgg._sum.employerCustomTaxTotal ?? 0) +
+      carryOverChargesPat;
+
     // ── Base congé = ytd brut / 12 (méthode 1/12e Congo) ───────────────────
     const baseConge = ytdGross > 0 ? Math.round(ytdGross / 12) : 0;
 
@@ -2072,6 +2122,11 @@ export class PayrollsService {
         cnssSalarial: ytdCnssSal,
         cnssEmployer: ytdCnssEmp,
         its: ytdIts,
+        // ✅ NOUVEAU — cumuls complets pour les bulletins qui affichent
+        // "Charges salariales"/"Charges patronales" comme un TOTAL (CNSS +
+        // ITS + TUS + taxes custom), cohérents avec le mensuel.
+        totalChargesSalariales: ytdTotalChargesSal,
+        totalChargesPatronales: ytdTotalChargesPat,
         workedDays: Number(ytdAgg._sum.workedDays ?? 0),
         totalOvertimeAmount: Number(ytdAgg._sum.totalOvertimeAmount ?? 0),
         baseSalary: Number(ytdAgg._sum.baseSalary ?? 0),
@@ -2161,9 +2216,13 @@ export class PayrollsService {
     });
   }
 
-  async remove(id: string) {
+  async remove(id: string, userId: string) {
     const payroll = await this.prisma.payroll.findUnique({ where: { id } });
     if (!payroll) throw new PayrollNotFoundException(id);
+    // 🔒 CORRECTIF SÉCURITÉ (audit) : remove(id) ne recevait aucun
+    // utilisateur — tout ADMIN/RH pouvait supprimer un bulletin non payé
+    // d'une autre entreprise. Le rôle reste vérifié par @Roles côté route.
+    await assertCompanyAccess(this.prisma, userId, payroll.companyId);
     if (payroll.status === 'PAID') throw new PayrollAlreadyPaidException();
     await this.prisma.payroll.delete({ where: { id } });
     return { success: true, message: 'Bulletin supprimé avec succès' };
@@ -2680,7 +2739,15 @@ export class PayrollsService {
             grossSalary: true,
             cnssSalarial: true,
             cnssEmployer: true,
+            its: true,
             tusCnssAmount: true,
+            // ⚠️ CORRECTIF — mêmes champs corrigés qu'à la lecture
+            // principale (voir sumPayrollsInWindow()) : on ne somme plus
+            // totalDeductions (inclut les dettes) ni totalEmployerCost
+            // (c'est un COÛT = brut + charges, pas la charge seule).
+            employeeCustomTaxTotal: true,
+            employerCustomTaxTotal: true,
+            tusTotal: true,
           },
         });
         const ytdGross = Number(ytdAgg._sum?.grossSalary ?? 0) + carryOver.brut;
@@ -2694,6 +2761,18 @@ export class PayrollsService {
           Number(ytdAgg._sum?.cnssEmployer ?? 0) +
           Number(ytdAgg._sum?.tusCnssAmount ?? 0) +
           carryOver.chargesPat;
+        // ✅ CORRIGÉ — cumul complet des vraies charges (voir explication
+        // détaillée au point de lecture principal, plus haut).
+        const ytdTotalChargesSal =
+          Number(ytdAgg._sum?.cnssSalarial ?? 0) +
+          Number(ytdAgg._sum?.its ?? 0) +
+          Number(ytdAgg._sum?.employeeCustomTaxTotal ?? 0) +
+          carryOver.chargesSal;
+        const ytdTotalChargesPat =
+          Number(ytdAgg._sum?.cnssEmployer ?? 0) +
+          Number(ytdAgg._sum?.tusTotal ?? 0) +
+          Number(ytdAgg._sum?.employerCustomTaxTotal ?? 0) +
+          carryOver.chargesPat;
 
         return {
           ...updated,
@@ -2704,6 +2783,8 @@ export class PayrollsService {
             netImposable: ytdNetImpos,
             chargesSal: ytdChargesSal,
             chargesPat: ytdChargesPat,
+            totalChargesSalariales: ytdTotalChargesSal,
+            totalChargesPatronales: ytdTotalChargesPat,
           },
         };
       },
@@ -3428,7 +3509,35 @@ export class PayrollsService {
   // ============================================================================
   // DECLARATIONS SUMMARY — Récapitulatif CNSS + TUS + ITS pour un mois
   // ============================================================================
-  async getDeclarationsSummary(companyId: string, month: number, year: number) {
+  async getDeclarationsSummary(
+    requestedCompanyId: string | undefined,
+    month: number,
+    year: number,
+    userId: string,
+  ) {
+    // 🔒 CORRECTIF SÉCURITÉ (audit) : le companyId de la query était utilisé
+    // tel quel, sans jamais être comparé à l'appelant — n'importe quel
+    // ADMIN/HR pouvait lire les totaux brut/CNSS/ITS/TUS d'une autre
+    // entreprise. Un utilisateur normal retombe sur sa propre entreprise ;
+    // un cabinet / admin portefeuille est vérifié contre
+    // cabinetCompany / userCompany.
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: {
+        id: true,
+        companyId: true,
+        role: true,
+        manageMultipleCompanies: true,
+      },
+    });
+    if (!user) return null;
+    const companyId = await resolveVerifiedCompanyId(
+      this.prisma,
+      user,
+      requestedCompanyId,
+    );
+    if (!companyId) return null;
+
     const payrolls = await this.prisma.payroll.findMany({
       where: { companyId, month, year, status: { not: 'CANCELLED' } },
       include: {

@@ -936,9 +936,10 @@ export class RecruitmentController {
   updateStatus(
     @Param('id') id: string,
     @Body('status') status: string,
+    @Request() req: any,
     @Body('notes') notes?: string,
   ) {
-    return this.recruitmentService.updateCandidateStatus(id, status, notes);
+    return this.recruitmentService.updateCandidateStatus(id, status, req.user.userId, notes);
   }
 
   @Post('candidates/:id/hire')

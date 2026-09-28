@@ -1033,6 +1033,106 @@ export class SubscriptionsService {
   }
 
   // ==========================================================================
+  // 🔎 YABETOO — VÉRIFIER + ACTIVER UN PAIEMENT EN ATTENTE (FILET DE SÉCURITÉ)
+  // ==========================================================================
+  //
+  // ⚠️ Contrairement à Moteki et Chariow, le flux YabetooPay ne dépendait
+  // JUSQU'ICI QUE du webhook (webhooks.controller.ts) pour savoir si un
+  // paiement PROCESSING devenait SUCCEEDED/FAILED — aucun filet de sécurité.
+  // Si le webhook n'arrive pas (mauvaise config, coupure ponctuelle,
+  // webhook pas encore actif juste après une reconfig de clés...), le
+  // paiement reste PROCESSING indéfiniment et l'utilisateur voit "en
+  // attente" pour toujours. On ajoute donc le même principe que pour les
+  // 2 autres prestataires : interroger nous-mêmes GET /payment-intents/{id}
+  // en complément du webhook, jamais à sa place (le webhook reste plus
+  // rapide quand il fonctionne).
+  // ==========================================================================
+
+  async checkAndActivateYabetooPayment(paymentId: string): Promise<{
+    activated: boolean;
+    status: string;
+  }> {
+    const payment = await this.prisma.payment.findUnique({
+      where: { id: paymentId },
+    });
+
+    if (!payment || payment.provider !== 'YABETOOPAY' || !payment.yabetooIntentId) {
+      throw new NotFoundException('Paiement YabetooPay introuvable');
+    }
+
+    // Idempotence : déjà traité (par le webhook ou un passage précédent).
+    if (payment.status === 'SUCCEEDED') {
+      return { activated: true, status: 'already_succeeded' };
+    }
+    if (payment.status === 'FAILED') {
+      return { activated: false, status: 'already_failed' };
+    }
+
+    const intentStatus = await this.yabetooPayService.getPaymentStatus(
+      payment.yabetooIntentId,
+    );
+
+    if (intentStatus.status === 'succeeded') {
+      await this.handlePaymentSuccess(payment, { id: payment.yabetooChargeId });
+      this.logger.log(
+        `🎉 [Yabetoo] Intention ${payment.yabetooIntentId} confirmée payée (via polling) → abonnement activé pour company ${payment.companyId}`,
+      );
+      return { activated: true, status: 'activated' };
+    }
+
+    if (intentStatus.status === 'failed') {
+      await this.prisma.payment.update({
+        where: { id: payment.id },
+        data: { status: 'FAILED', failedAt: new Date() },
+      });
+      this.logger.warn(
+        `❌ [Yabetoo] Intention ${payment.yabetooIntentId} échouée (détecté via polling)`,
+      );
+      return { activated: false, status: 'failed' };
+    }
+
+    // Toujours pending — rien à faire, le webhook ou le prochain passage
+    // du cron retentera.
+    return { activated: false, status: 'pending' };
+  }
+
+  // ==========================================================================
+  // ⏰ YABETOO — CRON : VÉRIFIER TOUS LES PAIEMENTS EN ATTENTE
+  // ==========================================================================
+
+  async checkPendingYabetooPayments() {
+    const cutoff = new Date();
+    cutoff.setHours(cutoff.getHours() - 6); // les pushs mobile money expirent bien avant ça
+
+    const pending = await this.prisma.payment.findMany({
+      where: {
+        provider: 'YABETOOPAY',
+        status: { in: ['PENDING', 'PROCESSING'] },
+        yabetooIntentId: { not: null },
+        createdAt: { gte: cutoff },
+      },
+    });
+
+    let activated = 0;
+    for (const payment of pending) {
+      try {
+        const result = await this.checkAndActivateYabetooPayment(payment.id);
+        if (result.activated) activated++;
+      } catch (err) {
+        this.logger.error(`Erreur vérification paiement Yabetoo ${payment.id}:`, err);
+      }
+    }
+
+    if (pending.length > 0) {
+      this.logger.log(
+        `🔎 [Yabetoo] Polling paiements en attente : ${pending.length} vérifié(s), ${activated} activé(s).`,
+      );
+    }
+
+    return { checked: pending.length, activated };
+  }
+
+  // ==========================================================================
   // 🛒 MOTEKI — INITIER UN CHECKOUT D'ABONNEMENT (remplace createUpgradeCheckout
   // + confirmPayment : Moteki initie ET déclenche le paiement en un seul appel)
   // ==========================================================================
@@ -1325,11 +1425,11 @@ export class SubscriptionsService {
   }
 
   async handleMotekiPaymentFailed(paymentId: string) {
-    await this.prisma.payment.update({
-      where: { id: paymentId },
-      data: { status: 'FAILED', failedAt: new Date() },
-    });
-    this.logger.warn(`❌ [Moteki] Paiement ${paymentId} marqué FAILED (webhook)`);
+    // 🔒 CORRECTIF SÉCURITÉ (audit) : ne marque plus FAILED directement — se
+    // contente de redemander le vrai statut à Moteki (comme
+    // checkAndActivateMotekiOrder), pour ne jamais faire confiance à un
+    // appelant qui transmettrait un statut non ré-authentifié.
+    await this.checkAndActivateMotekiOrder(paymentId);
   }
 
   // ==========================================================================
@@ -1913,6 +2013,36 @@ export class SubscriptionsService {
   // 🔔 ACTIVER LE PAIEMENT VIA WEBHOOK (SANS COMPANYID)
   // ==========================================================================
 
+  // ==========================================================================
+  // 🔔 [DÉSACTIVÉ — CORRECTIF SÉCURITÉ AUDIT] ACTIVER LE PAIEMENT VIA WEBHOOK
+  // ==========================================================================
+  // ⚠️ Cette méthode n'est plus appelée nulle part (webhooks.controller.ts
+  // utilise désormais checkAndActivateYabetooPayment, qui re-vérifie
+  // toujours auprès de Yabetoo). Elle est conservée ici UNIQUEMENT pour
+  // référence historique et volontairement neutralisée : elle faisait
+  // confiance au statut du payload webhook sans re-vérification, et son
+  // fallback "par montant + devise + statut PENDING" permettait d'activer
+  // n'importe quel paiement PENDING correspondant avec un webhook forgé non
+  // signé. Ne JAMAIS la rebrancher telle quelle — voir
+  // checkAndActivateYabetooPayment pour le pattern sûr.
+  // ==========================================================================
+
+  async activatePaymentByWebhook(_webhookData: {
+    intentId: string;
+    chargeId: string;
+    transactionId: string;
+    financialTransactionId: string;
+    amount: number;
+    currency: string;
+    status: string;
+  }): Promise<never> {
+    throw new BadRequestException(
+      'activatePaymentByWebhook est désactivée pour raison de sécurité — utiliser checkAndActivateYabetooPayment.',
+    );
+  }
+
+  /* Ancien code conservé en commentaire pour référence — NE PAS RÉACTIVER :
+
   async activatePaymentByWebhook(webhookData: {
     intentId: string;
     chargeId: string;
@@ -1958,10 +2088,6 @@ export class SubscriptionsService {
       throw new NotFoundException('Paiement introuvable');
     }
 
-    this.logger.log(`✅ Payment found: ${payment.id}`);
-    this.logger.log(`📊 Company: ${payment.companyId}`);
-
-    // Mettre à jour le paiement
     await this.prisma.payment.update({
       where: { id: payment.id },
       data: {
@@ -1973,38 +2099,17 @@ export class SubscriptionsService {
       },
     });
 
-    this.logger.log('✅ Payment updated with webhook data');
-
-    // Activer l'abonnement
     const metadata = payment.metadata as any;
     const { plan, billingPeriod } = metadata;
-
-    this.logger.log(
-      `🚀 Activating subscription - Plan: ${plan}, Period: ${billingPeriod}`,
-    );
-
     await this.activateUpgrade(payment.companyId, plan, billingPeriod);
 
-    // ─── COMMISSION AFFILIÉ ────────────────────────────────────────────────
     try {
       await this.affiliateService.handleSuccessfulPayment(payment.id);
     } catch (err) {
-      // Ne pas faire échouer le webhook pour une erreur d'affiliation
       this.logger.error('[Affiliate] Erreur calcul commission (webhook):', err);
     }
-
-    this.logger.log('🎉 ============================================');
-    this.logger.log('🎉 SUBSCRIPTION ACTIVATED VIA WEBHOOK');
-    this.logger.log(`🎉 Company: ${payment.companyId} - Plan: ${plan}`);
-    this.logger.log('🎉 ============================================');
-
-    return {
-      success: true,
-      paymentId: payment.id,
-      companyId: payment.companyId,
-      plan,
-    };
   }
+  */
 
   // ==========================================================================
   // 💳 RÉCUPÉRER L'HISTORIQUE DES PAIEMENTS

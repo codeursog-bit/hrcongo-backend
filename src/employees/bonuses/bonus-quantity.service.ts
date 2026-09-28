@@ -12,6 +12,7 @@ import {
   Logger,
 } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
+import { assertCompanyAccess } from '../../common/resolve-verified-company.util';
 
 export interface UpsertQuantityDto {
   quantity: number; // ex: 7 (repas), 3 (déplacements)
@@ -37,6 +38,34 @@ export class BonusQuantityService {
 
   constructor(private readonly prisma: PrismaService) {}
 
+  // 🔒 CORRECTIF SÉCURITÉ (audit) : ces méthodes chargeaient une prime ou un
+  // employé par ID sans jamais vérifier son entreprise, et le controller
+  // n'exigeait aucun rôle (un simple EMPLOYEE pouvait modifier les
+  // quantités de primes, donc les montants de paie, d'une autre entreprise).
+  private async assertBonusAccess(
+    bonusId: string,
+    userId: string,
+    write: boolean,
+  ) {
+    const bonus = await this.prisma.employeeBonus.findUnique({
+      where: { id: bonusId },
+      select: { employee: { select: { companyId: true } } },
+    });
+    if (!bonus) throw new NotFoundException(`Prime ${bonusId} introuvable`);
+    await assertCompanyAccess(this.prisma, userId, bonus.employee.companyId, {
+      write,
+    });
+  }
+
+  private async assertEmployeeAccess(employeeId: string, userId: string) {
+    const employee = await this.prisma.employee.findUnique({
+      where: { id: employeeId },
+      select: { companyId: true },
+    });
+    if (!employee) throw new NotFoundException('Employé introuvable.');
+    await assertCompanyAccess(this.prisma, userId, employee.companyId);
+  }
+
   // ── Saisir / modifier la quantité d'une prime FREE pour un mois donné ──────
 
   async upsert(
@@ -44,7 +73,9 @@ export class BonusQuantityService {
     month: number,
     year: number,
     dto: UpsertQuantityDto,
+    userId: string,
   ): Promise<BonusQuantityResult> {
+    await this.assertBonusAccess(bonusId, userId, true);
     // 1. Vérifier que la prime existe et est bien en mode FREE
     const bonus = await this.prisma.employeeBonus.findUnique({
       where: { id: bonusId },
@@ -108,7 +139,9 @@ export class BonusQuantityService {
     bonusId: string,
     month: number,
     year: number,
+    userId: string,
   ): Promise<BonusQuantityResult | null> {
+    await this.assertBonusAccess(bonusId, userId, false);
     const record = await (this.prisma as any).bonusMonthlyQuantity.findUnique({
       where: {
         employeeBonusId_month_year: { employeeBonusId: bonusId, month, year },
@@ -132,10 +165,12 @@ export class BonusQuantityService {
     employeeId: string,
     month: number,
     year: number,
+    userId: string,
   ): Promise<{
     pending: BonusQuantityResult[]; // primes FREE sans quantité ce mois
     filled: BonusQuantityResult[]; // primes FREE avec quantité saisie
   }> {
+    await this.assertEmployeeAccess(employeeId, userId);
     // Toutes les primes FREE actives de l'employé
     const bonuses = await this.prisma.employeeBonus.findMany({
       where: {
@@ -187,7 +222,13 @@ export class BonusQuantityService {
 
   // ── Supprimer une quantité saisie (reset au défaut) ─────────────────────────
 
-  async remove(bonusId: string, month: number, year: number): Promise<void> {
+  async remove(
+    bonusId: string,
+    month: number,
+    year: number,
+    userId: string,
+  ): Promise<void> {
+    await this.assertBonusAccess(bonusId, userId, true);
     await (this.prisma as any).bonusMonthlyQuantity.deleteMany({
       where: { employeeBonusId: bonusId, month, year },
     });

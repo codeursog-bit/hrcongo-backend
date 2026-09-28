@@ -12,6 +12,7 @@ import { CreateCourseDto } from './dto/create-course.dto';
 import { CreateTrainingRequestDto } from './dto/create-request.dto';
 import { ReviewRequestDto, ReviewAction } from './dto/review-request.dto';
 import { UpdatePfaDto } from './dto/update-pfa.dto';
+import { resolveVerifiedCompanyId } from '../common/resolve-verified-company.util';
 
 const RH_ROLES = ['SUPER_ADMIN', 'ADMIN', 'HR_MANAGER'];
 
@@ -50,6 +51,7 @@ export class TrainingService {
         email: true,
         firstName: true,
         lastName: true,
+        manageMultipleCompanies: true,
       },
     });
     if (!user || !user.companyId)
@@ -149,8 +151,19 @@ export class TrainingService {
 
     const isCabinet =
       user.role === 'CABINET_ADMIN' || user.role === 'CABINET_GESTIONNAIRE';
-    const effectiveCompanyId =
-      isCabinet && overrideCompanyId ? overrideCompanyId : user.companyId;
+    // 🔒 CORRECTIF SÉCURITÉ (audit) : overrideCompanyId était accepté tel
+    // quel dès que isCabinet était vrai, jamais vérifié contre
+    // userCompany/cabinetCompany. Rebranché sur la fonction centrale.
+    const effectiveCompanyId = await resolveVerifiedCompanyId(
+      this.prisma,
+      user,
+      overrideCompanyId,
+    );
+    // getUser() garantit déjà user.companyId non-null ; ce cas ne peut
+    // survenir que si resolveVerifiedCompanyId change un jour de logique.
+    if (!effectiveCompanyId) {
+      throw new ForbiddenException("Vous n'avez pas accès à cette entreprise.");
+    }
 
     // Pour cabinet → pas de filtre employé (il voit tout)
     const employee = isCabinet

@@ -27,7 +27,8 @@ export class CompanySiteController {
 
   // GET /companies/:companyId/sites
   @Get()
-  findAll(@Param('companyId') companyId: string) {
+  async findAll(@Param('companyId') companyId: string, @Request() req) {
+    await this.companySiteService.assertAccess(req.user.userId, companyId, false);
     return this.companySiteService.findAll(companyId);
   }
 
@@ -36,7 +37,9 @@ export class CompanySiteController {
   async create(
     @Param('companyId') companyId: string,
     @Body() dto: CreateCompanySiteDto,
+    @Request() req,
   ) {
+    await this.companySiteService.assertAccess(req.user.userId, companyId, true);
     // ✅ Le multi-sites GPS est une feature d'abonnement — avant ce
     // correctif, n'importe quel plan pouvait créer des sites ici.
     await this.subscriptionGuard.checkFeatureAccess(
@@ -48,20 +51,24 @@ export class CompanySiteController {
 
   // PATCH /companies/:companyId/sites/:siteId
   @Patch(':siteId')
-  update(
+  async update(
     @Param('companyId') companyId: string,
     @Param('siteId') siteId: string,
     @Body() dto: UpdateCompanySiteDto,
+    @Request() req,
   ) {
+    await this.companySiteService.assertAccess(req.user.userId, companyId, true);
     return this.companySiteService.update(siteId, companyId, dto);
   }
 
   // DELETE /companies/:companyId/sites/:siteId
   @Delete(':siteId')
-  remove(
+  async remove(
     @Param('companyId') companyId: string,
     @Param('siteId') siteId: string,
+    @Request() req,
   ) {
+    await this.companySiteService.assertAccess(req.user.userId, companyId, true);
     return this.companySiteService.remove(siteId, companyId);
   }
 }

@@ -97,7 +97,7 @@
 
 import { ExtractJwt, Strategy } from 'passport-jwt';
 import { PassportStrategy } from '@nestjs/passport';
-import { Injectable } from '@nestjs/common';
+import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Request } from 'express';
 
@@ -134,6 +134,13 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
   }
 
   async validate(payload: any) {
+    // 🔒 Tous les JWT de l'app partagent le même secret (refresh, reset password,
+    // 2fa-pending, trusted-device...). Sans ce garde-fou, n'importe lequel de ces
+    // tokens passerait ici comme identité d'accès, et des guards comme AdminGuard
+    // (qui re-dérivent le rôle en base à partir du seul `sub`) l'accepteraient.
+    if (payload.type !== 'access') {
+      throw new UnauthorizedException('Type de token invalide');
+    }
     return {
       id: payload.sub, // ✅ AJOUT — req.user.id fonctionne partout
       userId: payload.sub,

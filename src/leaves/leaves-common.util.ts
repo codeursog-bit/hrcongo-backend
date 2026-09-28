@@ -8,6 +8,7 @@
 
 import { PrismaService } from '../prisma/prisma.service';
 import { CompanyNotFoundException } from '../exceptions/business.exceptions';
+import { resolveVerifiedCompanyId } from '../common/resolve-verified-company.util';
 
 /**
  * Résout le companyId effectif pour un utilisateur.
@@ -15,11 +16,14 @@ import { CompanyNotFoundException } from '../exceptions/business.exceptions';
  * Pour les users ENTREPRISE (ADMIN, HR_MANAGER, MANAGER, EMPLOYEE) :
  *   → utilise user.companyId (comportement original inchangé)
  *
- * Pour les CABINET_ADMIN / CABINET_GESTIONNAIRE :
- *   → ils n'ont PAS de companyId sur leur User
- *   → on accepte overrideCompanyId passé depuis le controller
- *   → la vérification que ce companyId appartient au cabinet
- *     est faite par CabinetCompanyIsolationGuard en amont
+ * Pour les CABINET_ADMIN / CABINET_GESTIONNAIRE / manageMultipleCompanies :
+ *   → ils peuvent cibler une autre entreprise via overrideCompanyId
+ *   → 🔒 CORRECTIF SÉCURITÉ (audit) : cette appartenance est maintenant
+ *     RÉELLEMENT vérifiée ici (resolveVerifiedCompanyId, contre
+ *     userCompany/cabinetCompany) — avant, le commentaire prétendait que
+ *     CabinetCompanyIsolationGuard le faisait "en amont", mais ce guard
+ *     n'est branché sur aucune route de ce module : overrideCompanyId
+ *     était en réalité accepté tel quel.
  *
  * ⚠️  Si overrideCompanyId est absent ET que c'est un user cabinet
  *      → on lève CompanyNotFoundException comme avant
@@ -39,25 +43,23 @@ export async function getUserWithCompany(
       manageMultipleCompanies: true,
     },
   });
+  if (!user) throw new CompanyNotFoundException();
 
-  const isCabinet =
-    user?.role === 'CABINET_ADMIN' || user?.role === 'CABINET_GESTIONNAIRE';
-  // 🆕 Admin multi-entreprises : même principe que Cabinet — companyId fourni
-  // par l'appelant (PortfolioLeavesService), après vérification d'appartenance.
-  const canOverride = isCabinet || user?.manageMultipleCompanies;
+  const verifiedCompanyId = await resolveVerifiedCompanyId(
+    prisma,
+    user,
+    overrideCompanyId,
+  );
 
-  if (canOverride && overrideCompanyId) {
+  if (verifiedCompanyId) {
     return {
       id: user.id,
-      companyId: overrideCompanyId,
+      companyId: verifiedCompanyId,
       role: user.role,
       email: user.email,
     };
   }
-  if (isCabinet) throw new CompanyNotFoundException();
-
-  if (!user?.companyId) throw new CompanyNotFoundException();
-  return { ...user, companyId: user.companyId };
+  throw new CompanyNotFoundException();
 }
 
 export async function getManagerDepartmentId(

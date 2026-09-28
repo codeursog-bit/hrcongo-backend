@@ -255,8 +255,14 @@ export class PayrollsController {
     @Query('companyId') companyId: string,
     @Query('month', ParseIntPipe) month: number,
     @Query('year', ParseIntPipe) year: number,
+    @Request() req,
   ) {
-    return this.payrollsService.getDeclarationsSummary(companyId, month, year);
+    return this.payrollsService.getDeclarationsSummary(
+      companyId,
+      month,
+      year,
+      req.user.userId,
+    );
   }
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -355,8 +361,8 @@ export class PayrollsController {
   @Delete(':id')
   @UseGuards(RolesGuard)
   @Roles(...PAYROLL_ROLES)
-  remove(@Param('id') id: string) {
-    return this.payrollsService.remove(id);
+  remove(@Param('id') id: string, @Request() req) {
+    return this.payrollsService.remove(id, req.user.userId);
   }
 
   // =========================================================================
@@ -416,12 +422,14 @@ export class PayrollsController {
   @UseGuards(RolesGuard)
   @Roles(...PAYROLL_ROLES)
   async exportSagePost(
-    @Body() body: { payrollIds: string[]; companyId: string },
+    @Body() body: { payrollIds: string[]; companyId?: string },
+    @Request() req: any,
     @Res() res: Response,
   ) {
     const text = await this.exportService.exportToSageByIds(
       body.payrollIds,
       body.companyId,
+      req.user.userId,
     );
     res.set({
       'Content-Type': 'text/plain; charset=utf-8',
@@ -436,9 +444,13 @@ export class PayrollsController {
   @Roles(...PAYROLL_ROLES)
   async exportBatchPdf(
     @Body() body: { payrollIds: string[] },
+    @Request() req: any,
     @Res() res: Response,
   ) {
-    const buffer = await this.exportService.exportBatchPdf(body.payrollIds);
+    const buffer = await this.exportService.exportBatchPdf(
+      body.payrollIds,
+      req.user.userId,
+    );
     res.set({
       'Content-Type': 'application/pdf',
       'Content-Disposition': `attachment; filename="bulletins.pdf"`,
@@ -452,13 +464,15 @@ export class PayrollsController {
   @UseGuards(RolesGuard)
   @Roles(...PAYROLL_ROLES)
   async exportDeclarationsPdf(
-    @Body() body: { companyId: string; month: number; year: number },
+    @Body() body: { companyId?: string; month: number; year: number },
+    @Request() req: any,
     @Res() res: Response,
   ) {
     const buffer = await this.exportService.exportDeclarationsPdf(
       body.companyId,
       body.month,
       body.year,
+      req.user.userId,
     );
     const mm = String(body.month).padStart(2, '0');
     res.set({

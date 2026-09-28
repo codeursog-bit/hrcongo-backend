@@ -13,6 +13,8 @@ import { FileInterceptor } from '@nestjs/platform-express';
 import type { Response } from 'express';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { GetUser } from '../auth/get-user.decorator';
+import { RolesGuard } from '../auth/guards/roles.guard';
+import { Roles } from '../auth/decorators/roles.decorator';
 import { EmployeesImportService } from './employees-import.service';
 
 const multerOptions = {
@@ -34,7 +36,13 @@ const multerOptions = {
 };
 
 @Controller('employees/import')
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtAuthGuard, RolesGuard)
+// 🔒 CORRECTIF SÉCURITÉ (audit, moyen) : n'importe quel compte authentifié —
+// y compris un EMPLOYEE — pouvait importer/créer en masse des employés dans
+// sa propre entreprise (pas de fuite cross-entreprise, mais une action RH
+// sensible non restreinte au bon rôle). Import réservé désormais à
+// ADMIN/HR_MANAGER/SUPER_ADMIN, cohérent avec le reste du module employees/.
+@Roles('ADMIN', 'HR_MANAGER', 'SUPER_ADMIN')
 export class EmployeesImportController {
   constructor(private readonly importService: EmployeesImportService) {}
 

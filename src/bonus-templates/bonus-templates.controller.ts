@@ -57,6 +57,7 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
+import { GetUser } from '../auth/get-user.decorator';
 import { BonusTemplatesService } from './bonus-templates.service';
 
 @Controller('bonus-templates')
@@ -72,8 +73,8 @@ export class BonusTemplatesController {
   }
 
   @Post()
-  create(@Req() req: any, @Body() dto: any) {
-    return this.service.create(req.user.companyId, dto);
+  create(@GetUser('id') userId: string, @Body() dto: any) {
+    return this.service.create(userId, dto);
   }
 
   @Get(':id')
@@ -82,13 +83,13 @@ export class BonusTemplatesController {
   }
 
   @Patch(':id')
-  update(@Param('id') id: string, @Req() req: any, @Body() dto: any) {
-    return this.service.update(id, req.user.companyId, dto);
+  update(@Param('id') id: string, @GetUser('id') userId: string, @Body() dto: any) {
+    return this.service.update(id, userId, dto);
   }
 
   @Delete(':id')
-  remove(@Param('id') id: string, @Req() req: any) {
-    return this.service.remove(id, req.user.companyId);
+  remove(@Param('id') id: string, @GetUser('id') userId: string) {
+    return this.service.remove(id, userId);
   }
 
   // ── Presets conventionnels ────────────────────────────────────────────────

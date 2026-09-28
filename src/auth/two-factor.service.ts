@@ -211,6 +211,7 @@ export class TwoFactorService {
       companyId: (user as any).companyId ?? null,
       cabinetId: cabinetId ?? null,
       managedByCabinet: managedByCabinet,
+      type: 'access', // 🔒 cf. auth.service.ts issueTokensAndCookies
     };
     const refreshPayload = { sub: (user as any).id, type: 'refresh', jti };
 

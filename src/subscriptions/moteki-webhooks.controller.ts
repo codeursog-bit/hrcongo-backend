@@ -77,7 +77,19 @@ export class MotekiWebhooksController {
     this.logger.log('🔔 Webhook Moteki reçu');
     this.logger.log(`📦 Payload: ${JSON.stringify(payload, null, 2)}`);
 
-    if (this.webhookSecret && signature) {
+    // 🔒 CORRECTIF SÉCURITÉ (audit) : signature désormais OBLIGATOIRE — même
+    // faille que sur le webhook YabetooPay corrigé précédemment. Avant,
+    // `if (this.webhookSecret && signature)` sautait la vérification si le
+    // header était simplement absent ; il suffisait de ne pas l'envoyer.
+    if (!this.webhookSecret) {
+      this.logger.error('❌ Webhook Moteki rejeté — MOTEKI_WEBHOOK_SECRET non configuré');
+      throw new BadRequestException('Webhook non configuré côté serveur');
+    }
+    if (!signature) {
+      this.logger.error('❌ Webhook Moteki rejeté — header x-moteki-signature absent');
+      throw new BadRequestException('Signature manquante');
+    }
+    {
       const rawBody = request.rawBody ?? Buffer.from(JSON.stringify(payload));
       const valid = this.motekiService.verifyWebhookSignature(
         rawBody,
@@ -185,7 +197,15 @@ export class MotekiWebhooksController {
       );
       return;
     }
-    await this.subscriptionsService.handleMotekiPaymentFailed(payment.id);
+    // 🔒 CORRECTIF SÉCURITÉ (audit) : on ne marque plus FAILED directement
+    // depuis le payload webhook (non authentifiable de façon fiable — voir
+    // aussi le fallback "email + PENDING" dans _findPayment ci-dessous, qui
+    // pourrait cibler le mauvais paiement). On redemande le vrai statut de
+    // la commande à Moteki, exactement comme pour un succès — empêche un
+    // webhook forgé de saboter un paiement légitime encore en cours en le
+    // marquant FAILED prématurément (ce qui bloquerait aussi tout futur
+    // repassage du cron via l'idempotence "already_failed").
+    await this.subscriptionsService.checkAndActivateMotekiOrder(payment.id);
   }
 
   // ==========================================================================

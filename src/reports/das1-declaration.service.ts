@@ -20,6 +20,7 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { PayrollRecapService } from './payroll-recap.service';
+import { resolveVerifiedCompanyId } from '../common/resolve-verified-company.util';
 
 export interface Das1IndemniteLine {
   label: string;
@@ -86,13 +87,15 @@ export class Das1DeclarationService {
     private payrollRecapService: PayrollRecapService,
   ) {}
 
+  // 🔒 CORRECTIF SÉCURITÉ (audit) : même correctif que
+  // PayrollRecapService/ReportsService.resolveCompanyId.
   private async resolveCompanyId(userId: string, overrideCompanyId?: string): Promise<string | null> {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
-      select: { companyId: true, role: true },
+      select: { id: true, companyId: true, role: true, manageMultipleCompanies: true },
     });
-    const isCabinet = user?.role === 'CABINET_ADMIN' || user?.role === 'CABINET_GESTIONNAIRE';
-    return isCabinet && overrideCompanyId ? overrideCompanyId : (user?.companyId ?? null);
+    if (!user) return null;
+    return resolveVerifiedCompanyId(this.prisma, user, overrideCompanyId);
   }
 
   async getAnnualDeclaration(

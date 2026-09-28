@@ -15,6 +15,7 @@ import {
 import { PrismaService } from '../prisma/prisma.service';
 import { SubscriptionGuard } from '../subscriptions/guards/subscription.guard';
 import { ReviewStatus } from '@prisma/client';
+import { resolveVerifiedCompanyId } from '../common/resolve-verified-company.util';
 
 export const CRITERIA_TEMPLATES: Record<
   string,
@@ -482,12 +483,19 @@ export class PerformanceService {
   async findAllReviews(userId: string, overrideCompanyId?: string) {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
-      select: { companyId: true, role: true, email: true },
+      select: { id: true, companyId: true, role: true, email: true, manageMultipleCompanies: true },
     });
+    if (!user) return [];
     const isCabinet =
-      user?.role === 'CABINET_ADMIN' || user?.role === 'CABINET_GESTIONNAIRE';
-    const companyId =
-      isCabinet && overrideCompanyId ? overrideCompanyId : user?.companyId;
+      user.role === 'CABINET_ADMIN' || user.role === 'CABINET_GESTIONNAIRE';
+    // 🔒 CORRECTIF SÉCURITÉ (audit) : overrideCompanyId était accepté tel
+    // quel dès que isCabinet était vrai, jamais vérifié contre
+    // userCompany/cabinetCompany. Rebranché sur la fonction centrale.
+    const companyId = await resolveVerifiedCompanyId(
+      this.prisma,
+      user,
+      overrideCompanyId,
+    );
     if (!companyId) return [];
 
     // EMPLOYEE → uniquement ses évaluations soumises/ackd
@@ -716,12 +724,17 @@ export class PerformanceService {
   async findAllCompanyGoals(userId: string, overrideCompanyId?: string) {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
-      select: { companyId: true, role: true, email: true },
+      select: { id: true, companyId: true, role: true, email: true, manageMultipleCompanies: true },
     });
+    if (!user) return [];
     const isCabinet =
-      user?.role === 'CABINET_ADMIN' || user?.role === 'CABINET_GESTIONNAIRE';
-    const companyId =
-      isCabinet && overrideCompanyId ? overrideCompanyId : user?.companyId;
+      user.role === 'CABINET_ADMIN' || user.role === 'CABINET_GESTIONNAIRE';
+    // 🔒 CORRECTIF SÉCURITÉ (audit) : même correctif que findAllReviews.
+    const companyId = await resolveVerifiedCompanyId(
+      this.prisma,
+      user,
+      overrideCompanyId,
+    );
     if (!companyId) return [];
 
     const employeeWhere: any = { companyId };

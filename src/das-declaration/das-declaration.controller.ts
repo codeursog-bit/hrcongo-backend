@@ -10,10 +10,13 @@ import {
 } from '@nestjs/common';
 import type { Response } from 'express';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
+import { RolesGuard } from '../auth/guards/roles.guard';
+import { Roles } from '../auth/decorators/roles.decorator';
 import { DasDeclarationService } from './das-declaration.service';
 
 @Controller('das-declaration')
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtAuthGuard, RolesGuard)
+@Roles('ADMIN', 'HR_MANAGER', 'SUPER_ADMIN')
 export class DasDeclarationController {
   constructor(private readonly dasService: DasDeclarationService) {}
 

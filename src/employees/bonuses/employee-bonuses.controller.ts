@@ -34,9 +34,9 @@ export class EmployeeBonusesController {
   }
 
   @Post('employee-bonuses')
-  async createFlat(@Body() createDto: any, @GetUser('id') _userId: string) {
+  async createFlat(@Body() createDto: any, @GetUser('id') userId: string) {
     // ✅ Fix : 1 seul argument — employeeId est dans createDto.employeeId
-    return this.bonusesService.create(createDto);
+    return this.bonusesService.create(createDto, userId);
   }
 
   @Put('employee-bonuses/:bonusId')
@@ -71,10 +71,10 @@ export class EmployeeBonusesController {
   async create(
     @Param('employeeId') employeeId: string,
     @Body() createDto: any,
-    @GetUser('id') _userId: string,
+    @GetUser('id') userId: string,
   ) {
     // ✅ Fix : on injecte employeeId dans dto puis 1 seul argument
-    return this.bonusesService.create({ ...createDto, employeeId });
+    return this.bonusesService.create({ ...createDto, employeeId }, userId);
   }
 
   @Put('employees/:employeeId/bonuses/:bonusId')

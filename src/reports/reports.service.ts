@@ -11,6 +11,7 @@ import {
   ConventionCategory,
 } from '../conventions/conventions.service';
 import { classifyFiscalCategory } from './payroll-recap.service';
+import { resolveVerifiedCompanyId } from '../common/resolve-verified-company.util';
 
 // 🆕 Export nommé pour workforce-movement-export.service.ts
 export interface WorkforceMovementDept {
@@ -38,20 +39,20 @@ export class ReportsService {
     private conventionsService: ConventionsService,
   ) {}
 
-  // ─── Résolution du companyId (PME directe ou cabinet) ────────────────────
+  // 🔒 CORRECTIF SÉCURITÉ (audit) : overrideCompanyId était accepté tel quel
+  // dès que isCabinet était vrai, jamais vérifié contre
+  // userCompany/cabinetCompany. Délègue maintenant à la fonction centrale
+  // (même correctif que PayrollRecapService.resolveCompanyId).
   private async resolveCompanyId(
     userId: string,
     overrideCompanyId?: string,
   ): Promise<string | null> {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
-      select: { companyId: true, role: true },
+      select: { id: true, companyId: true, role: true, manageMultipleCompanies: true },
     });
-    const isCabinet =
-      user?.role === 'CABINET_ADMIN' || user?.role === 'CABINET_GESTIONNAIRE';
-    return isCabinet && overrideCompanyId
-      ? overrideCompanyId
-      : (user?.companyId ?? null);
+    if (!user) return null;
+    return resolveVerifiedCompanyId(this.prisma, user, overrideCompanyId);
   }
 
   // ============================================================

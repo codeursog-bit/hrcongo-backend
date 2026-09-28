@@ -449,6 +449,46 @@ export class DashboardService {
       where: { companyId, status: 'PENDING' },
     });
 
+    // 🆕 Départs en congé prévus ce mois-ci (mois calendaire réel, pas le
+    // mois de paie). On compte tout ce qui est "planifié" — PENDING inclus
+    // car encore modifiable, + APPROVED — mais pas REJECTED/CANCELLED.
+    const realMonth = now.getMonth() + 1;
+    const realYear = now.getFullYear();
+    const monthStart = new Date(realYear, realMonth - 1, 1);
+    const monthEnd = new Date(realYear, realMonth, 1); // 1er du mois suivant (exclusif)
+
+    const leavesThisMonth = await this.prisma.leave.count({
+      where: {
+        companyId,
+        status: { in: ['PENDING', 'APPROVED'] },
+        startDate: { gte: monthStart, lt: monthEnd },
+      },
+    });
+
+    // 🆕 Total prêts + avances accordés ce mois-ci uniquement (date
+    // d'approbation dans le mois en cours, statut = effectivement accordé).
+    const loansGrantedAgg = await this.prisma.loan.aggregate({
+      where: {
+        employee: { companyId },
+        status: { in: ['ACTIVE', 'PAID'] },
+        approvedAt: { gte: monthStart, lt: monthEnd },
+      },
+      _sum: { amount: true },
+    });
+
+    const advancesGrantedAgg = await this.prisma.advance.aggregate({
+      where: {
+        employee: { companyId },
+        status: { in: ['APPROVED', 'PAID', 'DEDUCTED'] },
+        approvedAt: { gte: monthStart, lt: monthEnd },
+      },
+      _sum: { amount: true },
+    });
+
+    const totalPretAvanceMois =
+      Number(loansGrantedAgg._sum.amount || 0) +
+      Number(advancesGrantedAgg._sum.amount || 0);
+
     const recentPayrolls = await this.prisma.payroll.findMany({
       where: { companyId },
       orderBy: { createdAt: 'desc' },
@@ -546,6 +586,8 @@ export class DashboardService {
         totalEmployees > 0
           ? Math.round((attendanceCount / totalEmployees) * 100)
           : 0,
+      leavesThisMonth,
+      totalPretAvanceMois,
       recentPayrolls,
       recentActivities: activities,
     };

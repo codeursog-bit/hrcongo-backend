@@ -47,7 +47,17 @@ export class AuditController {
     // Filtrer par entreprise (sécurité isolation)
     if (companyId) {
       where.user = { companyId };
+    } else if (role !== 'SUPER_ADMIN') {
+      // Cas cabinet (CABINET_ADMIN, companyId vide) : ne jamais laisser
+      // passer "pas de filtre" — restreindre explicitement à la liste des
+      // entreprises gérées par ce compte.
+      const links = await this.prisma.userCompany.findMany({
+        where: { userId: req.user.userId },
+        select: { companyId: true },
+      });
+      where.user = { companyId: { in: links.map((l) => l.companyId) } };
     }
+    // SUPER_ADMIN sans companyId : accès plateforme global, intentionnel — aucun filtre.
 
     // Filtres optionnels
     if (action) where.action = { contains: action.toUpperCase() };

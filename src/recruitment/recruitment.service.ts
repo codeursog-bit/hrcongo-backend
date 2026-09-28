@@ -572,8 +572,21 @@ export class RecruitmentService {
   async updateCandidateStatus(
     candidateId: string,
     status: string,
+    userId: string,
     notes?: string,
   ) {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { companyId: true },
+    });
+    if (!user || !user.companyId) throw new NotFoundException('Accès refusé');
+    const candidate = await this.prisma.candidate.findUnique({
+      where: { id: candidateId },
+      include: { jobOffer: { select: { companyId: true } } },
+    });
+    if (!candidate || candidate.jobOffer.companyId !== user.companyId)
+      throw new NotFoundException('Candidat introuvable');
+
     return this.prisma.candidate.update({
       where: { id: candidateId },
       data: {
@@ -584,11 +597,17 @@ export class RecruitmentService {
   }
 
   async convertToEmployee(candidateId: string, userId: string) {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { companyId: true },
+    });
+    if (!user || !user.companyId) throw new NotFoundException('Accès refusé');
     const candidate = await this.prisma.candidate.findUnique({
       where: { id: candidateId },
       include: { jobOffer: true },
     });
-    if (!candidate) throw new NotFoundException('Candidat introuvable');
+    if (!candidate || candidate.jobOffer.companyId !== user.companyId)
+      throw new NotFoundException('Candidat introuvable');
     const matricule = `EMP-${Date.now().toString().slice(-6)}`;
     const employee = await this.prisma.employee.create({
       data: {

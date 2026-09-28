@@ -770,6 +770,7 @@ import { resolveCycleWindow } from '../../leaves/leaves-common.util';
 import { YtdCheckpointService } from './ytd-checkpoint.service';
 import { AttendanceSummaryService } from '../../attendance/attendance-summary.service';
 import { PayrollBonusesService } from './payroll-bonuses.service';
+import { resolveVerifiedCompanyId } from '../../common/resolve-verified-company.util';
 import {
   CompanyNotFoundException,
   EmployeeNotFoundException,
@@ -944,23 +945,25 @@ export class ManualPayrollService {
     return [...dbNotOverridden, ...manualBonuses];
   }
 
+  // 🔒 CORRECTIF SÉCURITÉ (audit) : overrideCompanyId (cabinet) et le
+  // combo manageMultipleCompanies+overrideCompanyId (portefeuille) étaient
+  // acceptés tels quels, jamais vérifiés contre userCompany/cabinetCompany
+  // — sur un chemin d'ÉCRITURE (création de paie manuelle), donc plus
+  // grave qu'une simple fuite en lecture. Délègue à la fonction centrale.
   private async resolveCompanyId(
     userId: string,
     overrideCompanyId?: string,
   ): Promise<string> {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
-      select: { companyId: true, role: true, manageMultipleCompanies: true },
+      select: { id: true, companyId: true, role: true, manageMultipleCompanies: true },
     });
-    const isCabinet =
-      user?.role === 'CABINET_ADMIN' || user?.role === 'CABINET_GESTIONNAIRE';
-    // 🆕 Admin multi-entreprises : override UNIQUEMENT si overrideCompanyId
-    // est fourni (appel venant du portefeuille) — sinon on retombe sur
-    // l'entreprise active de l'admin, comme un admin normal. Sans ce `&&`,
-    // la paie manuelle depuis la page normale perdait l'entreprise.
-    const companyId = isCabinet
-      ? overrideCompanyId
-      : (user?.manageMultipleCompanies && overrideCompanyId) || user?.companyId;
+    if (!user) throw new CompanyNotFoundException();
+    const companyId = await resolveVerifiedCompanyId(
+      this.prisma,
+      user,
+      overrideCompanyId,
+    );
     if (!companyId) throw new CompanyNotFoundException();
     return companyId;
   }

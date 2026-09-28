@@ -380,9 +380,16 @@ export class PayrollItemsService {
             label: tax.name,
             type: 'DEDUCTION',
             base: tax.base > 0 ? tax.base : null,
-            // ✅ rate=1 pour les taxes à montant fixe (TOL, CAMU...)
-            // Permet au bulletin d'afficher base=1000/5000, taux=1, montant=1000/5000
-            rate: tax.base > 0 ? 1 : null,
+            // ✅ FIX — avant ce patch, rate=1 était codé en dur dès que
+            // base > 0, pour TOUTES les taxes custom, y compris celles au
+            // pourcentage (ex: CAMU solidarité = 0,5%). Le bulletin
+            // affichait alors "1" au lieu du vrai taux. Maintenant : taxe
+            // à montant fixe (TOL...) → rate=1 (flag d'affichage, base
+            // affichée = montant) ; taxe au pourcentage (CAMU...) → le
+            // vrai taux (ex: 0.005), affiché "0,5" côté front.
+            rate: tax.baseType === 'FIXED'
+              ? (tax.base > 0 ? 1 : null)
+              : (tax.employeeRate ?? null),
             quantity: null,
             amount: tax.employeeAmount,
             isTaxable: false,
@@ -574,7 +581,13 @@ export class PayrollItemsService {
             label: tax.name,
             type: 'EMPLOYER_COST',
             base: tax.base > 0 ? tax.base : null,
-            rate: null,
+            // ✅ FIX — même correction que côté salarié (§7) : rate était
+            // toujours null ici, donc aucune taxe custom patronale
+            // n'affichait de taux. Taxe à montant fixe → 1 (flag) ; taxe
+            // au pourcentage → le vrai taux (ex: employerRate).
+            rate: tax.baseType === 'FIXED'
+              ? (tax.base > 0 ? 1 : null)
+              : (tax.employerRate ?? null),
             quantity: null,
             empRate: null,
             empAmount: tax.employerAmount,

@@ -21,10 +21,19 @@ export class LoansRepaymentService {
 
   // ── Prêts ────────────────────────────────────────────────────────────────
 
-  /** Déduction manuelle ponctuelle (déclenchement isolé, hors cycle de paie normal). */
-  async processMonthlyDeduction(loanId: string) {
-    const loan = await this.prisma.loan.findUnique({ where: { id: loanId } });
-    if (!loan || loan.status !== 'ACTIVE') return;
+  /**
+   * Déduction manuelle ponctuelle (déclenchement isolé, hors cycle de paie
+   * normal — le cycle de paie automatique passe par deductionsService, pas
+   * par ici). Réservée RH/Admin (FINANCE_ROLES), jamais l'employé lui-même,
+   * sinon n'importe qui pouvait remettre son propre solde à 0 sans qu'un
+   * centime ait réellement été retenu sur sa paie.
+   */
+  async processMonthlyDeduction(loanId: string, userId: string, overrideCompanyId?: string) {
+    const user = await this.common.getVerifiedUser(userId);
+    this.common.applyCompanyOverride(user, overrideCompanyId);
+    this.common.requireFinanceAccess(user.role);
+    const loan = await this.common.getOwnedLoanOrThrow(loanId, user.companyId);
+    if (loan.status !== 'ACTIVE') return;
 
     const newBalance = Math.max(0, Number(loan.remainingBalance) - Number(loan.monthlyRepayment));
 
@@ -190,7 +199,13 @@ export class LoansRepaymentService {
     return updated;
   }
 
-  async markAdvanceAsDeducted(advanceId: string) {
+  /** Réservée RH/Admin — même raison que processMonthlyDeduction : un employé ne doit jamais pouvoir marquer sa propre avance comme déduite. */
+  async markAdvanceAsDeducted(advanceId: string, userId: string, overrideCompanyId?: string) {
+    const user = await this.common.getVerifiedUser(userId);
+    this.common.applyCompanyOverride(user, overrideCompanyId);
+    this.common.requireFinanceAccess(user.role);
+    await this.common.getOwnedAdvanceOrThrow(advanceId, user.companyId);
+
     return this.prisma.advance.update({ where: { id: advanceId }, data: { status: 'DEDUCTED', deducted: true, remainingBalance: 0 } });
   }
 }

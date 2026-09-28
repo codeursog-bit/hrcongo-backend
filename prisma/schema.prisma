@@ -719,7 +719,7 @@ model PayrollItem {
   type PayrollItemType
 
   base   Decimal? @db.Decimal(15, 2)
-  rate   Decimal? @db.Decimal(10, 4)
+  rate   Decimal? @db.Decimal(10, 6)
   amount Decimal  @db.Decimal(15, 2)
 
   isTaxable Boolean @default(true)

@@ -248,7 +248,53 @@ export class UsersService {
     });
   }
 
-  async update(id: string, updateUserDto: UpdateUserDto) {
+  async update(
+    id: string,
+    updateUserDto: UpdateUserDto,
+    requestingUserId: string,
+  ) {
+    const requester = await this.prisma.user.findUnique({
+      where: { id: requestingUserId },
+      select: { id: true, companyId: true, role: true },
+    });
+    if (!requester) {
+      throw new ForbiddenException("Vous n'avez pas les droits pour effectuer cette action.");
+    }
+
+    const target = await this.prisma.user.findUnique({
+      where: { id },
+      select: { id: true, companyId: true, role: true },
+    });
+    if (!target) throw new NotFoundException('Utilisateur introuvable.');
+
+    if (target.companyId !== requester.companyId) {
+      throw new ForbiddenException("Vous n'avez pas accès à cet utilisateur.");
+    }
+
+    // 🔒 role / isActive / canRecordAttendanceForAll sont des champs sensibles :
+    // réservés aux ADMIN/SUPER_ADMIN de la même entreprise, et jamais sur son propre compte.
+    const SENSITIVE_FIELDS = ['role', 'isActive', 'canRecordAttendanceForAll'] as const;
+    const touchesSensitive = SENSITIVE_FIELDS.some(
+      (f) => updateUserDto[f] !== undefined,
+    );
+
+    if (touchesSensitive) {
+      if (!['ADMIN', 'SUPER_ADMIN'].includes(requester.role)) {
+        throw new ForbiddenException(
+          "Vous n'avez pas les droits pour modifier ces champs.",
+        );
+      }
+      if (target.id === requester.id) {
+        throw new ForbiddenException(
+          'Vous ne pouvez pas modifier ces champs sur votre propre compte.',
+        );
+      }
+    } else if (target.id !== requester.id && !['ADMIN', 'SUPER_ADMIN'].includes(requester.role)) {
+      throw new ForbiddenException(
+        "Vous n'avez pas les droits pour modifier cet utilisateur.",
+      );
+    }
+
     return this.prisma.user.update({
       where: { id },
       data: {

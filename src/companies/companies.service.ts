@@ -225,6 +225,7 @@ import { AffiliateService } from '../affiliate/affiliate.service';
 import * as CONST from '../payroll/settings/constants/settings.constants';
 import { Prisma } from '@prisma/client';
 import { ConventionsService } from '../conventions/conventions.service';
+import { assertCompanyAccess } from '../common/resolve-verified-company.util';
 
 @Injectable()
 export class CompaniesService {
@@ -348,6 +349,15 @@ export class CompaniesService {
     });
   }
 
+  // 🔒 CORRECTIF SÉCURITÉ (audit) : GET /companies/:id renvoyait n'importe
+  // quelle entreprise (avec départements, paramètres de paie, abonnement) à
+  // tout utilisateur connecté. Accessible désormais à sa propre entreprise
+  // ou à un cabinet/portefeuille réellement lié.
+  async findOneForUser(id: string, userId: string) {
+    await assertCompanyAccess(this.prisma, userId, id);
+    return this.findOne(id);
+  }
+
   async findByUser(userId: string) {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
@@ -397,7 +407,11 @@ export class CompaniesService {
   async uploadLogo(
     companyId: string,
     file: Express.Multer.File,
+    userId: string,
   ): Promise<{ logo: string }> {
+    // 🔒 CORRECTIF SÉCURITÉ (audit) : l'ID d'entreprise de l'URL n'était
+    // jamais comparé à l'appelant, et aucun rôle n'était exigé.
+    await assertCompanyAccess(this.prisma, userId, companyId, { write: true });
     if (!file) throw new BadRequestException('Aucun fichier fourni.');
 
     const allowed = [
@@ -450,7 +464,11 @@ export class CompaniesService {
     return { logo: logoUrl };
   }
 
-  async deleteLogo(companyId: string): Promise<{ logo: null }> {
+  async deleteLogo(
+    companyId: string,
+    userId: string,
+  ): Promise<{ logo: null }> {
+    await assertCompanyAccess(this.prisma, userId, companyId, { write: true });
     const company = await this.prisma.company.findUnique({
       where: { id: companyId },
       select: { id: true, logo: true },
@@ -481,7 +499,9 @@ export class CompaniesService {
   async uploadCachet(
     companyId: string,
     file: Express.Multer.File,
+    userId: string,
   ): Promise<{ cachetUrl: string }> {
+    await assertCompanyAccess(this.prisma, userId, companyId, { write: true });
     if (!file) throw new BadRequestException('Aucun fichier fourni.');
 
     const allowed = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'];
@@ -528,7 +548,11 @@ export class CompaniesService {
     return { cachetUrl };
   }
 
-  async deleteCachet(companyId: string): Promise<{ cachetUrl: null }> {
+  async deleteCachet(
+    companyId: string,
+    userId: string,
+  ): Promise<{ cachetUrl: null }> {
+    await assertCompanyAccess(this.prisma, userId, companyId, { write: true });
     const company = await this.prisma.company.findUnique({
       where: { id: companyId },
       select: { id: true, cachetUrl: true },

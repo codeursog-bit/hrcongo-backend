@@ -110,6 +110,18 @@ export const ABSENCE_MOTIFS_GRILLE: Record<string, AbsenceMotifGrille> = {
       { label: 'Déménagement', subType: 'DEMENAGEMENT', days: 2 },
     ],
   },
+  MINE: {
+    // Art.65 — limite globale de 10 jours ouvrables par année civile.
+    annualCeiling: 10,
+    rows: [
+      { label: 'Mariage du salarié', subType: 'MARIAGE', days: 3 },
+      { label: "Mariage d'un enfant, d'un frère ou d'une sœur", subType: 'MARIAGE', days: 1 },
+      { label: 'Décès du conjoint légitime', subType: 'DECES', days: 7 },
+      { label: 'Décès d\'un descendant, ascendant, frère ou sœur', subType: 'DECES', days: 3 },
+      { label: "Accouchement de l'épouse légitime", subType: 'NAISSANCE', days: 3 },
+      { label: 'Retrait de deuil (conjoint, descendant, ascendant ou collatéral en ligne directe)', subType: 'RETRAIT_DEUIL', days: 1 },
+    ],
+  },
   BTP: {
     annualCeiling: 15,
     rows: [

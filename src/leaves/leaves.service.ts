@@ -1603,7 +1603,21 @@ export class LeavesService {
       whereClause.employee = { departmentId: deptId };
     }
 
-    if (employeeId) whereClause.employeeId = employeeId;
+    // 🔒 CORRECTIF SÉCURITÉ (audit) : un EMPLOYEE ne voyait ses propres
+    // congés QUE via findMyLeaves — findAll ne le restreignait pas du
+    // tout, ni contre un employeeId de query fourni par le client. Même
+    // principe que TrainingService.getPasseport (self-access resolu par
+    // email + companyId, jamais par un ID client).
+    if (!isCabinet && user.role === 'EMPLOYEE') {
+      const ownEmployee = await this.prisma.employee.findFirst({
+        where: { email: user.email ?? undefined, companyId: user.companyId },
+        select: { id: true },
+      });
+      if (!ownEmployee) return [];
+      whereClause.employeeId = ownEmployee.id;
+    } else if (employeeId) {
+      whereClause.employeeId = employeeId;
+    }
 
     return this.prisma.leave.findMany({
       where: whereClause,
@@ -1692,6 +1706,19 @@ export class LeavesService {
         select: { departmentId: true },
       });
       if (!deptId || empDeptId?.departmentId !== deptId) {
+        throw new ForbiddenException("Vous n'avez pas accès à cette demande");
+      }
+    }
+
+    // 🔒 CORRECTIF SÉCURITÉ (audit) : même restriction que findAll — un
+    // EMPLOYEE ne doit voir que sa propre demande, jamais celle d'un
+    // collègue devinée par son ID.
+    if (!isCabinet && user.role === 'EMPLOYEE') {
+      const ownEmployee = await this.prisma.employee.findFirst({
+        where: { email: user.email ?? undefined, companyId: user.companyId },
+        select: { id: true },
+      });
+      if (!ownEmployee || leave.employeeId !== ownEmployee.id) {
         throw new ForbiddenException("Vous n'avez pas accès à cette demande");
       }
     }

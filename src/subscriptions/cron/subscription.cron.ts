@@ -83,6 +83,31 @@ export class SubscriptionCronService {
   }
 
   // ==========================================================================
+  // 🔎 YABETOO — VÉRIFIER LES PAIEMENTS EN ATTENTE (TOUTES LES 3 MINUTES)
+  // ==========================================================================
+  //
+  // Filet de sécurité indispensable ici : contrairement à Moteki/Chariow,
+  // Yabetoo ne dépendait jusqu'ici QUE du webhook.
+  // ==========================================================================
+
+  @Cron('*/3 * * * *', {
+    name: 'check-pending-yabetoo-payments',
+    timeZone: 'Africa/Brazzaville',
+  })
+  async handlePendingYabetooPayments() {
+    try {
+      const result = await this.subscriptionsService.checkPendingYabetooPayments();
+      if (result.checked > 0) {
+        this.logger.log(
+          `🔎 [Yabetoo] ${result.checked} paiement(s) vérifié(s), ${result.activated} activé(s)`,
+        );
+      }
+    } catch (error) {
+      this.logger.error('❌ Error checking pending Yabetoo payments:', error);
+    }
+  }
+
+  // ==========================================================================
   // 🔎 CHARIOW — VÉRIFIER LES VENTES EN ATTENTE (TOUTES LES 5 MINUTES)
   // ==========================================================================
   //

@@ -33,8 +33,9 @@ export class BonusQuantityController {
     @Query('employeeId') employeeId: string,
     @Query('month', ParseIntPipe) month: number,
     @Query('year', ParseIntPipe) year: number,
+    @GetUser('id') userId: string,
   ) {
-    return this.svc.findAllForEmployee(employeeId, month, year);
+    return this.svc.findAllForEmployee(employeeId, month, year, userId);
   }
 
   // ── POST /employee-bonuses/:bonusId/quantities ───────────────────────────────
@@ -46,11 +47,18 @@ export class BonusQuantityController {
     @Param('bonusId') bonusId: string,
     @Body()
     body: { month: number; year: number; quantity: number; note?: string },
+    @GetUser('id') userId: string,
   ) {
-    return this.svc.upsert(bonusId, body.month, body.year, {
-      quantity: body.quantity,
-      note: body.note,
-    });
+    return this.svc.upsert(
+      bonusId,
+      body.month,
+      body.year,
+      {
+        quantity: body.quantity,
+        note: body.note,
+      },
+      userId,
+    );
   }
 
   // ── GET /employee-bonuses/:bonusId/quantities?month=&year= ──────────────────
@@ -61,8 +69,9 @@ export class BonusQuantityController {
     @Param('bonusId') bonusId: string,
     @Query('month', ParseIntPipe) month: number,
     @Query('year', ParseIntPipe) year: number,
+    @GetUser('id') userId: string,
   ) {
-    return this.svc.findOne(bonusId, month, year);
+    return this.svc.findOne(bonusId, month, year, userId);
   }
 
   // ── DELETE /employee-bonuses/:bonusId/quantities?month=&year= ───────────────
@@ -73,8 +82,9 @@ export class BonusQuantityController {
     @Param('bonusId') bonusId: string,
     @Query('month', ParseIntPipe) month: number,
     @Query('year', ParseIntPipe) year: number,
+    @GetUser('id') userId: string,
   ) {
-    await this.svc.remove(bonusId, month, year);
+    await this.svc.remove(bonusId, month, year, userId);
     return { deleted: true };
   }
 }

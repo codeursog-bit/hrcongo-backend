@@ -13,6 +13,7 @@
 
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
+import { resolveVerifiedCompanyId } from '../../common/resolve-verified-company.util';
 import { AttendanceCalculationService } from './attendance-calculation.service';
 import {
   AttendanceUtilsService,
@@ -206,14 +207,20 @@ export class AttendanceReportService {
   ): Promise<MonthlyReportItem[]> {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
-      select: { companyId: true, role: true, email: true, manageMultipleCompanies: true },
+      select: { id: true, companyId: true, role: true, email: true, manageMultipleCompanies: true },
     });
+    if (!user) return [];
 
     const isCabinet =
-      user?.role === 'CABINET_ADMIN' || user?.role === 'CABINET_GESTIONNAIRE';
-    const canOverride = isCabinet || user?.manageMultipleCompanies;
-    const targetCompanyId =
-      canOverride && overrideCompanyId ? overrideCompanyId : user?.companyId;
+      user.role === 'CABINET_ADMIN' || user.role === 'CABINET_GESTIONNAIRE';
+    // 🔒 CORRECTIF SÉCURITÉ (audit) : overrideCompanyId était accepté tel
+    // quel dès que canOverride était vrai, jamais vérifié contre
+    // userCompany/cabinetCompany. Rebranché sur la fonction centrale.
+    const targetCompanyId = await resolveVerifiedCompanyId(
+      this.prisma,
+      user,
+      overrideCompanyId,
+    );
     if (!targetCompanyId) return [];
 
     // 🔒 Scoping par rôle — c'était le trou : avant ce correctif, TOUT

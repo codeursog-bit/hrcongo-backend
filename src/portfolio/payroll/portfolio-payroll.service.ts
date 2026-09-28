@@ -179,6 +179,6 @@ export class PortfolioPayrollService {
     });
     if (!payroll) throw new NotFoundException('Bulletin introuvable.');
     await this.membership.assertCompanyMembership(userId, payroll.companyId);
-    return this.payrollsService.remove(id);
+    return this.payrollsService.remove(id, userId);
   }
 }

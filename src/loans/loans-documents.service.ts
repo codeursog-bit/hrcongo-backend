@@ -8,6 +8,7 @@ import {
   Injectable,
   NotFoundException,
   BadRequestException,
+  ForbiddenException,
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { LoansCommonService } from './loans-common.service';
@@ -19,8 +20,16 @@ export class LoansDocumentsService {
     private common: LoansCommonService,
   ) {}
 
-  /** Données résolues pour le rendu du document imprimable (prêt argent/marchandise). */
-  async getLoanDocumentData(id: string) {
+  /**
+   * Données résolues pour le rendu du document imprimable (prêt argent/marchandise).
+   * Même contrôle d'accès que findOneLoan : RH/Admin de l'entreprise, ou
+   * l'employé propriétaire du dossier — jamais un utilisateur d'une autre
+   * entreprise qui devinerait l'ID.
+   */
+  async getLoanDocumentData(id: string, userId: string, overrideCompanyId?: string) {
+    const user = await this.common.getVerifiedUser(userId);
+    this.common.applyCompanyOverride(user, overrideCompanyId);
+
     const loan = await this.prisma.loan.findUnique({
       where: { id },
       include: {
@@ -31,12 +40,15 @@ export class LoansDocumentsService {
             employeeNumber: true,
             position: true,
             phone: true,
+            companyId: true,
             department: { select: { name: true } },
           },
         },
       },
     });
     if (!loan) throw new NotFoundException('Prêt introuvable.');
+    if (loan.employee.companyId !== user.companyId) throw new ForbiddenException('Accès refusé');
+    await this.common.assertFinanceOrSelfAccess(user, loan.employeeId);
 
     const company = await this.prisma.company.findFirst({
       where: { employees: { some: { id: loan.employeeId } } },
@@ -86,8 +98,14 @@ export class LoansDocumentsService {
     };
   }
 
-  /** Données résolues pour le rendu du document imprimable (avance sur salaire). */
-  async getAdvanceDocumentData(id: string) {
+  /**
+   * Données résolues pour le rendu du document imprimable (avance sur salaire).
+   * Même contrôle d'accès que findOneAdvance — voir getLoanDocumentData ci-dessus.
+   */
+  async getAdvanceDocumentData(id: string, userId: string, overrideCompanyId?: string) {
+    const user = await this.common.getVerifiedUser(userId);
+    this.common.applyCompanyOverride(user, overrideCompanyId);
+
     const advance = await this.prisma.advance.findUnique({
       where: { id },
       include: {
@@ -98,12 +116,15 @@ export class LoansDocumentsService {
             employeeNumber: true,
             position: true,
             phone: true,
+            companyId: true,
             department: { select: { name: true } },
           },
         },
       },
     });
     if (!advance) throw new NotFoundException('Avance introuvable.');
+    if (advance.employee.companyId !== user.companyId) throw new ForbiddenException('Accès refusé');
+    await this.common.assertFinanceOrSelfAccess(user, advance.employeeId);
 
     const company = await this.prisma.company.findFirst({
       where: { employees: { some: { id: advance.employeeId } } },

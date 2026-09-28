@@ -65,7 +65,9 @@ export class LoansService {
   }
 
   // ── Remboursement / déduction / historique ───────────────────────────────
-  processMonthlyDeduction(loanId: string) { return this.repayment.processMonthlyDeduction(loanId); }
+  processMonthlyDeduction(loanId: string, userId: string, overrideCompanyId?: string) {
+    return this.repayment.processMonthlyDeduction(loanId, userId, overrideCompanyId);
+  }
   recordCashRepayment(loanId: string, amount: number, userId: string, overrideCompanyId?: string) {
     return this.repayment.recordCashRepayment(loanId, amount, userId, overrideCompanyId);
   }
@@ -81,11 +83,17 @@ export class LoansService {
   }
   getAdvanceHistory(advanceId: string, userId: string, overrideCompanyId?: string) { return this.repayment.getAdvanceHistory(advanceId, userId, overrideCompanyId); }
   markAdvancePaidInCash(id: string, userId: string, overrideCompanyId?: string) { return this.repayment.markAdvancePaidInCash(id, userId, overrideCompanyId); }
-  markAdvanceAsDeducted(advanceId: string) { return this.repayment.markAdvanceAsDeducted(advanceId); }
+  markAdvanceAsDeducted(advanceId: string, userId: string, overrideCompanyId?: string) {
+    return this.repayment.markAdvanceAsDeducted(advanceId, userId, overrideCompanyId);
+  }
 
   // ── Documents imprimables ─────────────────────────────────────────────────
-  getLoanDocumentData(id: string) { return this.documents.getLoanDocumentData(id); }
-  getAdvanceDocumentData(id: string) { return this.documents.getAdvanceDocumentData(id); }
+  getLoanDocumentData(id: string, userId: string, overrideCompanyId?: string) {
+    return this.documents.getLoanDocumentData(id, userId, overrideCompanyId);
+  }
+  getAdvanceDocumentData(id: string, userId: string, overrideCompanyId?: string) {
+    return this.documents.getAdvanceDocumentData(id, userId, overrideCompanyId);
+  }
   setLoanPrintAuthorization(id: string, authorized: boolean, userId: string) {
     return this.documents.setLoanPrintAuthorization(id, authorized, userId);
   }

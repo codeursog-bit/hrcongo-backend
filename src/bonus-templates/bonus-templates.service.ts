@@ -23,9 +23,18 @@
 //    préservée).
 // ============================================================================
 
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  NotFoundException,
+  ForbiddenException,
+} from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { getConventionBonusPresets } from './convention-bonus-presets';
+
+// Domaine finance : ADMIN + SUPER_ADMIN + HR_MANAGER uniquement — même
+// périmètre que le module prêts/avances et company-deductions.
+const FINANCE_ROLES = ['ADMIN', 'SUPER_ADMIN', 'HR_MANAGER'];
 
 // ─── Catégories avec comportements automatiques ───────────────────────────────
 
@@ -322,8 +331,34 @@ export class BonusTemplatesService {
 
   constructor(private prisma: PrismaService) {}
 
+  /**
+   * Vérifie que l'appelant a bien le rôle finance (ADMIN/SUPER_ADMIN/HR_MANAGER)
+   * et renvoie son companyId — même principe que EmployeeBonusesService /
+   * CompanyDeductionsService. Avant, create/update/remove ne vérifiaient que
+   * le companyId (issu tel quel du JWT), jamais le rôle : n'importe quel
+   * utilisateur authentifié pouvait modifier le catalogue de primes.
+   */
+  private async getVerifiedFinanceUser(
+    userId: string,
+  ): Promise<{ id: string; companyId: string; role: string }> {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { id: true, companyId: true, role: true },
+    });
+    if (!user || !user.companyId)
+      throw new ForbiddenException('Utilisateur non rattaché à une entreprise.');
+    if (!FINANCE_ROLES.includes(user.role)) {
+      throw new ForbiddenException(
+        "La gestion des primes est réservée à l'administration et aux RH.",
+      );
+    }
+    return { ...user, companyId: user.companyId };
+  }
+
   // ── CREATE ─────────────────────────────────────────────────────────────────
-  async create(companyId: string, dto: CreateBonusTemplateDto) {
+  async create(userId: string, dto: CreateBonusTemplateDto) {
+    const user = await this.getVerifiedFinanceUser(userId);
+    const companyId = user.companyId;
     // Auto-remplissage des flags selon la catégorie si non fournis explicitement
     const category = dto.bonusCategory ?? 'PERFORMANCE';
     const defaults = CATEGORY_DEFAULTS[category];
@@ -375,7 +410,9 @@ export class BonusTemplatesService {
   }
 
   // ── UPDATE ─────────────────────────────────────────────────────────────────
-  async update(id: string, companyId: string, dto: UpdateBonusTemplateDto) {
+  async update(id: string, userId: string, dto: UpdateBonusTemplateDto) {
+    const user = await this.getVerifiedFinanceUser(userId);
+    const companyId = user.companyId;
     await this.findOne(id, companyId);
 
     // ✅ FIX (crash Prisma) : whitelist explicite — on ne recopie QUE les
@@ -468,7 +505,9 @@ export class BonusTemplatesService {
   }
 
   // ── REMOVE (soft delete) ───────────────────────────────────────────────────
-  async remove(id: string, companyId: string) {
+  async remove(id: string, userId: string) {
+    const user = await this.getVerifiedFinanceUser(userId);
+    const companyId = user.companyId;
     await this.findOne(id, companyId);
     return this.prisma.bonusTemplate.update({
       where: { id },

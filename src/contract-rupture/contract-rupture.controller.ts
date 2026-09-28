@@ -11,11 +11,14 @@ import {
   Query,
   HttpCode,
   HttpStatus,
+  UseGuards,
 } from '@nestjs/common';
+import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { ContractRuptureService } from './contract-rupture.service';
 import type { CreateRuptureDto } from './dto/create-rupture.dto';
 
 @Controller('rupture')
+@UseGuards(JwtAuthGuard)
 export class ContractRuptureController {
   constructor(private readonly ruptureService: ContractRuptureService) {}
 

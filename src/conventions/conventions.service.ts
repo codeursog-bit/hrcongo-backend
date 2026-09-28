@@ -48,6 +48,10 @@ import {
   buildTransportCategories,
   buildTransportAncienneteRules,
 } from './transport-grille';
+import {
+  buildMineCategories,
+  buildMineAncienneteRules,
+} from './mine-grille';
 
 export interface PredefinedConvention {
   code: string;
@@ -172,6 +176,20 @@ export class ConventionsService {
           'Convention collective des Auxiliaires de Transports, Terminaux à Conteneurs et Assimilés (signée 19/01/2024, effet rétroactif 01/01/2024)',
         categories: buildTransportCategories(),
         defaultRules: buildTransportAncienneteRules(),
+      },
+
+      // ========================================================================
+      // ⛏️ MINE — Prospection, Recherche et Exploitation Minières (22/02/2013)
+      // Grille Annexe 2 (image nette, échelons variables 1-6) + ancienneté
+      // fidèle à l'Art.74. Voir mine-grille.ts.
+      // ========================================================================
+      {
+        code: 'MINE',
+        name: 'MINE - Prospection, Recherche et Exploitation Minières',
+        description:
+          "Convention collective des Entreprises de Prospection, de Recherche et d'Exploitation Minières (signée 22/02/2013, Pointe-Noire) — grille salariale Annexe 2 (barème initial, révisable tous les 2 ans selon l'inflation CNSEE)",
+        categories: buildMineCategories(),
+        defaultRules: buildMineAncienneteRules(),
       },
 
       // ========================================================================

@@ -262,6 +262,7 @@ import {
   Injectable,
   NotFoundException,
   BadRequestException,
+  ForbiddenException,
   Logger,
 } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
@@ -269,6 +270,10 @@ import {
   CATEGORY_DEFAULTS,
   type BonusCategory,
 } from '../../bonus-templates/bonus-templates.service';
+
+// Domaine finance : ADMIN + SUPER_ADMIN + HR_MANAGER uniquement — même
+// périmètre que le module prêts/avances et company-deductions.
+const FINANCE_ROLES = ['ADMIN', 'SUPER_ADMIN', 'HR_MANAGER'];
 
 export interface CreateEmployeeBonusDto {
   employeeId: string;
@@ -384,8 +389,50 @@ export class EmployeeBonusesService {
 
   constructor(private prisma: PrismaService) {}
 
+  /**
+   * Vérifie que l'appelant a bien le rôle finance (ADMIN/SUPER_ADMIN/HR_MANAGER)
+   * et renvoie son companyId — même principe que CompanyDeductionsService.
+   * Sans ça, n'importe quel employé authentifié pouvait s'attribuer une
+   * prime à lui-même via POST /employees/:employeeId/bonuses.
+   */
+  private async getVerifiedFinanceUser(
+    userId: string,
+  ): Promise<{ id: string; companyId: string; role: string }> {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { id: true, companyId: true, role: true },
+    });
+    if (!user || !user.companyId)
+      throw new ForbiddenException('Utilisateur non rattaché à une entreprise.');
+    if (!FINANCE_ROLES.includes(user.role)) {
+      throw new ForbiddenException(
+        "La gestion des primes est réservée à l'administration et aux RH.",
+      );
+    }
+    return { ...user, companyId: user.companyId };
+  }
+
+  /** Vérifie qu'une prime existe et appartient bien à un employé de l'entreprise de l'appelant. */
+  private async getOwnedBonusOrThrow(id: string, companyId: string) {
+    const bonus = await this.prisma.employeeBonus.findUnique({
+      where: { id },
+      include: { employee: { select: { companyId: true } } },
+    });
+    if (!bonus) throw new NotFoundException(`Prime ${id} introuvable`);
+    if (bonus.employee.companyId !== companyId)
+      throw new ForbiddenException('Accès refusé');
+    return bonus;
+  }
+
   // ── CREATE ─────────────────────────────────────────────────────────────────
-  async create(dto: CreateEmployeeBonusDto) {
+  async create(dto: CreateEmployeeBonusDto, userId: string) {
+    const user = await this.getVerifiedFinanceUser(userId);
+    const employee = await this.prisma.employee.findFirst({
+      where: { id: dto.employeeId, companyId: user.companyId },
+    });
+    if (!employee)
+      throw new NotFoundException('Employé introuvable dans cette entreprise.');
+
     // 1. Résoudre les valeurs depuis le template si fourni
     let resolvedIsTaxable = dto.isTaxable ?? true;
     let resolvedIsCnss = dto.isCnss ?? true;
@@ -569,10 +616,9 @@ export class EmployeeBonusesService {
   }
 
   // ── UPDATE ─────────────────────────────────────────────────────────────────
-  async update(id: string, dto: UpdateBonusDto, _userId?: string) {
-    await this.prisma.employeeBonus.findUnique({ where: { id } }).then((b) => {
-      if (!b) throw new NotFoundException(`Prime ${id} introuvable`);
-    });
+  async update(id: string, dto: UpdateBonusDto, userId: string) {
+    const user = await this.getVerifiedFinanceUser(userId);
+    await this.getOwnedBonusOrThrow(id, user.companyId);
 
     const data: any = {};
     if (dto.isTaxable !== undefined) data.isTaxable = dto.isTaxable;
@@ -627,10 +673,9 @@ export class EmployeeBonusesService {
   }
 
   // ── DELETE ─────────────────────────────────────────────────────────────────
-  async remove(id: string, _userId?: string) {
-    await this.prisma.employeeBonus.findUnique({ where: { id } }).then((b) => {
-      if (!b) throw new NotFoundException(`Prime ${id} introuvable`);
-    });
+  async remove(id: string, userId: string) {
+    const user = await this.getVerifiedFinanceUser(userId);
+    await this.getOwnedBonusOrThrow(id, user.companyId);
     await this.prisma.employeeBonus.delete({ where: { id } });
     return { deleted: true };
   }

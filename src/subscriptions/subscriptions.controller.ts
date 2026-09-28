@@ -266,6 +266,33 @@ export class SubscriptionsController {
   }
 
   // ==========================================================================
+  // 🔎 YABETOO — VÉRIFIER À LA DEMANDE SI UN PAIEMENT EST PAYÉ
+  // (filet de sécurité — le webhook reste la voie normale/rapide, ceci
+  // couvre le cas où il n'arrive pas)
+  // ==========================================================================
+
+  @Post('yabetoo/check-payment/:paymentId')
+  @HttpCode(HttpStatus.OK)
+  async checkYabetooPayment(
+    @Param('paymentId') paymentId: string,
+    @Request() req,
+  ) {
+    const user = req.user;
+    if (!user.companyId)
+      throw new ForbiddenException('Aucune entreprise associée');
+
+    const payment = await this.subscriptionsService.getPaymentOwnedByCompany(
+      paymentId,
+      user.companyId,
+    );
+    if (!payment) {
+      throw new ForbiddenException('Paiement introuvable pour votre entreprise');
+    }
+
+    return this.subscriptionsService.checkAndActivateYabetooPayment(paymentId);
+  }
+
+  // ==========================================================================
   // 💳 RÉCUPÉRER L'HISTORIQUE DES PAIEMENTS
   // ==========================================================================
 

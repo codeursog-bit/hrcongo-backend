@@ -86,10 +86,11 @@ export class CompaniesController {
   uploadLogo(
     @Param('id') id: string,
     @UploadedFile() file: Express.Multer.File,
+    @Request() req,
   ) {
     if (!file)
       throw new BadRequestException('Fichier manquant dans le champ "logo".');
-    return this.companiesService.uploadLogo(id, file);
+    return this.companiesService.uploadLogo(id, file, req.user.userId);
   }
 
   /**
@@ -98,8 +99,8 @@ export class CompaniesController {
    * Retourne : { logo: null }
    */
   @Delete(':id/logo')
-  deleteLogo(@Param('id') id: string) {
-    return this.companiesService.deleteLogo(id);
+  deleteLogo(@Param('id') id: string, @Request() req) {
+    return this.companiesService.deleteLogo(id, req.user.userId);
   }
 
   // ── CACHET / SIGNATURE ───────────────────────────────────────────────────
@@ -115,10 +116,11 @@ export class CompaniesController {
   uploadCachet(
     @Param('id') id: string,
     @UploadedFile() file: Express.Multer.File,
+    @Request() req,
   ) {
     if (!file)
       throw new BadRequestException('Fichier manquant dans le champ "cachet".');
-    return this.companiesService.uploadCachet(id, file);
+    return this.companiesService.uploadCachet(id, file, req.user.userId);
   }
 
   /**
@@ -127,18 +129,18 @@ export class CompaniesController {
    * Retourne : { cachetUrl: null }
    */
   @Delete(':id/cachet')
-  deleteCachet(@Param('id') id: string) {
-    return this.companiesService.deleteCachet(id);
+  deleteCachet(@Param('id') id: string, @Request() req) {
+    return this.companiesService.deleteCachet(id, req.user.userId);
   }
 
   // ✅ GET :id en DERNIER — pour ne pas capturer "mine", "bulletin-template", etc.
   // GET /companies/:id — infos d'une entreprise par ID (utilisé par cabinet)
   @Get(':id')
-  findOne(@Param('id') id: string) {
+  findOne(@Param('id') id: string, @Request() req) {
     // Guard UUID — évite que des segments de route textuels arrivent ici
     if (!UUID_REGEX.test(id)) {
       throw new BadRequestException(`Identifiant invalide : "${id}"`);
     }
-    return this.companiesService.findOne(id);
+    return this.companiesService.findOneForUser(id, req.user.userId);
   }
 }

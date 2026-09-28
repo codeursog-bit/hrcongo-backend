@@ -10,6 +10,7 @@ import {
   Request,
   HttpException,
   HttpStatus,
+  ForbiddenException,
 } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
 import { Roles } from '../auth/decorators/roles.decorator';
@@ -146,6 +147,24 @@ export class CheckinDevicesController {
   @UseGuards(AuthGuard('jwt'), RolesGuard)
   @Roles('ADMIN', 'HR_MANAGER', 'SUPER_ADMIN', 'EMPLOYEE')
   async getQrCode(@Param('employeeId') employeeId: string, @Request() req) {
+    // Un EMPLOYEE ne peut récupérer que son propre QR code (permanent) —
+    // sinon il pouvait récupérer celui d'un collègue et pointer à sa place.
+    //
+    // 🔒 CORRECTIF : req.user.employeeId n'existe pas dans le JWT (jamais signé
+    // ni lu côté auth) — cette comparaison bloquait donc TOUJOURS tout le
+    // monde, y compris le propriétaire légitime. On résout maintenant le
+    // véritable employeeId du compte connecté via le service (par email),
+    // sans avoir touché au JWT ni invalidé les sessions existantes.
+    const financeRoles = ['ADMIN', 'HR_MANAGER', 'SUPER_ADMIN'];
+    if (!financeRoles.includes(req.user.role)) {
+      const ownEmployeeId = await this.service.resolveOwnEmployeeId(
+        req.user.userId,
+        req.user.companyId,
+      );
+      if (!ownEmployeeId || ownEmployeeId !== employeeId) {
+        throw new ForbiddenException("Vous ne pouvez récupérer que votre propre QR code.");
+      }
+    }
     return this.service.getOrCreateQrCode(req.user.companyId, employeeId);
   }
 

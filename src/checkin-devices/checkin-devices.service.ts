@@ -267,6 +267,28 @@ export class CheckinDevicesService {
     });
   }
 
+  // 🔒 CORRECTIF SÉCURITÉ/BUG (audit) : req.user.employeeId n'existe pas dans
+  // le JWT (jamais signé côté auth.service.ts, jamais lu côté jwt.strategy.ts)
+  // — la vérification "un EMPLOYEE ne peut voir que son propre QR" comparait
+  // donc toujours `undefined !== employeeId`, bloquant même le propriétaire
+  // légitime. Plutôt que de modifier le JWT (et invalider toutes les sessions
+  // actives), on résout l'employé lié au compte via son email, exactement le
+  // même pattern déjà utilisé ailleurs dans l'app (documents.service.ts,
+  // leaves-common.util.ts).
+  async resolveOwnEmployeeId(userId: string, companyId: string): Promise<string | null> {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { email: true },
+    });
+    if (!user?.email) return null;
+
+    const employee = await this.prisma.employee.findFirst({
+      where: { email: user.email, companyId },
+      select: { id: true },
+    });
+    return employee?.id ?? null;
+  }
+
   // Génère (ou récupère) le QR code d'un employé, prêt à être affiché/imprimé.
   async getOrCreateQrCode(companyId: string, employeeId: string) {
     const employee = await this.prisma.employee.findFirst({

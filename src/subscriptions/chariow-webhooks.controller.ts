@@ -27,6 +27,7 @@ import {
   HttpCode,
   HttpStatus,
   Logger,
+  BadRequestException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
@@ -60,17 +61,20 @@ export class ChariowWebhooksController {
     this.logger.log('🔔 Webhook Chariow (Pulse) reçu');
     this.logger.log(`📦 Payload: ${JSON.stringify(payload, null, 2)}`);
 
-    // ⚠️ TODO : vérification de signature une fois le mécanisme Pulse
-    // documenté (voir avertissement en tête de fichier). Pour l'instant, on
-    // traite le payload SANS vérification — ne jamais activer d'accès
-    // uniquement sur la base de ce webhook seul dans un flux critique ;
-    // ici on se contente de déclencher une re-vérification via l'API (qui,
-    // elle, est authentifiée par notre propre clé), donc le risque réel
-    // est limité à "vérifier une vente qui n'a pas besoin de l'être".
+    // 🔒 CORRECTIF SÉCURITÉ (audit, item mineur) : le header de signature est
+    // désormais exigé, par rigueur — même faille de principe que sur
+    // YabetooPay/Moteki (`if (secret && signature)` sautait la vérification
+    // si le header était juste absent). Pas de fraude possible ici puisque
+    // l'activation ne se fait JAMAIS depuis ce payload (toujours
+    // checkAndActivateChariowSale, qui re-vérifie via l'API) ; ceci ferme
+    // simplement la porte par cohérence.
+    // ⚠️ La vérification cryptographique de la signature elle-même reste
+    // TODO tant que le mécanisme Pulse n'est pas documenté (voir note en
+    // tête de fichier) — on ne peut donc garantir que l'authenticité, pas
+    // encore vérifier la valeur du header.
     if (!signature) {
-      this.logger.warn(
-        '⚠️  Pas de header de signature reçu — traité quand même (best-effort, voir note en tête de fichier)',
-      );
+      this.logger.error('❌ Webhook Chariow rejeté — header x-chariow-signature absent');
+      throw new BadRequestException('Signature manquante');
     }
 
     const saleId: string | undefined =

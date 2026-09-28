@@ -1,5 +1,6 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { assertCompanyAccess } from '../common/resolve-verified-company.util';
 import {
   CreateCompanySiteDto,
   UpdateCompanySiteDto,
@@ -8,6 +9,15 @@ import {
 @Injectable()
 export class CompanySiteService {
   constructor(private readonly prisma: PrismaService) {}
+
+  // 🔒 CORRECTIF SÉCURITÉ (audit) : les routes /companies/:companyId/sites
+  // acceptaient n'importe quel companyId d'URL de la part de n'importe quel
+  // utilisateur connecté (lecture ET écriture). Appelé par le controller
+  // avant chaque opération ; les méthodes internes (findActive,
+  // checkPositionInAnySite...) restent inchangées.
+  async assertAccess(userId: string, companyId: string, write: boolean) {
+    await assertCompanyAccess(this.prisma, userId, companyId, { write });
+  }
 
   // ── Récupérer tous les sites d'une entreprise ──────────────────────────────
   async findAll(companyId: string) {

@@ -253,36 +253,81 @@ export class CabinetSubscriptionService {
   }
 
   // ── WEBHOOK ───────────────────────────────────────────────────────────────
-  // Appelé depuis webhooks.controller.ts après intent.succeeded pour un paiement cabinet
+  // Appelé depuis webhooks.controller.ts sur intent.succeeded/intent.failed
+  // pour un paiement cabinet.
+  //
+  // 🔒 CORRECTIF SÉCURITÉ (audit) : ne fait plus JAMAIS confiance au statut
+  // porté par le payload webhook — celui-ci ne sert qu'à retrouver LEQUEL
+  // paiement vérifier (via yabetopayIntentId, déjà résolu par
+  // webhooks.controller.ts avant d'appeler cette méthode). Le statut réel
+  // est re-demandé server-to-server à Yabetoo (GET /payment-intents/{id},
+  // authentifié avec notre propre clé), exactement le même principe que
+  // checkAndActivateChariowSale / checkAndActivateMotekiOrder /
+  // checkAndActivateYabetooPayment côté entreprise. Sans ça, un webhook non
+  // signé ou forgé pouvait activer un plan cabinet gratuitement.
 
-  async handleWebhookSuccess(cabinetPaymentId: string) {
-    await this.prisma.cabinetPayment.update({
-      where: { id: cabinetPaymentId },
-      data: { status: 'SUCCEEDED', paidAt: new Date() },
-    });
-
+  async checkAndActivateCabinetPayment(cabinetPaymentId: string): Promise<{
+    activated: boolean;
+    status: string;
+  }> {
     const payment = await this.prisma.cabinetPayment.findUnique({
       where: { id: cabinetPaymentId },
       include: { subscription: { select: { cabinetId: true } } },
     });
 
-    if (!payment || !payment.yabetopayIntentId) return;
+    if (!payment || !payment.yabetopayIntentId) {
+      throw new NotFoundException('Paiement cabinet introuvable');
+    }
 
-    await this._activatePlan(
-      payment.subscription.cabinetId,
+    // Idempotence — déjà traité.
+    if (payment.status === 'SUCCEEDED') {
+      return { activated: true, status: 'already_succeeded' };
+    }
+    if (payment.status === 'FAILED') {
+      return { activated: false, status: 'already_failed' };
+    }
+
+    const intentStatus = await this.yabetoo.getPaymentStatus(
       payment.yabetopayIntentId,
     );
 
-    // ── COMMISSION AFFILIÉ CABINET ──────────────────────────────────────
-    // ✅ CORRIGÉ : on appelle handleSuccessfulCabinetPayment (pas handleSuccessfulPayment)
-    try {
-      await this.affiliates.handleSuccessfulCabinetPayment(cabinetPaymentId);
-    } catch (err: any) {
-      // Non bloquant
-      this.logger.error(
-        `[Affiliate] Erreur commission cabinet ${cabinetPaymentId}: ${err.message}`,
+    if (intentStatus.status === 'succeeded') {
+      await this.prisma.cabinetPayment.update({
+        where: { id: cabinetPaymentId },
+        data: { status: 'SUCCEEDED', paidAt: new Date() },
+      });
+
+      await this._activatePlan(
+        payment.subscription.cabinetId,
+        payment.yabetopayIntentId,
       );
+
+      try {
+        await this.affiliates.handleSuccessfulCabinetPayment(cabinetPaymentId);
+      } catch (err: any) {
+        this.logger.error(
+          `[Affiliate] Erreur commission cabinet ${cabinetPaymentId}: ${err.message}`,
+        );
+      }
+
+      this.logger.log(
+        `🎉 [Yabetoo] Intention cabinet ${payment.yabetopayIntentId} confirmée payée (re-vérifiée serveur) → plan activé pour cabinet ${payment.subscription.cabinetId}`,
+      );
+      return { activated: true, status: 'activated' };
     }
+
+    if (intentStatus.status === 'failed') {
+      await this.prisma.cabinetPayment.update({
+        where: { id: cabinetPaymentId },
+        data: { status: 'FAILED' },
+      });
+      this.logger.warn(
+        `❌ [Yabetoo] Intention cabinet ${payment.yabetopayIntentId} échouée (re-vérifiée serveur)`,
+      );
+      return { activated: false, status: 'failed' };
+    }
+
+    return { activated: false, status: 'pending' };
   }
 
   // ── GUARDS ────────────────────────────────────────────────────────────────

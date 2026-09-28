@@ -101,6 +101,19 @@ export const LEAVE_SENIORITY_CONVENTIONS: LeaveConventionDefinition[] = [
     ],
   },
   {
+    key: 'MINE',
+    label:
+      "Convention Collective des Entreprises de Prospection, de Recherche et d'Exploitation Minières (Art.63)",
+    brackets: [
+      { minYears: 5, days: 2 },
+      { minYears: 10, days: 4 },
+      { minYears: 15, days: 8 },
+      { minYears: 20, days: 10 },
+      { minYears: 25, days: 12 },
+      { minYears: 30, days: 14 },
+    ],
+  },
+  {
     key: 'BTP',
     label:
       'Convention Collective du Bâtiment, TP et Activités Connexes (Art.41)',

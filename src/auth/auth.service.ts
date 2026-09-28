@@ -685,6 +685,7 @@ export class AuthService {
       cabinetId: user.cabinetId ?? null,
       managedByCabinet: user.managedByCabinet ?? false,
       manageMultipleCompanies: user.manageMultipleCompanies ?? false, // 🆕
+      type: 'access', // 🔒 distingue explicitement ce token d'un refresh/reset/2fa-pending
     };
     const refreshPayload = { sub: user.id, type: 'refresh', jti };
     const accessToken = this.jwtService.sign(accessPayload, {

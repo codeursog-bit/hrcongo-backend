@@ -311,6 +311,12 @@ export class PayrollCalculatorService {
       employeeAmount: number;
       employerAmount: number;
       base: number;
+      // ✅ NOUVEAU — voir patch "vrai taux CAMU/TOL" : transmis au front via
+      // payroll-items.service.ts pour ne plus afficher rate=1 sur les
+      // taxes custom au pourcentage (CAMU...).
+      baseType: string;
+      employeeRate: number | null;
+      employerRate: number | null;
     }> = [];
 
     for (const tax of companyTaxes) {
@@ -414,6 +420,16 @@ export class PayrollCalculatorService {
         employeeAmount,
         employerAmount,
         base,
+        // ✅ NOUVEAU — transmis au front (via payroll-items.service.ts) pour
+        // afficher le VRAI taux sur le bulletin. Avant ce patch, seuls
+        // employeeAmount/employerAmount/base étaient transmis : le service
+        // de génération des lignes n'avait aucun moyen de savoir qu'une taxe
+        // EXCESS_ONLY/PERCENTAGE comme CAMU (0,5%) n'est PAS à montant fixe
+        // comme TOL, et affichait "1" pour les deux (rate=1 codé en dur dès
+        // que base > 0) — masquant le vrai taux de CAMU.
+        baseType: tax.baseType,
+        employeeRate: tax.baseType === 'FIXED' ? null : Number(tax.employeeRate ?? 0),
+        employerRate: tax.baseType === 'FIXED' ? null : Number(tax.employerRate ?? 0),
       });
 
       this.logger.log(
@@ -438,6 +454,10 @@ export class PayrollCalculatorService {
         employeeAmount: tolAmount,
         employerAmount: 0,
         base: tolAmount,
+        // ✅ Cohérent avec le patch ci-dessus — TOL natif reste bien FIXED
+        baseType: 'FIXED',
+        employeeRate: null,
+        employerRate: null,
       });
       this.logger.log(`📍 TOL NATIVE zone=${tolZone} → ${tolAmount} F`);
     }
