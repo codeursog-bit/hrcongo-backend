@@ -274,7 +274,29 @@ export class AttendanceReportService {
     const endDate = new Date(year, month, 0);
     const report: MonthlyReportItem[] = [];
 
+    // 🆕 Heures en plus INFORMATIVES du mois (une seule requête pour tous les employés)
+    const monthPrefix = `${year}-${String(month).padStart(2, '0')}-`;
+    const extraRows: Array<{ employeeId: string; date: string; extraHoursInfo: any }> =
+      employees.length === 0
+        ? []
+        : await (this.prisma.attendance as any).findMany({
+            where: {
+              employeeId: { in: employees.map((e) => e.id) },
+              date: { startsWith: monthPrefix },
+              extraHoursInfo: { not: null },
+            },
+            select: { employeeId: true, date: true, extraHoursInfo: true },
+          });
+    const extraByEmployee = new Map<string, Map<string, number>>();
+    for (const r of extraRows) {
+      const m = extraByEmployee.get(r.employeeId) ?? new Map<string, number>();
+      m.set(r.date, Number(r.extraHoursInfo) || 0);
+      extraByEmployee.set(r.employeeId, m);
+    }
+
     for (const emp of employees) {
+      const extraDays = extraByEmployee.get(emp.id) ?? new Map<string, number>();
+      const extraHoursInfo = Array.from(extraDays.values()).reduce((a, b) => a + b, 0);
       const dayStatuses = await this.calculation.calculateDayStatuses(
         emp.id,
         startDate,
@@ -362,6 +384,7 @@ export class AttendanceReportService {
         overtime25: parseFloat(overtime25.toFixed(2)),
         overtime50: parseFloat(overtime50.toFixed(2)),
         overtime100: parseFloat(overtime100.toFixed(2)),
+        extraHoursInfo: parseFloat(extraHoursInfo.toFixed(2)),
 
         status:
           daysAbsentUnpaid === 0 && daysPresent >= 20 ? 'perfect' : 'warning',
@@ -393,6 +416,7 @@ export class AttendanceReportService {
           leaveType: d.leaveType,
           absenceType: (d as any).absenceType,
           isPaid: (d as any).isPaid,
+          extra: extraDays.has(d.date) ? extraDays.get(d.date)!.toFixed(2) : undefined,
         })),
       });
     }

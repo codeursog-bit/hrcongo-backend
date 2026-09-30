@@ -277,6 +277,7 @@ model Company {
   kioskDeviceCompanyLinks KioskDeviceCompany[]
   displayScreens          DisplayScreen[]
   employeeSecrets         EmployeeSecret[]
+  attendanceBreaks        AttendanceBreak[]
 
   cabinetCompanies      CabinetCompany[]
   ownerLinks            UserCompany[]
@@ -510,6 +511,7 @@ model Employee {
   ytdCheckpoints       YtdCheckpoint[]
   generatedContracts   GeneratedContract[]
   echelonSuggestions   EchelonSuggestion[]
+  attendanceBreaks     AttendanceBreak[]
 
   @@unique([employeeNumber, companyId])
   // ✅ SUPPRIMÉ : @@index([nationalIdNumber]) car maintenant optionnel
@@ -784,9 +786,17 @@ model PayrollSettings {
   workDays             Json @default("[1,2,3,4,5]") // ✅ JSON natif PostgreSQL
 
   // À CONSERVER — second bloc complet
-  overtimeEnabled       Boolean @default(true)
-  nightShiftEnabled     Boolean @default(false)
-  officialEndHour       Int     @default(17) @db.SmallInt
+  overtimeEnabled   Boolean @default(true)
+  nightShiftEnabled Boolean @default(false)
+  officialEndHour   Int     @default(17) @db.SmallInt
+
+  // 🆕 Pause de la journée
+  breakEnabled              Boolean @default(false)
+  breakStartHour            Int     @default(12) @db.SmallInt
+  breakStartMinute          Int     @default(0) @db.SmallInt
+  breakDurationMinutes      Int     @default(60) @db.SmallInt
+  breakLateToleranceMinutes Int     @default(35) @db.SmallInt
+
   nightShiftStartHour   Int     @default(20) @db.SmallInt
   nightShiftEndHour     Int     @default(5) @db.SmallInt
   nightShiftPremiumRate Decimal @default(25) @db.Decimal(5, 2)
@@ -1113,6 +1123,9 @@ model Attendance {
   checkOutSiteName String? @db.VarChar(100)
   checkOutDistance Int?
 
+  extraHoursInfo Decimal? @db.Decimal(6, 2)
+  breakMinutes   Int      @default(0) @db.SmallInt
+
   // 🆕 Méthode de pointage (traçabilité admin)
   checkInMethod  PunchMethod?
   checkOutMethod PunchMethod?
@@ -1157,6 +1170,9 @@ model Attendance {
   logs        AttendanceLog[]
   corrections AttendanceCorrection[]
 
+  // 🆕 Pause de la journée (une seule par pointage)
+  pause AttendanceBreak?
+
   @@unique([employeeId, date])
   @@index([companyId])
   @@index([date])
@@ -1178,6 +1194,41 @@ enum AttendanceStatus {
   FUTURE // ✅ AJOUT ICI
 
   @@map("attendance_status")
+}
+
+// 🆕 Pause de la journée
+model AttendanceBreak {
+  id           String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  attendanceId String     @unique @db.Uuid
+  attendance   Attendance @relation(fields: [attendanceId], references: [id], onDelete: Cascade)
+  companyId    String     @db.Uuid
+  company      Company    @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  employeeId   String     @db.Uuid
+  employee     Employee   @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+
+  startedAt      DateTime  @db.Timestamptz
+  expectedEndAt  DateTime  @db.Timestamptz
+  endedAt        DateTime? @db.Timestamptz
+  minutes        Int?
+  lateMinutes    Int?
+  resumedAuto    Boolean   @default(false)
+  lateNotifiedAt DateTime? @db.Timestamptz
+
+  endMethod PunchMethod?
+  endSource String?      @db.VarChar(100)
+  endLat    Decimal?     @db.Decimal(10, 8)
+  endLon    Decimal?     @db.Decimal(11, 8)
+
+  editedBy   String?   @db.Uuid
+  editReason String?
+  editedAt   DateTime? @db.Timestamptz
+
+  createdAt DateTime @default(now()) @db.Timestamptz
+  updatedAt DateTime @updatedAt @db.Timestamptz
+
+  @@index([companyId])
+  @@index([employeeId])
+  @@map("attendance_breaks")
 }
 
 model AttendanceLog {

@@ -23,6 +23,7 @@ import {
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { AttendanceService } from '../attendance/attendance.service';
+import { AttendanceBreakService } from '../attendance/services/attendance-break.service';
 import { AttemptLimiter } from './attempt-limiter';
 import {
   PAIRING_TTL_MS,
@@ -50,7 +51,7 @@ const PUNCH_ALLOWED_STATUSES = ['ACTIVE', 'ON_LEAVE'];
 
 export interface PunchResult {
   success: boolean;
-  direction?: 'IN' | 'OUT';
+  direction?: 'IN' | 'OUT' | 'BREAK_END';
   firstName?: string;
   message?: string;
   code?: string;
@@ -85,6 +86,7 @@ export class DisplayScreensService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly attendance: AttendanceService,
+    private readonly breaks: AttendanceBreakService, // 🆕 reprise de pause
   ) {}
 
   // ==========================================================================
@@ -378,6 +380,23 @@ export class DisplayScreensService {
     // skipGeofence   : l'écran fixe est la preuve de présence, le GPS n'est pas exigé.
     const opts = { actingCompanyId: employee.companyId, skipGeofence: true, method, source: screenName ?? undefined };
     const userId = employee.userId ?? '';
+
+    // 🆕 En pause ? Ce scan est la REPRISE du travail (jamais une sortie).
+    const resumed = await this.breaks.resumeIfOnBreak({
+      employeeId: employee.id,
+      companyId: employee.companyId,
+      method,
+      source: screenName,
+    });
+    if (resumed) {
+      return {
+        success: true,
+        direction: 'BREAK_END',
+        firstName,
+        at: new Date().toISOString(),
+        message: resumed.message,
+      };
+    }
 
     try {
       const r: any = await this.attendance.checkIn(dto, userId, opts);

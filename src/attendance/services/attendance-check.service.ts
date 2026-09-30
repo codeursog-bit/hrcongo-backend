@@ -10,6 +10,7 @@ import { AttendanceStatus, NotificationType } from '@prisma/client';
 import { CreateAttendanceDto } from '../dto/create-attendance.dto';
 import { SubscriptionGuard } from '../../subscriptions/guards/subscription.guard';
 import { CompanySiteService } from '../../companies/company-site.service';
+import { AttendanceBreakService } from './attendance-break.service';
 import {
   CompanyNotFoundException,
   EmployeeNotFoundException,
@@ -144,6 +145,7 @@ export class AttendanceCheckService {
     private utils: AttendanceUtilsService,
     private subscriptionGuard: SubscriptionGuard,
     private companySiteService: CompanySiteService,
+    private breaks: AttendanceBreakService, // 🆕 pause
   ) {}
 
   /** Méthode par défaut quand l'appelant n'en précise pas : soi-même → GPS, pour un autre → MANUAL. */
@@ -501,6 +503,7 @@ export class AttendanceCheckService {
       select: {
         workHoursPerDay: true,
         officialStartHour: true,
+        officialEndHour: true,
         overtimeEnabled: true,
         workDays: true,
       } as any,
@@ -514,7 +517,10 @@ export class AttendanceCheckService {
     );
     const overtimeEnabled = (ps as any)?.overtimeEnabled ?? true;
     const workDays = ((ps as any)?.workDays ?? DEFAULT_WORK_DAYS) as number[];
-    const officialEndHour = officialStartHour + workHoursPerDay;
+    // 🆕 Fin de journée = officialEndHour (source de vérité) ; repli sur début + durée si absent
+    const officialEndHour = Number(
+      (ps as any)?.officialEndHour ?? officialStartHour + workHoursPerDay,
+    );
 
     // ── Shift individuel ───────────────────────────────────────────────────
     const sa = await loadShift(this.prisma, employeeId, today, now);
@@ -552,10 +558,38 @@ export class AttendanceCheckService {
     // ── Calcul HS ──────────────────────────────────────────────────────────
     const ot = this.utils.calculateOvertimeV3(effectiveCheckIn, now, ctx);
 
+    // ── 🆕 Heures en plus INFORMATIVES (HS non payées = forfait) ───────────
+    // Ne touche ni normalHours ni la paie : sert uniquement à l'employé et à l'admin
+    // pour voir ce qui a été fait au-delà de l'horaire. Seuil 15 min pour éviter le bruit.
+    let extraHoursInfo: number | null = null;
+    if (!overtimeEnabled) {
+      let extra: number;
+      if (ctx.isRestDay || ctx.isHoliday) {
+        extra = (now.getTime() - effectiveCheckIn.getTime()) / 3_600_000; // tout le temps travaillé
+      } else {
+        const shiftEndInfo = new Date(effectiveCheckIn);
+        shiftEndInfo.setHours(ctx.shiftEndHour, ctx.shiftEndMinute, 0, 0);
+        if (ctx.crossesMidnight && shiftEndInfo <= effectiveCheckIn) {
+          shiftEndInfo.setDate(shiftEndInfo.getDate() + 1);
+        }
+        const from = Math.max(shiftEndInfo.getTime(), effectiveCheckIn.getTime());
+        extra = (now.getTime() - from) / 3_600_000;
+      }
+      extraHoursInfo = extra >= 0.25 ? parseFloat(extra.toFixed(2)) : null;
+    }
+
+    // ── 🆕 Pause : le temps de pause n'est pas compté ──────────────────────
+    // Pause ouverte à la sortie = « reprise non pointée » : clôturée à la durée prévue.
+    const breakMinutes = await this.breaks.closeOpenBreakAtExit(record.id, now);
+    const breakHours = breakMinutes / 60;
+    if (breakHours > 0) {
+      ot.normalHours = parseFloat(Math.max(0, ot.normalHours - breakHours).toFixed(2));
+    }
+
     const totalHours = parseFloat(
       Math.max(
         0,
-        (now.getTime() - effectiveCheckIn.getTime()) / 3_600_000,
+        (now.getTime() - effectiveCheckIn.getTime()) / 3_600_000 - breakHours,
       ).toFixed(2),
     );
 
@@ -602,6 +636,8 @@ export class AttendanceCheckService {
         checkOutSiteId,
         checkOutSiteName,
         checkOutDistance,
+        extraHoursInfo,
+        breakMinutes,
         totalHours,
         normalHours: ot.normalHours,
         overtime10: ot.overtime10,

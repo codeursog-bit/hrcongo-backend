@@ -540,6 +540,123 @@ export class AttendanceCronService implements OnModuleDestroy {
     }
   }
 
+  /** 🆕 Clôture une pause restée ouverte (reprise non pointée) et renvoie les minutes à déduire. */
+  private async closeBreakAt(attendanceId: string, exitAt: Date): Promise<number> {
+    const p: any = await (this.prisma as any).attendanceBreak.findUnique({ where: { attendanceId } });
+    if (!p) return 0;
+    if (p.endedAt) return Number(p.minutes ?? 0);
+    const endMs = Math.max(
+      new Date(p.startedAt).getTime(),
+      Math.min(new Date(p.expectedEndAt).getTime(), exitAt.getTime()),
+    );
+    const minutes = Math.round((endMs - new Date(p.startedAt).getTime()) / 60_000);
+    await (this.prisma as any).attendanceBreak.update({
+      where: { id: p.id },
+      data: { endedAt: new Date(endMs), minutes, lateMinutes: 0, resumedAuto: true },
+    });
+    return minutes;
+  }
+
+  // ============================================================================
+  // 🆕 CRON — Pause trop longue : alerte l'employé + les admins (une seule fois par pause)
+  // Seuil = heure de reprise prévue + tolérance de l'entreprise (défaut 35 min)
+  // ============================================================================
+  @Cron('*/5 * * * *', { timeZone: 'Africa/Brazzaville' })
+  async handleLateBreaks(): Promise<void> {
+    const LOCK = 'attendance-cron:late-breaks';
+    if (!(await this.cronLock.acquire(LOCK, 270))) return;
+    this.heldLocks.add(LOCK);
+    try {
+      const now = new Date();
+      const open: any[] = await (this.prisma as any).attendanceBreak.findMany({
+        where: { endedAt: null, lateNotifiedAt: null, expectedEndAt: { lt: now } },
+        take: 500,
+      });
+      if (open.length === 0) return;
+
+      const tolByCompany = new Map<string, number>();
+      for (const b of open) {
+        if (!tolByCompany.has(b.companyId)) {
+          const s: any = await this.prisma.payrollSettings.findFirst({
+            where: { companyId: b.companyId },
+            orderBy: { effectiveDate: 'desc' },
+            select: { breakLateToleranceMinutes: true } as any,
+          });
+          tolByCompany.set(b.companyId, Number(s?.breakLateToleranceMinutes ?? 35));
+        }
+        const tol = tolByCompany.get(b.companyId)!;
+        const lateMinutes = Math.round((now.getTime() - new Date(b.expectedEndAt).getTime()) / 60_000);
+        if (lateMinutes <= tol) continue;
+
+        const emp = await this.prisma.employee.findUnique({
+          where: { id: b.employeeId },
+          select: { firstName: true, lastName: true, user: { select: { id: true } } },
+        });
+        if (!emp) continue;
+        const at = new Date(new Date(b.expectedEndAt).getTime() + 3_600_000);
+        const hhmm = `${String(at.getUTCHours()).padStart(2, '0')}:${String(at.getUTCMinutes()).padStart(2, '0')}`;
+
+        if (emp.user?.id) {
+          await this.notif({
+            userId: emp.user.id,
+            type: 'ATTENDANCE_ALERT',
+            title: '⏰ Pause trop longue',
+            message: `Votre reprise était prévue à ${hhmm} (${lateMinutes} min de retard). Reprenez le travail en scannant ou en pointant.`,
+            link: '/presences/pointage',
+          });
+          await this.pushService.sendPushToUser(emp.user.id, {
+            title: '⏰ Pause trop longue',
+            body: `Reprise prévue à ${hhmm}. Pensez à pointer votre reprise.`,
+            url: '/presences/pointage',
+            tag: 'break-late',
+          });
+        }
+        const admins = await this.prisma.user.findMany({
+          where: { companyId: b.companyId, role: { in: ['ADMIN', 'HR_MANAGER'] }, isActive: true },
+          select: { id: true },
+        });
+        for (const a of admins) {
+          await this.notif({
+            userId: a.id,
+            type: 'ATTENDANCE_ALERT',
+            title: '⏰ Pause dépassée',
+            message: `${emp.firstName} ${emp.lastName} : reprise prévue à ${hhmm}, ${lateMinutes} min de retard.`,
+            link: '/presences',
+          });
+        }
+        await (this.prisma as any).attendanceBreak.update({ where: { id: b.id }, data: { lateNotifiedAt: new Date() } });
+      }
+    } catch (e: any) {
+      this.logger.error(`❌ handleLateBreaks: ${e?.message ?? e}`);
+    } finally {
+      this.heldLocks.delete(LOCK);
+      await this.cronLock.release(LOCK);
+    }
+  }
+
+  /** 🆕 Vrai si l'employé a un shift/planning applicable à cette date (YYYY-MM-DD). */
+  private async hasShiftOn(employeeId: string, date: string): Promise<boolean> {
+    const d = new Date(date);
+    const found = await this.prisma.employeeShiftAssignment.findFirst({
+      where: {
+        employeeId,
+        OR: [
+          { specificDate: date },
+          {
+            dayOfWeek: d.getDay(),
+            specificDate: null,
+            AND: [
+              { OR: [{ validFrom: null }, { validFrom: { lte: d } }] },
+              { OR: [{ validUntil: null }, { validUntil: { gte: d } }] },
+            ],
+          },
+        ],
+      },
+      select: { id: true },
+    });
+    return !!found;
+  }
+
   // ============================================================================
   // CRON 4 — Auto-close minuit
   // ============================================================================
@@ -572,16 +689,26 @@ export class AttendanceCronService implements OnModuleDestroy {
 
       this.logger.log(`🔒 ${open.length} pointage(s) à fermer`);
 
+      let skippedShift = 0;
       for (const att of open) {
+        // 🆕 Employé avec un planning/shift : il a ses propres horaires (ex. nuit qui traverse
+        // minuit) → on ne le ferme JAMAIS avec l'horaire de l'entreprise.
+        if (await this.hasShiftOn(att.employeeId, yesterday)) {
+          skippedShift++;
+          continue;
+        }
         const s = att.employee.company.payrollSettings[0];
         const startH = s?.officialStartHour ?? 8;
         const wh = Number(s?.workHoursPerDay ?? 8);
-        const endH = startH + wh;
+        // 🆕 Fin officielle = officialEndHour (repli : début + durée si absent)
+        const endH = Number((s as any)?.officialEndHour ?? startH + wh);
         const closure = new Date(yesterday);
         closure.setHours(endH, 0, 0, 0);
+        // 🆕 Pause ouverte à la fermeture auto = « reprise non pointée » : clôturée à la durée prévue
+        const breakMinutes = await this.closeBreakAt(att.id, closure);
         const total = Math.max(
           0,
-          (closure.getTime() - new Date(att.checkIn!).getTime()) / 3_600_000,
+          (closure.getTime() - new Date(att.checkIn!).getTime()) / 3_600_000 - breakMinutes / 60,
         );
 
         await this.prisma.attendance.update({
@@ -590,6 +717,7 @@ export class AttendanceCronService implements OnModuleDestroy {
             checkOut: closure,
             totalHours: parseFloat(total.toFixed(2)),
             normalHours: parseFloat(Math.min(total, wh).toFixed(2)),
+            breakMinutes,
             overtimeStatus: 'AUTO_CLOSED',
             autoClosedAt: midnight,
             closureReason: 'AUTO_CLOSED',
@@ -628,7 +756,7 @@ export class AttendanceCronService implements OnModuleDestroy {
         });
       }
 
-      this.logger.log(`✅ Auto-close terminé — ${open.length} fermés`);
+      this.logger.log(`✅ Auto-close terminé — ${open.length - skippedShift} fermés, ${skippedShift} ignoré(s) (shift)`);
     } catch (err: any) {
       this.logger.error('❌ Cron auto-close:', err);
     }

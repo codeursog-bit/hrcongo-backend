@@ -27,6 +27,42 @@ export class UpdatePayrollSettingsDto {
   @Max(120)
   lateToleranceMinutes?: number;
 
+  // 🆕 Heure de fin officielle (source de vérité pour la fermeture auto et le calcul des heures)
+  @IsOptional()
+  @IsNumber()
+  @Min(1)
+  @Max(23)
+  officialEndHour?: number;
+
+  // 🆕 Pause de la journée
+  @IsOptional()
+  @IsBoolean()
+  breakEnabled?: boolean;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  @Max(23)
+  breakStartHour?: number;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  @Max(59)
+  breakStartMinute?: number;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(5)
+  @Max(240)
+  breakDurationMinutes?: number;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  @Max(180)
+  breakLateToleranceMinutes?: number;
+
   @IsOptional()
   @IsArray()
   workDays?: number[];

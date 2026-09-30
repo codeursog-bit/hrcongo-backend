@@ -243,6 +243,14 @@ export class PayrollSettingsService {
       data.officialStartHour = dto.officialStartHour;
     if (dto.lateToleranceMinutes !== undefined)
       data.lateToleranceMinutes = dto.lateToleranceMinutes;
+    // 🆕 fin officielle + pause
+    if (dto.officialEndHour !== undefined) data.officialEndHour = dto.officialEndHour;
+    if (dto.breakEnabled !== undefined) data.breakEnabled = dto.breakEnabled;
+    if (dto.breakStartHour !== undefined) data.breakStartHour = dto.breakStartHour;
+    if (dto.breakStartMinute !== undefined) data.breakStartMinute = dto.breakStartMinute;
+    if (dto.breakDurationMinutes !== undefined) data.breakDurationMinutes = dto.breakDurationMinutes;
+    if (dto.breakLateToleranceMinutes !== undefined)
+      data.breakLateToleranceMinutes = dto.breakLateToleranceMinutes;
     if (dto.workDays !== undefined) data.workDays = dto.workDays;
     if (dto.cnssSalarialRate !== undefined)
       data.cnssSalarialRate = dto.cnssSalarialRate;

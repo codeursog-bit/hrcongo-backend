@@ -309,6 +309,7 @@ export class AttendanceService {
     return this.prisma.attendance.findMany({
       where: whereClause,
       include: {
+        pause: true, // 🆕
         employee: {
           select: {
             firstName: true,
@@ -386,7 +387,7 @@ export class AttendanceService {
             date: { gte: startDateStr, lte: endDateStr },
             ...(departmentFilter ? { employee: departmentFilter } : {}),
           },
-          include: { employee: true },
+          include: { employee: true, pause: true }, // 🆕 pause
           orderBy: { date: 'desc' },
         }),
         this.prisma.leave.findMany({
@@ -543,6 +544,7 @@ export class AttendanceService {
         select: {
           workHoursPerDay: true,
           officialStartHour: true,
+          officialEndHour: true,
           overtimeEnabled: true,
           workDays: true,
         } as any,
@@ -552,7 +554,9 @@ export class AttendanceService {
       const officialStartHour = Number((ps as any)?.officialStartHour ?? 8);
       const overtimeEnabled = (ps as any)?.overtimeEnabled ?? true;
       const workDays = ((ps as any)?.workDays ?? DEFAULT_WORK_DAYS) as number[];
-      const officialEndHour = officialStartHour + workHoursPerDay;
+      const officialEndHour = Number(
+        (ps as any)?.officialEndHour ?? officialStartHour + workHoursPerDay,
+      );
 
       // ✅ Shift individuel pour cette date
       const dateObj = new Date(body.date);

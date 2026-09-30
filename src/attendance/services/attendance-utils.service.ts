@@ -93,6 +93,8 @@ export interface MonthlyReportItem {
   overtime25: number;
   overtime50: number;
   overtime100: number;
+  /** Heures au-delà de l'horaire, à titre informatif (HS non payées / forfait) */
+  extraHoursInfo: number;
   status: string;
   trend: string;
   details: Array<{
@@ -105,6 +107,7 @@ export interface MonthlyReportItem {
     leaveType?: string;
     absenceType?: string;
     isPaid?: boolean;
+    extra?: string;
   }>;
 }
 

@@ -10,6 +10,7 @@ import * as QRCode from 'qrcode';
 import { CheckinCredentialType } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { AttendanceService } from '../attendance/attendance.service';
+import { AttendanceBreakService } from '../attendance/services/attendance-break.service';
 import { RegisterKioskDeviceDto } from './dto/register-device.dto';
 import { RegisterCredentialDto } from './dto/register-credential.dto';
 import { ScanCheckinDto } from './dto/scan.dto';
@@ -36,6 +37,7 @@ export class CheckinDevicesService {
     // ✅ On réutilise TEL QUEL le service existant : congés, jours fériés,
     // shifts, géofencing GPS, abonnement... rien n'est dupliqué.
     private readonly attendanceService: AttendanceService,
+    private readonly breaks: AttendanceBreakService, // 🆕 reprise de pause
   ) {}
 
   private async touchDeviceActivity(deviceId: string) {
@@ -482,6 +484,22 @@ export class CheckinDevicesService {
       confirmRestDay: dto.confirmRestDay,
       confirmWorkDuringLeave: dto.confirmWorkDuringLeave,
     };
+
+    // 🆕 En pause ? Ce scan de badge est la REPRISE du travail (jamais une sortie).
+    const resumed = await this.breaks.resumeIfOnBreak({
+      employeeId: credential.employeeId,
+      companyId: credential.companyId,
+      method: 'KIOSK',
+      source: null,
+    });
+    if (resumed) {
+      return {
+        success: true,
+        message: resumed.message,
+        employee: credential.employee,
+        action: 'BREAK_END',
+      };
+    }
 
     try {
       // 1ʳᵉ tentative : entrée. Toute la logique métier existante
