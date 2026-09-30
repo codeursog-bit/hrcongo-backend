@@ -18,7 +18,10 @@ import {
   DEFAULT_WORK_DAYS,
 } from './services/attendance-utils.service';
 import { AttendanceCalculationService } from './services/attendance-calculation.service';
-import { AttendanceCheckService } from './services/attendance-check.service';
+import {
+  AttendanceCheckService,
+  AttendanceActingOptions,
+} from './services/attendance-check.service';
 import { AttendanceReportService } from './services/attendance-report.service';
 
 export { DayStatusEnum } from './services/attendance-utils.service';
@@ -227,12 +230,20 @@ export class AttendanceService {
   // ============================================================================
   // ✅ DÉLÉGATION CHECK-IN/OUT
   // ============================================================================
-  async checkIn(dto: CreateAttendanceDto, userId: string) {
-    return this.check.checkIn(dto, userId);
+  async checkIn(
+    dto: CreateAttendanceDto,
+    userId: string,
+    opts?: AttendanceActingOptions,
+  ) {
+    return this.check.checkIn(dto, userId, opts);
   }
 
-  async checkOut(dto: CreateAttendanceDto, userId: string) {
-    return this.check.checkOut(dto, userId);
+  async checkOut(
+    dto: CreateAttendanceDto,
+    userId: string,
+    opts?: AttendanceActingOptions,
+  ) {
+    return this.check.checkOut(dto, userId, opts);
   }
 
   async correctAttendance(
@@ -354,7 +365,7 @@ export class AttendanceService {
       ...departmentFilter,
     };
 
-    const [employees, allAttendances, allLeaves, allHolidays] =
+    const [employees, allAttendances, allLeaves, allHolidays, allAbsenceRequests] =
       await Promise.all([
         this.prisma.employee.findMany({
           where: employeeWhere,
@@ -390,6 +401,16 @@ export class AttendanceService {
         this.prisma.publicHoliday.findMany({
           where: { companyId: user.companyId, year: startDate.getFullYear() },
         }),
+        // 🆕 absences approuvées (jours justifiés pris en compte dans dayStatuses)
+        this.prisma.absenceRequest.findMany({
+          where: {
+            companyId: user.companyId,
+            status: 'APPROVED',
+            startDate: { lte: endDate },
+            endDate: { gte: startDate },
+            ...(departmentFilter ? { employee: departmentFilter } : {}),
+          },
+        }),
       ]);
 
     const attendancesByEmp = new Map<string, any[]>();
@@ -409,6 +430,11 @@ export class AttendanceService {
 
     const holidayDates = new Set(allHolidays.map((h) => h.date));
 
+    const absenceDatesByEmp = await this.calculation.buildAbsenceDatesByEmployee(
+      user.companyId,
+      allAbsenceRequests,
+    );
+
     const dayStatuses = employees.map((emp) =>
       this.calculation.calculateDayStatusesOptimized(
         emp.id,
@@ -418,6 +444,7 @@ export class AttendanceService {
         leavesByEmp.get(emp.id) || [],
         holidayDates,
         workDays,
+        absenceDatesByEmp.get(emp.id),
       ),
     );
 
@@ -497,6 +524,8 @@ export class AttendanceService {
       notes: body.notes,
       checkIn: body.checkIn ? new Date(body.checkIn) : null,
       checkOut: body.checkOut ? new Date(body.checkOut) : null,
+      checkInMethod: body.checkIn ? 'MANUAL' : null,
+      checkOutMethod: body.checkOut ? 'MANUAL' : null,
     };
 
     if (

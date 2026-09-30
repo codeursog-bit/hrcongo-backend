@@ -226,6 +226,7 @@ import * as CONST from '../payroll/settings/constants/settings.constants';
 import { Prisma } from '@prisma/client';
 import { ConventionsService } from '../conventions/conventions.service';
 import { assertCompanyAccess } from '../common/resolve-verified-company.util';
+import { seedCongoPublicHolidays } from '../common/congo-public-holidays';
 
 @Injectable()
 export class CompaniesService {
@@ -291,6 +292,18 @@ export class CompaniesService {
 
       return newCompany;
     });
+
+    // ─── JOURS FÉRIÉS LÉGAUX DU CONGO ───────────────────────────────────────
+    // Créés en même temps que l'entreprise. Non-bloquant : si ça échoue,
+    // l'entreprise est quand même créée (rattrapage : scripts/seed-congo-holidays).
+    try {
+      await seedCongoPublicHolidays(this.prisma, company.id);
+    } catch (err) {
+      this.logger.error(
+        `[CompaniesService] Jours fériés non créés pour company ${company.id}:`,
+        err,
+      );
+    }
 
     // ─── TRIAL SUBSCRIPTION ────────────────────────────────────────────────
     try {

@@ -8,6 +8,7 @@ import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { CryptoModule } from './crypto/crypto.module';
 import { AuditModule } from './audit/audit.module';
 import { CleanupModule } from './cleanup/cleanup.module';
+import { HolidaysModule } from './holidays/holidays.module';
 import { AuditInterceptor } from './audit/audit.interceptor';
 import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
 import { ConfigModule } from '@nestjs/config';
@@ -58,6 +59,7 @@ import { AffiliateModule } from './affiliate/affiliate.module';
 import { BulletinTemplateModule } from './bulletin-template/bulletin-template.module';
 import { AbsenceRequestsModule } from './absence-requests/absence-requests.module';
 import { CheckinDevicesModule } from './checkin-devices/checkin-devices.module';
+import { DisplayScreensModule } from './display-screens/display-screens.module';
 
 import { BlogModule } from './blog/blog.module';
 import { ContactModule } from './contact/contact.module';
@@ -75,6 +77,7 @@ import { PortfolioModule } from './portfolio/portfolio.module';
     CryptoModule, // Chiffrement AES-256-GCM des données sensibles (global)
     AuditModule,
     CleanupModule, // Audit log des actions sensibles (global)
+    HolidaysModule, // 🇨🇬 Mise à jour auto des jours fériés légaux (hebdo, idempotent)
 
     // ── RATE LIMITING GLOBAL ──────────────────────────────────────────────
     ThrottlerModule.forRoot([
@@ -152,6 +155,7 @@ import { PortfolioModule } from './portfolio/portfolio.module';
     ContactModule,
     AbsenceTrackingModule,
     CheckinDevicesModule,
+    DisplayScreensModule, // 🆕 pointage par scan QR dynamique + code secret
   ],
   controllers: [AppController],
   providers: [

@@ -488,7 +488,7 @@ export class CheckinDevicesService {
       // (congé, férié, shift, GPS, abonnement) s'applique automatiquement,
       // et s'applique aux règles de la BONNE entreprise puisque actingUserId
       // appartient fixement à celle-ci.
-      const result = await this.attendanceService.checkIn(attendanceDto, actingUserId);
+      const result = await this.attendanceService.checkIn(attendanceDto, actingUserId, { method: 'KIOSK' });
       return { ...result, employee: credential.employee, action: 'CHECK_IN' };
     } catch (error: any) {
       const alreadyCheckedIn =
@@ -498,7 +498,7 @@ export class CheckinDevicesService {
       // (badge ou QR) est interprété comme le pointage de sortie.
       if (!alreadyCheckedIn) throw error;
 
-      const result = await this.attendanceService.checkOut(attendanceDto, actingUserId);
+      const result = await this.attendanceService.checkOut(attendanceDto, actingUserId, { method: 'KIOSK' });
       return {
         ...result,
         employee: credential.employee,

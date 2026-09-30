@@ -136,6 +136,7 @@ async function bootstrap() {
         'X-Requested-With',
         'Accept',
         'x-kiosk-api-key',
+        'x-display-token', // 🆕 écran QR de pointage
       ],
       exposedHeaders: [
         'Content-Range',

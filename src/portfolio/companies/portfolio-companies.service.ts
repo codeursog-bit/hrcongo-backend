@@ -9,6 +9,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { SubscriptionsService } from '../../subscriptions/subscriptions.service';
 import { CreateCompanyDto } from '../../companies/dto/create-company.dto';
 import * as CONST from '../../payroll/settings/constants/settings.constants';
+import { seedCongoPublicHolidays } from '../../common/congo-public-holidays';
 
 // 🆕 Création d'entreprise depuis le portefeuille admin multi-entreprises.
 // Différent de CompaniesService.create() qui est le flow d'inscription
@@ -86,6 +87,16 @@ export class PortfolioCompaniesService {
 
       return newCompany;
     });
+
+    // 🇨🇬 Jours fériés légaux du Congo — non-bloquant (rattrapage : scripts/seed-congo-holidays)
+    try {
+      await seedCongoPublicHolidays(this.prisma, company.id);
+    } catch (err) {
+      this.logger.error(
+        `[PortfolioCompaniesService] Jours fériés non créés pour company ${company.id}:`,
+        err,
+      );
+    }
 
     try {
       await this.subscriptionsService.createTrialSubscription(company.id);

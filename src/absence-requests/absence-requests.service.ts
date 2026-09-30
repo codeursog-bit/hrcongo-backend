@@ -113,7 +113,60 @@ private async getUserWithCompany(userId: string, overrideCompanyId?: string): Pr
     });
     if (!employee) throw new EmployeeNotFoundException(employeeId);
 
-    return WorkingDays.calculateReturnDate(this.prisma, employee.companyId, startDate, workingDaysNeeded);
+    // 🆕 jours travaillés = configuration de l'entreprise ; reprise = prochain jour ouvrable
+    const workDays = await WorkingDays.getCompanyWorkDays(this.prisma, employee.companyId);
+    return WorkingDays.calculateReturnDate(this.prisma, employee.companyId, startDate, workingDaysNeeded, true, workDays);
+  }
+
+  /**
+   * 🆕 Aperçu AVANT envoi : combien de jours seront justifiés (payés selon la
+   * décision RH) et combien dépassent le droit. Ne crée rien.
+   * `returnDate` = jour de reprise ; l'absence court jusqu'à la veille.
+   */
+  async previewCoverage(
+    userId: string,
+    params: { startDate: string; returnDate: string; motifKey?: string },
+    overrideCompanyId?: string,
+  ) {
+    const user = await this.getUserWithCompany(userId, overrideCompanyId);
+    const start = new Date(params.startDate);
+    const end = new Date(params.returnDate);
+    end.setUTCDate(end.getUTCDate() - 1);
+    if (isNaN(start.getTime()) || isNaN(end.getTime()) || end < start) {
+      throw new BadRequestException('La date de reprise doit être après la date de départ');
+    }
+
+    const workDays = await WorkingDays.getCompanyWorkDays(this.prisma, user.companyId);
+    const workingDays = await WorkingDays.calculateWorkingDays(this.prisma, user.companyId, start, end, workDays);
+
+    let entitledDays: number | null = null;
+    if (params.motifKey) {
+      const company = await this.prisma.company.findUnique({
+        where: { id: user.companyId },
+        select: { collectiveAgreement: true },
+      });
+      const motif = findMotifByKey(company?.collectiveAgreement ?? null, params.motifKey);
+      if (!motif) throw new BadRequestException('Motif introuvable pour la convention de votre entreprise');
+      entitledDays = motif.days;
+    }
+
+    const coveredDays = entitledDays === null ? workingDays : Math.min(entitledDays, workingDays);
+    const holidays = await this.prisma.publicHoliday.findMany({
+      where: { companyId: user.companyId, year: { in: [start.getFullYear(), end.getFullYear()] } },
+      select: { date: true },
+    });
+    const covered = WorkingDays.computeCoveredDates(
+      start, end, entitledDays, new Set(holidays.map((h) => h.date)), workDays,
+    );
+    const lastCoveredDate = covered && covered.size > 0 ? [...covered].sort().pop()! : null;
+
+    return {
+      workingDays,
+      entitledDays,
+      coveredDays,
+      uncoveredDays: Math.max(0, workingDays - coveredDays),
+      lastCoveredDate,
+    };
   }
 
   // ============================================================================
@@ -183,16 +236,17 @@ private async getUserWithCompany(userId: string, overrideCompanyId?: string): Pr
       if (ceiling != null) {
         const yearStart = new Date(new Date(dto.startDate).getFullYear(), 0, 1);
         const yearEnd = new Date(new Date(dto.startDate).getFullYear(), 11, 31, 23, 59, 59);
-        const usedThisYear = await this.prisma.absenceRequest.aggregate({
+        const usedRows = await this.prisma.absenceRequest.findMany({
           where: {
             employeeId: employee.id,
             type: 'EXCEPTIONNELLE',
             status: { in: ['PENDING', 'APPROVED'] },
             startDate: { gte: yearStart, lte: yearEnd },
           },
-          _sum: { workingDays: true },
+          select: { workingDays: true, coveredDays: true },
         });
-        const already = Number(usedThisYear._sum.workingDays ?? 0);
+        // On compte les jours JUSTIFIÉS (droit consommé), pas la durée demandée
+        const already = usedRows.reduce((sum, r) => sum + Number(r.coveredDays ?? r.workingDays), 0);
         if (already + motif.days > ceiling) {
           throw new BadRequestException(
             `Plafond annuel de permissions exceptionnelles dépassé : ${already} jour(s) déjà pris/en attente sur ${ceiling} autorisés cette année, cette demande (${motif.days}j) le dépasserait.`,
@@ -202,12 +256,26 @@ private async getUserWithCompany(userId: string, overrideCompanyId?: string): Pr
     }
 
     const start = new Date(dto.startDate);
-    // Avec un motif du catalogue, la date de reprise est déduite du nombre
-    // de jours conventionnels fixes (jours calendaires consécutifs depuis le
-    // départ) — l'employé ne saisit que la date de départ pour ce cas-là.
-    const end = motif
-      ? new Date(start.getTime() + (motif.days - 1) * 86400000)
-      : new Date(dto.endDate!);
+    // 🆕 Jours travaillés de l'entreprise (config paie) — ex : lun-ven ⇒ le samedi n'est jamais compté
+    const workDays = await WorkingDays.getCompanyWorkDays(this.prisma, employee.companyId);
+
+    // ── Date de fin d'absence (dernier jour, inclus) ─────────────────────
+    // 1) reprise saisie par l'employé  → fin = reprise - 1 jour
+    // 2) dernier jour saisi (endDate)  → tel quel
+    // 3) motif du catalogue sans date  → droit conventionnel en jours
+    //    OUVRABLES (repos hebdo et fériés sautés)
+    let end: Date;
+    if (dto.returnDate) {
+      end = new Date(dto.returnDate);
+      end.setUTCDate(end.getUTCDate() - 1);
+    } else if (dto.endDate) {
+      end = new Date(dto.endDate);
+    } else if (motif) {
+      const calc = await WorkingDays.calculateReturnDate(this.prisma, employee.companyId, start, motif.days, true, workDays);
+      end = new Date(calc.lastLeaveDay);
+    } else {
+      throw new BadRequestException('La date de reprise est obligatoire');
+    }
     if (end < start) throw new BadRequestException('La date de reprise doit être après la date de départ');
 
     const validSubTypes = SUBTYPES_BY_ABSENCE_TYPE[type as keyof typeof SUBTYPES_BY_ABSENCE_TYPE];
@@ -217,11 +285,16 @@ private async getUserWithCompany(userId: string, overrideCompanyId?: string): Pr
       );
     }
 
-    // Motif du catalogue : le nombre de jours est un droit fixe (convention),
-    // pas un calcul en jours ouvrables — on ne recalcule pas via WorkingDays.
-    const workingDays = motif
-      ? motif.days
-      : await WorkingDays.calculateWorkingDays(this.prisma, employee.companyId, start, end);
+    // Durée DEMANDÉE (jours ouvrables selon la config entreprise, fériés exclus)
+    const workingDays = await WorkingDays.calculateWorkingDays(this.prisma, employee.companyId, start, end, workDays);
+    if (workingDays <= 0) {
+      throw new BadRequestException('La période choisie ne contient aucun jour ouvrable');
+    }
+
+    // Jours JUSTIFIÉS = droit de la convention. Au-delà : jamais bloqué, ces
+    // jours suivent le pointage (absent seulement si l'employé ne vient pas).
+    // Hors catalogue : null = toute la période est justifiée.
+    const coveredDays = motif ? motif.days : null;
 
     // ✅ RH/Admin qui crée une demande pour un autre employé (comme pour les congés
     // et permissions) : pas de circuit d'attente à faire suivre à soi-même, la
@@ -238,8 +311,9 @@ private async getUserWithCompany(userId: string, overrideCompanyId?: string): Pr
         startDate:     start,
         endDate:       end,
         workingDays,
+        coveredDays,
         reason,
-        isPaid:        dto.isPaid ?? false,
+        isPaid:        dto.isPaid ?? true,
         attachmentUrl: dto.attachmentUrl,
         status:        autoApprove ? 'APPROVED' : 'PENDING',
         reviewedBy:    autoApprove ? userId : undefined,

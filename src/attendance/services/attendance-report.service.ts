@@ -22,6 +22,7 @@ import {
   DEFAULT_WORK_DAYS,
   BATCH_SIZE,
 } from './attendance-utils.service';
+import * as WorkingDays from '../../common/working-days.util';
 
 @Injectable()
 export class AttendanceReportService {
@@ -80,16 +81,27 @@ export class AttendanceReportService {
       string,
       Map<string, { id: string; isPaid: boolean }>
     >();
+    // 🆕 seuls les jours JUSTIFIÉS (droit conventionnel) sont écrits en absence ;
+    // null = toute la période couverte (hors catalogue / anciennes demandes)
+    const coveredMap = await WorkingDays.loadCoveredDatesMap(
+      this.prisma,
+      companyId,
+      absenceRequests,
+    );
     absenceRequests.forEach((ar) => {
       if (!absenceMap.has(ar.employeeId))
         absenceMap.set(ar.employeeId, new Map());
+      const covered = coveredMap.get(ar.id) ?? null;
       const current = new Date(ar.startDate);
       const end = new Date(ar.endDate);
       while (current <= end) {
-        absenceMap.get(ar.employeeId)!.set(this.utils.formatDate(current), {
-          id: ar.id,
-          isPaid: ar.isPaid,
-        });
+        const ds = this.utils.formatDate(current);
+        if (!covered || covered.has(ds)) {
+          absenceMap.get(ar.employeeId)!.set(ds, {
+            id: ar.id,
+            isPaid: ar.isPaid,
+          });
+        }
         current.setDate(current.getDate() + 1);
       }
     });

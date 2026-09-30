@@ -100,12 +100,18 @@ import { PassportStrategy } from '@nestjs/passport';
 import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Request } from 'express';
+import { pickFreshestCookie } from '../common/utils/cookie.util';
 
 // ─── Extracteur : cookie d'abord, puis header Bearer (rétrocompat mobile/SSE) ──
 function extractJwt(req: Request): string | null {
-  // Priorité 1 — cookie HttpOnly (navigateur web)
-  if (req.cookies?.access_token) {
-    return req.cookies.access_token;
+  // Priorité 1 — cookie HttpOnly (navigateur web).
+  // pickFreshestCookie gère le cas où le navigateur envoie DEUX cookies
+  // "access_token" (ancien host-only + nouveau avec domain) : on prend celui
+  // dont le JWT a été émis le plus récemment au lieu de prendre le premier
+  // de la liste au hasard.
+  const accessToken = pickFreshestCookie(req, 'access_token');
+  if (accessToken) {
+    return accessToken;
   }
   // Priorité 2 — header Authorization: Bearer (apps mobiles / SSE / Postman)
   const auth = req.headers?.authorization;

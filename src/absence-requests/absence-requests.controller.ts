@@ -66,6 +66,20 @@ export class AbsenceRequestsController {
     return this.absenceRequestsService.calculateReturnDate(employeeId, new Date(startDate), parseFloat(days));
   }
 
+  /**
+   * 🆕 Aperçu de couverture (jours justifiés / au-delà du droit) avant envoi.
+   * ⚠️ Doit rester AVANT ':id'.
+   */
+  @Get('coverage-preview')
+  previewCoverage(
+    @Request() req,
+    @Query('startDate') startDate: string,
+    @Query('returnDate') returnDate: string,
+    @Query('motifKey') motifKey?: string,
+  ) {
+    return this.absenceRequestsService.previewCoverage(req.user.userId, { startDate, returnDate, motifKey });
+  }
+
   /** Détail d'une demande (utilisé pour l'impression) */
   @Get(':id')
   findOne(@Param('id') id: string, @Request() req) {

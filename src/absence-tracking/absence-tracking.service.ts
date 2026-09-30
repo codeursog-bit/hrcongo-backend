@@ -17,7 +17,7 @@
 
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
-import { calculateWorkingDays } from '../common/working-days.util';
+import { calculateWorkingDays, loadCoveredDatesMap } from '../common/working-days.util';
 // ✅ Réutilise EXACTEMENT la même notion de "jour ouvré" que la page
 //    Présences (DailyView / attendance-calculation.service), pour que les
 //    deux modules soient toujours d'accord sur qui est absent aujourd'hui.
@@ -167,7 +167,7 @@ export class AbsenceTrackingService {
           startDate: { lte: rangeEnd },
           endDate: { gte: rangeStart },
         },
-        select: { id: true, employeeId: true, type: true, subType: true, isPaid: true, startDate: true, endDate: true },
+        select: { id: true, employeeId: true, type: true, subType: true, isPaid: true, startDate: true, endDate: true, coveredDays: true },
       }) : Promise.resolve([]),
       // ✅ TOUS les statuts (pas seulement PRESENT/REMOTE/LATE) : dès qu'une
       // ligne existe pour un employé/jour donné, ce jour n'est PAS à
@@ -224,12 +224,18 @@ export class AbsenceTrackingService {
         entries.push({ employeeId: l.employeeId, code, family: def.family, trackable: def.trackable, date, source: 'LEAVE', sourceId: l.id });
       }
     }
+    // 🆕 Seuls les jours JUSTIFIÉS (droit conventionnel) comptent comme absence
+    // de type "demande" ; au-delà du droit, le jour suit le pointage (donc
+    // inféré ABS plus bas s'il n'y a pas de pointage). null = tout couvert.
+    const coveredMap = await loadCoveredDatesMap(this.prisma, companyId, absenceRequests as any[]);
     for (const a of absenceRequests) {
       // ✅ isPaid est une info du MODULE PAIE (sera payé ou non pendant son
       // absence) — ça ne change JAMAIS le fait qu'il était absent.
       const { code } = resolveAbsenceRequestCode(a.type, a.subType);
       const def = getCodeDef(code);
+      const covered = coveredMap.get(a.id) ?? null;
       for (const date of this.expandToDays(a.startDate, a.endDate, rangeStart, rangeEnd)) {
+        if (covered && !covered.has(date)) continue;
         entries.push({ employeeId: a.employeeId, code, family: def.family, trackable: def.trackable, date, source: 'ABSENCE_REQUEST', sourceId: a.id });
       }
     }

@@ -13,6 +13,7 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { EmployeeNotFoundException } from '../../exceptions/business.exceptions';
+import * as WorkingDays from '../../common/working-days.util';
 import {
   AttendanceUtilsService,
   DayStatus,
@@ -85,7 +86,14 @@ export class AttendanceCalculationService {
     const leaveDates = this.buildLeaveDates(leaves);
     const holidayDates = new Set(publicHolidays.map((h) => h.date));
     const attendanceMap = new Map(attendances.map((a) => [a.date, a]));
-    const absenceDates = this.buildAbsenceDates(absenceRequests);
+    // 🆕 Seuls les jours JUSTIFIÉS (droit conventionnel) sont couverts ; les
+    // jours demandés au-delà suivent le pointage (absent si pas de pointage).
+    const coveredMap = await WorkingDays.loadCoveredDatesMap(
+      this.prisma,
+      companyId,
+      absenceRequests,
+    );
+    const absenceDates = this.buildAbsenceDates(absenceRequests, coveredMap);
 
     const result: DayStatus[] = [];
     const current = new Date(startDate);
@@ -109,6 +117,7 @@ export class AttendanceCalculationService {
           workDays,
           current,
           isFuture,
+          absenceDates,
         );
         result.push(
           this.buildDayStatus(dateStr, status, att, leaveDates, absenceDates),
@@ -136,6 +145,8 @@ export class AttendanceCalculationService {
     employeeLeaves: any[],
     holidayDates: Set<string>,
     workDays: number[],
+    // 🆕 optionnel — jours justifiés de cet employé (voir buildAbsenceDatesByEmployee)
+    absenceDates?: Map<string, { type: string; isPaid: boolean }>,
   ): DayStatus[] {
     const now = new Date();
     const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
@@ -164,8 +175,9 @@ export class AttendanceCalculationService {
         workDays,
         current,
         isFuture,
+        absenceDates,
       );
-      result.push(this.buildDayStatus(dateStr, status, att, leaveDates));
+      result.push(this.buildDayStatus(dateStr, status, att, leaveDates, absenceDates));
 
       current.setDate(current.getDate() + 1);
     }
@@ -190,23 +202,52 @@ export class AttendanceCalculationService {
     return leaveDates;
   }
 
-  // ✅ Map date → { type: MALADIE/CONVENTIONNELLE/EXCEPTIONNELLE, isPaid }
+  // ✅ Map date → { type, isPaid } — UNIQUEMENT les jours justifiés.
+  // coveredMap.get(id) === null  → toute la période est couverte (absence hors
+  // catalogue / anciennes demandes). Sinon : seuls les jours du Set.
   private buildAbsenceDates(
     absenceRequests: any[],
+    coveredMap: Map<string, Set<string> | null>,
   ): Map<string, { type: string; isPaid: boolean }> {
     const absenceDates = new Map<string, { type: string; isPaid: boolean }>();
     absenceRequests.forEach((ar) => {
+      const covered = coveredMap.get(ar.id) ?? null;
       const current = new Date(ar.startDate);
       const end = new Date(ar.endDate);
       while (current <= end) {
-        absenceDates.set(this.utils.formatDate(current), {
-          type: ar.type,
-          isPaid: ar.isPaid,
-        });
+        const ds = this.utils.formatDate(current);
+        if (!covered || covered.has(ds)) {
+          absenceDates.set(ds, { type: ar.type, isPaid: ar.isPaid });
+        }
         current.setDate(current.getDate() + 1);
       }
     });
     return absenceDates;
+  }
+
+  /**
+   * 🆕 Pour les vues multi-employés (liste des présences) : Map employeeId →
+   * (date → { type, isPaid }) des jours justifiés, en une seule lecture fériés.
+   */
+  async buildAbsenceDatesByEmployee(
+    companyId: string,
+    absenceRequests: any[],
+  ): Promise<Map<string, Map<string, { type: string; isPaid: boolean }>>> {
+    const coveredMap = await WorkingDays.loadCoveredDatesMap(
+      this.prisma,
+      companyId,
+      absenceRequests,
+    );
+    const grouped = new Map<string, any[]>();
+    absenceRequests.forEach((ar) => {
+      if (!grouped.has(ar.employeeId)) grouped.set(ar.employeeId, []);
+      grouped.get(ar.employeeId)!.push(ar);
+    });
+    const byEmployee = new Map<string, Map<string, { type: string; isPaid: boolean }>>();
+    grouped.forEach((list, employeeId) => {
+      byEmployee.set(employeeId, this.buildAbsenceDates(list, coveredMap));
+    });
+    return byEmployee;
   }
 
   private resolveStatus(
@@ -217,6 +258,7 @@ export class AttendanceCalculationService {
     workDays: number[],
     current: Date,
     isFuture: boolean,
+    absenceDates?: Map<string, { type: string; isPaid: boolean }>,
   ): DayStatusEnum {
     if (holidayDates.has(dateStr)) return DayStatusEnum.HOLIDAY;
     if (!this.utils.isWorkingDay(current, workDays))
@@ -234,6 +276,17 @@ export class AttendanceCalculationService {
       return att.status as DayStatusEnum;
     }
     if (leaveDates.has(dateStr)) return DayStatusEnum.LEAVE;
+
+    // 🆕 Absence approuvée, jour JUSTIFIÉ (dans le droit conventionnel), sans
+    // pointage → absence justifiée : payée (ABSENT_PAID) ou, si la RH a
+    // tranché "non payé", déduite (ABSENT_UNPAID) — jamais "non justifiée" par
+    // défaut. Les jours demandés AU-DELÀ du droit ne passent pas ici : ils
+    // tombent plus bas (pointage sinon ABSENT_UNPAID). Le jour de reprise
+    // prévu non pointé est donc bien une absence non justifiée.
+    const coveredAbsence = absenceDates?.get(dateStr);
+    if (coveredAbsence) {
+      return (coveredAbsence.isPaid ? 'ABSENT_PAID' : DayStatusEnum.ABSENT_UNPAID) as DayStatusEnum;
+    }
 
     if (att) {
       const valid = [

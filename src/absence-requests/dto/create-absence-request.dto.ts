@@ -81,9 +81,18 @@ export class CreateAbsenceRequestDto {
   @IsNotEmpty()
   startDate: string;
 
+  // Dernier jour d'absence (inclus). Ignoré si `returnDate` est fourni.
   @IsDateString()
   @IsOptional()
   endDate?: string;
+
+  // 🆕 Date de REPRISE (jour où l'employé est attendu). Le dernier jour
+  //    d'absence est déduit (reprise - 1 jour). Prioritaire sur endDate.
+  //    Avec un motif du catalogue et sans date fournie, la reprise est
+  //    calculée automatiquement (droit conventionnel, jours ouvrables).
+  @IsDateString()
+  @IsOptional()
+  returnDate?: string;
 
   @IsString()
   @IsOptional()
@@ -91,7 +100,7 @@ export class CreateAbsenceRequestDto {
 
   @IsBoolean()
   @IsOptional()
-  isPaid?: boolean; // Statut souhaité — Payé / Non-payé (proposé par l'employé, tranché par le RH à la validation)
+  isPaid?: boolean; // Statut souhaité (défaut : payé — la RH tranche à la validation)
 
   @IsString()
   @IsOptional()

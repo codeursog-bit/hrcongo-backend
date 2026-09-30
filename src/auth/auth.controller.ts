@@ -35,6 +35,7 @@ import { ForcePasswordChangeDto } from './dto/force-password-change.dto';
 import { SwitchCompanyDto } from './dto/switch-company.dto';
 import { PrismaService } from '../prisma/prisma.service';
 import { CabinetService } from 'src/cabinet/services/cabinet.service';
+import { pickFreshestCookie } from '../common/utils/cookie.util';
 
 @Controller('auth')
 export class AuthController {
@@ -108,7 +109,10 @@ export class AuthController {
   @Post('refresh')
   @HttpCode(HttpStatus.OK)
   async refreshToken(@Req() req: ExpressRequest, @Res() res: Response) {
-    const token = (req.cookies as any)?.refresh_token;
+    // pickFreshestCookie : si le navigateur envoie deux cookies "refresh_token"
+    // (ancien host-only + nouveau avec domain), prend celui émis le plus
+    // récemment au lieu du premier de la liste au hasard.
+    const token = pickFreshestCookie(req, 'refresh_token');
     if (!token)
       throw new BadRequestException('Token de rafraîchissement manquant');
     return this.authService.refreshToken(token, res);
@@ -124,7 +128,7 @@ export class AuthController {
     @Req() expressReq: ExpressRequest,
     @Res() res: Response,
   ) {
-    const refreshToken = (expressReq.cookies as any)?.refresh_token;
+    const refreshToken = pickFreshestCookie(expressReq, 'refresh_token') ?? undefined;
     return this.authService.logout(req.user.userId, refreshToken, res);
   }
 

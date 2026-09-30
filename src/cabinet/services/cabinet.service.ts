@@ -16,6 +16,7 @@ import {
   UpdatePortalAccessDto,
 } from '../dto/cabinet.dto';
 import * as CONST from '../../payroll/settings/constants/settings.constants';
+import { seedCongoPublicHolidays } from '../../common/congo-public-holidays';
 import * as bcrypt from 'bcrypt';
 import * as crypto from 'crypto';
 
@@ -370,6 +371,16 @@ export class CabinetService {
 
       return { company, link };
     });
+
+    // 🇨🇬 Jours fériés légaux du Congo — non-bloquant (rattrapage : scripts/seed-congo-holidays)
+    try {
+      await seedCongoPublicHolidays(this.prisma, result.company.id);
+    } catch (err) {
+      console.error(
+        `[CabinetService] Jours fériés non créés pour company ${result.company.id}:`,
+        err,
+      );
+    }
 
     return result;
   }

@@ -16,6 +16,7 @@ import { AffiliateService } from '../affiliate/affiliate.service';
 import { MailService } from '../mail/mail.service';
 import { Response, Request } from 'express';
 import { normalizePhone } from '../common/utils/phone.util';
+import { clearLegacyCookies } from '../common/utils/cookie.util';
 
 export class ChangePasswordDto {
   currentPassword!: string;
@@ -538,6 +539,7 @@ export class AuthService {
     });
     res.clearCookie('access_token', CLEAR_OPTIONS.ACCESS);
     res.clearCookie('refresh_token', CLEAR_OPTIONS.REFRESH);
+    clearLegacyCookies(res); // 🧹 nettoie aussi les éventuels anciens cookies host-only
     // ✅ trust_device NON effacé volontairement — permet de ne pas redemander
     // le 2FA quand l'user se reconnecte sur le même appareil dans les 30j
     return res.json({ success: true, message: 'Déconnexion réussie' });
@@ -704,6 +706,10 @@ export class AuthService {
     this.prisma.userSession
       .deleteMany({ where: { userId: user.id, expiresAt: { lt: new Date() } } })
       .catch(() => {});
+    // 🧹 Nettoie d'éventuels anciens cookies host-only (posés avant l'ajout de
+    // COOKIE_DOMAIN) AVANT de poser les nouveaux — évite que le navigateur
+    // envoie les deux et que cookie-parser prenne le mauvais des deux.
+    clearLegacyCookies(res);
     res.cookie('access_token', accessToken, COOKIE_CONFIG.ACCESS);
     res.cookie('refresh_token', refreshToken, COOKIE_CONFIG.REFRESH);
     return res.json({

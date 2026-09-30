@@ -118,6 +118,24 @@ async function loadShift(
   });
 }
 
+/**
+ * Options RÉSERVÉES au code serveur (jamais construites depuis un body HTTP) :
+ *  - actingCompanyId : pointage fait « pour » une entreprise sans compte agissant
+ *    (écran QR / code secret) — remplace la résolution via userId.
+ *  - skipGeofence    : le scan d'un écran fixe est la preuve de présence, le GPS
+ *    (instable) n'est plus exigé.
+ */
+export type PunchMethodValue = 'GPS' | 'KIOSK' | 'QR_SCAN' | 'SECRET_CODE' | 'MANUAL';
+
+export interface AttendanceActingOptions {
+  actingCompanyId?: string;
+  skipGeofence?: boolean;
+  /** Méthode de pointage tracée pour l'admin. Absente = déduite (GPS si l'employé pointe pour lui-même, sinon MANUAL). */
+  method?: PunchMethodValue;
+  /** Nom de l'écran / tablette utilisé (affiché à l'admin). */
+  source?: string;
+}
+
 @Injectable()
 export class AttendanceCheckService {
   constructor(
@@ -128,14 +146,28 @@ export class AttendanceCheckService {
     private companySiteService: CompanySiteService,
   ) {}
 
+  /** Méthode par défaut quand l'appelant n'en précise pas : soi-même → GPS, pour un autre → MANUAL. */
+  private async defaultPunchMethod(employeeId: string, userId: string): Promise<PunchMethodValue> {
+    if (!userId) return 'MANUAL';
+    const u = await this.prisma.user.findUnique({ where: { id: userId }, select: { employeeId: true } });
+    return u?.employeeId === employeeId ? 'GPS' : 'MANUAL';
+  }
+
   // ============================================================================
   // ✅ CHECK-IN
   // ============================================================================
-  async checkIn(dto: CreateAttendanceDto, userId: string) {
-    const user = await this.prisma.user.findUnique({
-      where: { id: userId },
-      select: { companyId: true, role: true },
-    });
+  async checkIn(
+    dto: CreateAttendanceDto,
+    userId: string,
+    opts?: AttendanceActingOptions,
+  ) {
+    const user: { companyId: string | null; role: any } | null =
+      opts?.actingCompanyId
+        ? { companyId: opts.actingCompanyId, role: 'EMPLOYEE' }
+        : await this.prisma.user.findUnique({
+            where: { id: userId },
+            select: { companyId: true, role: true },
+          });
     if (!user?.companyId) throw new CompanyNotFoundException();
 
     // 🚧 Abonnement/essai expiré (ou quota FREE dépassé) → on bloque le
@@ -264,7 +296,7 @@ export class AttendanceCheckService {
     let matchedSiteName: string | null = null;
     let matchedDistance: number | null = null;
 
-    if (geofencingConfigured) {
+    if (geofencingConfigured && !opts?.skipGeofence) {
       // Un site (ou la position principale) est configuré → la position est
       // OBLIGATOIRE et VÉRIFIÉE ici, côté serveur, quoi qu'ait décidé le
       // frontend. Plus de bypass "Forcer" possible.
@@ -315,8 +347,12 @@ export class AttendanceCheckService {
       ? DayStatusEnum.LATE
       : DayStatusEnum.PRESENT;
 
+    const punchMethod = opts?.method ?? (await this.defaultPunchMethod(employeeId, userId));
+
     const attData = {
       checkIn: now,
+      checkInMethod: punchMethod,
+      checkInSource: opts?.source?.slice(0, 100) ?? null,
       checkInLat: latitude ?? null,
       checkInLon: longitude ?? null,
       checkInSiteId: matchedSiteId,
@@ -391,7 +427,11 @@ export class AttendanceCheckService {
   // ============================================================================
   // ✅ CHECK-OUT
   // ============================================================================
-  async checkOut(dto: CreateAttendanceDto, userId: string) {
+  async checkOut(
+    dto: CreateAttendanceDto,
+    userId: string,
+    opts?: AttendanceActingOptions,
+  ) {
     const { employeeId, latitude, longitude } = dto;
     const today = this.utils.getTodayString();
     const now = new Date();
@@ -403,10 +443,13 @@ export class AttendanceCheckService {
     if (record.checkOut) throw new AttendanceAlreadyCheckedOutException();
     if (!record.checkIn) throw new Error("Heure d'entrée manquante");
 
-    const user = await this.prisma.user.findUnique({
-      where: { id: userId },
-      select: { companyId: true, role: true },
-    });
+    const user: { companyId: string | null; role: any } | null =
+      opts?.actingCompanyId
+        ? { companyId: opts.actingCompanyId, role: 'EMPLOYEE' }
+        : await this.prisma.user.findUnique({
+            where: { id: userId },
+            select: { companyId: true, role: true },
+          });
     if (!user?.companyId) throw new CompanyNotFoundException();
 
     // ℹ️ Volontairement PAS de blocage abonnement ici : si l'accès a été
@@ -429,7 +472,7 @@ export class AttendanceCheckService {
     const geofencingConfiguredOut =
       await this.companySiteService.isGeofencingConfigured(user.companyId);
 
-    if (geofencingConfiguredOut) {
+    if (geofencingConfiguredOut && !opts?.skipGeofence) {
       if (latitude == null || longitude == null) {
         throw new LocationRequiredException();
       }
@@ -552,6 +595,8 @@ export class AttendanceCheckService {
       where: { id: record.id },
       data: {
         checkOut: now,
+        checkOutMethod: opts?.method ?? (await this.defaultPunchMethod(employeeId, userId)),
+        checkOutSource: opts?.source?.slice(0, 100) ?? null,
         checkOutLat: latitude ?? null,
         checkOutLon: longitude ?? null,
         checkOutSiteId,

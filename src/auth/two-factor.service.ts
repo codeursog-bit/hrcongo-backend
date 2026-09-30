@@ -10,6 +10,7 @@ import {
 import { PrismaService } from '../prisma/prisma.service';
 import { JwtService } from '@nestjs/jwt';
 import { COOKIE_CONFIG } from './auth.service';
+import { clearLegacyCookies } from '../common/utils/cookie.util';
 import * as crypto from 'crypto';
 import * as bcrypt from 'bcrypt';
 import { Response } from 'express';
@@ -239,6 +240,9 @@ export class TwoFactorService {
         /* silencieux */
       });
 
+    // 🧹 Même nettoyage que dans auth.service.ts#issueTokensAndSetCookies —
+    // évite les doublons de cookies host-only après un ancien déploiement.
+    clearLegacyCookies(res);
     res.cookie('access_token', accessToken, COOKIE_CONFIG.ACCESS);
     res.cookie('refresh_token', refreshToken, COOKIE_CONFIG.REFRESH);
 
