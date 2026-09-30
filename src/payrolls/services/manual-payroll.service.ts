@@ -1051,7 +1051,10 @@ export class ManualPayrollService {
 
     const [settings, companyTaxes, loans, advances, companyDeductions] = await Promise.all([
       this.payrollSettings.getSettingsByCompanyId(companyId),
-      this.companyTaxService.findActive(companyId),
+      this.companyTaxService.findActive(companyId, {
+        month: dto.month,
+        year: dto.year,
+      }),
       this.deductionsService.getActiveLoans(
         dto.employeeId,
         dto.month,
@@ -1259,7 +1262,10 @@ export class ManualPayrollService {
 
     const [settings, companyTaxes, loans, advances, companyDeductions] = await Promise.all([
       this.payrollSettings.getSettingsByCompanyId(companyId),
-      this.companyTaxService.findActive(companyId),
+      this.companyTaxService.findActive(companyId, {
+        month: dto.month,
+        year: dto.year,
+      }),
       this.deductionsService.getActiveLoans(
         dto.employeeId,
         dto.month,

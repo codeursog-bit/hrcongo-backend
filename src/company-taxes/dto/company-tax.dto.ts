@@ -8,12 +8,17 @@ import {
   IsOptional,
   IsBoolean,
   IsEnum,
+  IsInt,
+  IsArray,
+  ArrayMinSize,
+  ArrayUnique,
   Min,
   Max,
   MaxLength,
   MinLength,
 } from 'class-validator';
 import { Type } from 'class-transformer';
+import { ContractType } from '@prisma/client';
 
 export enum CompanyTaxThreshold {
   ELIGIBILITY = 'ELIGIBILITY', // Filtre binaire — taxe ignorée si brut < seuil
@@ -102,9 +107,43 @@ export class CreateCompanyTaxDto {
   @IsOptional()
   @IsEnum(CompanyTaxThreshold)
   thresholdType?: CompanyTaxThreshold;
+
+  // Types de contrat auxquels la taxe s'applique (défaut : CDI + CDD)
+  @IsOptional()
+  @IsArray()
+  @ArrayMinSize(1, { message: 'Sélectionnez au moins un type de contrat' })
+  @ArrayUnique()
+  @IsEnum(ContractType, { each: true })
+  applicableContractTypes?: ContractType[];
+
+  // true = chaque mois ; false = uniquement le mois/année indiqués
+  @IsOptional()
+  @IsBoolean()
+  isRecurring?: boolean;
+
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(12)
+  @Type(() => Number)
+  applicableMonth?: number | null;
+
+  @IsOptional()
+  @IsInt()
+  @Min(2000)
+  @Max(2100)
+  @Type(() => Number)
+  applicableYear?: number | null;
 }
 
 export class UpdateCompanyTaxDto {
+  // Le code est immuable : accepté ici pour ne pas déclencher
+  // « property code should not exist » (forbidNonWhitelisted), mais ignoré
+  // par le service.
+  @IsOptional()
+  @IsString()
+  code?: string;
+
   @IsOptional()
   @IsString()
   @MinLength(2)
@@ -153,7 +192,7 @@ export class UpdateCompanyTaxDto {
   @IsNumber()
   @Min(0)
   @Type(() => Number)
-  ceiling?: number;
+  ceiling?: number | null;
 
   @IsOptional()
   @IsBoolean()
@@ -164,9 +203,36 @@ export class UpdateCompanyTaxDto {
   @IsNumber()
   @Min(0)
   @Type(() => Number)
-  minSalaryThreshold?: number;
+  minSalaryThreshold?: number | null;
 
   @IsOptional()
   @IsEnum(CompanyTaxThreshold)
   thresholdType?: CompanyTaxThreshold;
+
+  // Types de contrat auxquels la taxe s'applique (défaut : CDI + CDD)
+  @IsOptional()
+  @IsArray()
+  @ArrayMinSize(1, { message: 'Sélectionnez au moins un type de contrat' })
+  @ArrayUnique()
+  @IsEnum(ContractType, { each: true })
+  applicableContractTypes?: ContractType[];
+
+  // true = chaque mois ; false = uniquement le mois/année indiqués
+  @IsOptional()
+  @IsBoolean()
+  isRecurring?: boolean;
+
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(12)
+  @Type(() => Number)
+  applicableMonth?: number | null;
+
+  @IsOptional()
+  @IsInt()
+  @Min(2000)
+  @Max(2100)
+  @Type(() => Number)
+  applicableYear?: number | null;
 }

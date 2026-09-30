@@ -1530,7 +1530,7 @@ export class PayrollsService {
 
     const [settings, companyTaxes] = await Promise.all([
       this.payrollSettingsService.getSettingsByCompanyId(effectiveCompanyId),
-      this.companyTaxService.findActive(effectiveCompanyId), // ✅ Charger les taxes actives
+      this.companyTaxService.findActive(effectiveCompanyId, { month: monthNum, year }), // ✅ taxes actives du mois
     ]);
 
     const eff10 =
@@ -2277,7 +2277,10 @@ export class PayrollsService {
         },
       }), // 🆕 seniorityMode
       this.payrollSettingsService.getSettingsByCompanyId(payroll.companyId),
-      this.companyTaxService.findActive(payroll.companyId), // ✅
+      this.companyTaxService.findActive(payroll.companyId, {
+        month: payroll.month,
+        year: payroll.year,
+      }), // ✅ taxes du mois
     ]);
 
     if (!employee) throw new EmployeeNotFoundException(payroll.employeeId);
@@ -2845,7 +2848,7 @@ export class PayrollsService {
 
     const [settingsBase, companyTaxes] = await Promise.all([
       this.payrollSettingsService.getSettingsByCompanyId(user.companyId),
-      this.companyTaxService.findActive(user.companyId), // ✅
+      this.companyTaxService.findActive(user.companyId, { month: monthNum, year }), // ✅ taxes du mois
     ]);
     // ✅ Même base de jours que la génération réelle (customWorkDays)
     const settings = overrides?.workDays

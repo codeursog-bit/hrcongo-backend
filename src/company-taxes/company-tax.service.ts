@@ -10,6 +10,7 @@ import {
   NotFoundException,
   ForbiddenException,
   ConflictException,
+  BadRequestException,
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import {
@@ -46,11 +47,27 @@ export class CompanyTaxService {
     return tax;
   }
 
+  // ── Cohérence périodicité : un mois précis exige mois + année ───────────
+  private assertPeriod(
+    isRecurring: boolean,
+    month?: number | null,
+    year?: number | null,
+  ) {
+    if (!isRecurring && (!month || !year)) {
+      throw new BadRequestException(
+        'Choisissez le mois et l\'année d\'application de la taxe',
+      );
+    }
+  }
+
   // ============================================================================
   // CREATE — POST /company-taxes
   // ============================================================================
   async create(userId: string, dto: CreateCompanyTaxDto) {
     const companyId = await this.getCompanyId(userId);
+
+    const isRecurring = dto.isRecurring ?? true;
+    this.assertPeriod(isRecurring, dto.applicableMonth, dto.applicableYear);
 
     // Vérifier unicité du code dans l'entreprise
     const existing = await this.prisma.companyTax.findFirst({
@@ -78,6 +95,10 @@ export class CompanyTaxService {
         isActive: dto.isActive ?? true,
         minSalaryThreshold: dto.minSalaryThreshold ?? null,
         thresholdType: dto.thresholdType ?? 'ELIGIBILITY',
+        applicableContractTypes: dto.applicableContractTypes ?? ['CDI', 'CDD'],
+        isRecurring,
+        applicableMonth: isRecurring ? null : (dto.applicableMonth ?? null),
+        applicableYear: isRecurring ? null : (dto.applicableYear ?? null),
       },
     });
 
@@ -102,9 +123,27 @@ export class CompanyTaxService {
   // ============================================================================
   // FIND ACTIVE — pour le calculateur de paie
   // ============================================================================
-  async findActive(companyId: string) {
+  // Sans `period` : toutes les taxes actives. Avec `period` : uniquement les
+  // taxes récurrentes + celles dont le mois/année ciblé correspond à la paie.
+  async findActive(
+    companyId: string,
+    period?: { month: number; year: number },
+  ) {
     return this.prisma.companyTax.findMany({
-      where: { companyId, isActive: true },
+      where: {
+        companyId,
+        isActive: true,
+        ...(period && {
+          OR: [
+            { isRecurring: true },
+            {
+              isRecurring: false,
+              applicableMonth: period.month,
+              applicableYear: period.year,
+            },
+          ],
+        }),
+      },
       orderBy: { name: 'asc' },
     });
   }
@@ -122,11 +161,32 @@ export class CompanyTaxService {
   // ============================================================================
   async update(userId: string, taxId: string, dto: UpdateCompanyTaxDto) {
     const companyId = await this.getCompanyId(userId);
-    await this.assertOwnership(taxId, companyId);
+    const current = await this.assertOwnership(taxId, companyId);
 
+    // Périodicité résultante (valeurs du DTO, sinon valeurs actuelles)
+    const nextRecurring = dto.isRecurring ?? current.isRecurring;
+    const nextMonth =
+      dto.applicableMonth !== undefined
+        ? dto.applicableMonth
+        : current.applicableMonth;
+    const nextYear =
+      dto.applicableYear !== undefined
+        ? dto.applicableYear
+        : current.applicableYear;
+    this.assertPeriod(nextRecurring, nextMonth, nextYear);
+
+    // NB : `dto.code` est volontairement ignoré (le code est immuable).
     const updated = await this.prisma.companyTax.update({
       where: { id: taxId },
       data: {
+        ...(dto.applicableContractTypes !== undefined && {
+          applicableContractTypes: dto.applicableContractTypes,
+        }),
+        ...(dto.isRecurring !== undefined && {
+          isRecurring: dto.isRecurring,
+        }),
+        applicableMonth: nextRecurring ? null : nextMonth,
+        applicableYear: nextRecurring ? null : nextYear,
         ...(dto.name !== undefined && { name: dto.name }),
         ...(dto.description !== undefined && { description: dto.description }),
         ...(dto.employeeRate !== undefined && {

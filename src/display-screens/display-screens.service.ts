@@ -351,7 +351,7 @@ export class DisplayScreensService {
     ) {
       // Un code d'une AUTRE entreprise est traité comme inconnu (aucune fuite entre tenants)
       this.secretLimiter.fail(screen.id);
-      throw httpError(404, 'SECRET_NOT_FOUND', 'Code non reconnu. Réessayez.');
+      throw httpError(404, 'SECRET_NOT_FOUND', 'Vérifiez votre code, ou demandez à votre RH de vous en attribuer un.');
     }
 
     this.secretLimiter.reset(screen.id);
@@ -579,6 +579,50 @@ export class DisplayScreensService {
       update: { secretLookup: lookup, companyId: employee.companyId, setByUserId },
     });
     return { success: true };
+  }
+
+  /** Employés de l'entreprise qui ont un code secret (jamais le code lui-même). */
+  async listSecrets(companyId: string | null) {
+    if (!companyId) throw new BadRequestException('Aucune entreprise active.');
+    const rows = await this.prisma.employeeSecret.findMany({
+      where: { companyId },
+      orderBy: { updatedAt: 'desc' },
+      select: {
+        employeeId: true,
+        createdAt: true,
+        updatedAt: true,
+        setByUserId: true,
+        employee: {
+          select: {
+            firstName: true,
+            lastName: true,
+            position: true,
+            status: true,
+            department: { select: { name: true } },
+          },
+        },
+      },
+    });
+
+    const authorIds = [...new Set(rows.map((r) => r.setByUserId).filter(Boolean))] as string[];
+    const authors = authorIds.length
+      ? await this.prisma.user.findMany({
+          where: { id: { in: authorIds } },
+          select: { id: true, firstName: true, lastName: true },
+        })
+      : [];
+    const authorName = new Map(authors.map((u) => [u.id, `${u.firstName} ${u.lastName}`.trim()]));
+
+    return rows.map((r) => ({
+      employeeId: r.employeeId,
+      fullName: `${r.employee.firstName} ${r.employee.lastName}`.trim(),
+      position: r.employee.position,
+      department: r.employee.department?.name ?? null,
+      status: r.employee.status,
+      createdAt: r.createdAt,
+      updatedAt: r.updatedAt,
+      setByName: r.setByUserId ? authorName.get(r.setByUserId) ?? null : null,
+    }));
   }
 
   async removeSecret(employeeId: string) {

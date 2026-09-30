@@ -507,7 +507,10 @@ export class PayrollGeneratorService {
           seniorityMode: true, // ✅ était lu plus bas mais jamais sélectionné (toujours 'AUTO')
         },
       }),
-      this.companyTaxService.findActive(companyId),
+      this.companyTaxService.findActive(companyId, {
+        month: monthNum,
+        year,
+      }),
     ]);
 
     const whereClause: any = {

@@ -1600,6 +1600,15 @@ export class EmployeesService {
       );
     }
 
+    // 🔒 Défense en profondeur : ces champs sont déjà absents de
+    // SelfServiceUpdateEmployeeDto (donc normalement bloqués en amont par
+    // ValidationPipe({ whitelist: true, forbidNonWhitelisted: true })), mais
+    // on les purge explicitement ici aussi — impact direct sur la paie
+    // (nombre de parts fiscales), donc jamais modifiables par l'employé
+    // lui-même, seulement par un ADMIN/HR_MANAGER via PATCH /employees/:id.
+    delete dto.maritalStatus;
+    delete dto.numberOfChildren;
+
     if (dto.nationality) {
       dto.nationality = normalizeNationality(dto.nationality) ?? undefined;
     }

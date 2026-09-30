@@ -136,6 +136,15 @@ export class EmployeeQrController {
     return this.service.qrScan(req.user.id, dto.token, dto.confirm);
   }
 
+  // ── Liste des employés qui ONT un code secret (traçabilité admin / RH) ──
+  // Ne renvoie jamais le code (stocké sous forme d'empreinte) : seulement qui en a un.
+  @Get('secret/list')
+  @UseGuards(AuthGuard('jwt'), RolesGuard)
+  @Roles('ADMIN', 'HR_MANAGER', 'SUPER_ADMIN')
+  listSecrets(@Request() req) {
+    return this.service.listSecrets(req.user.companyId);
+  }
+
   // ── Code secret : défini UNIQUEMENT par l'admin / RH (routes ci-dessous) ──
   @Get('secret/employee/:employeeId')
   @UseGuards(AuthGuard('jwt'), RolesGuard)

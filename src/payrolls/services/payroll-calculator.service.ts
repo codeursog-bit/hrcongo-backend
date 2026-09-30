@@ -300,8 +300,8 @@ export class PayrollCalculatorService {
     }
 
     // ── 10. TAXES CUSTOM (CAMU, TOL, taxe apprentissage, etc.) ──────────────
-    //   Taxes custom : non applicables aux consultants/prestataires/intérim
-    //   Pour les stagiaires : on applique les taxes si elles sont configurées
+    //   Taxes custom : applicables selon `applicableContractTypes` de chaque taxe
+    //   (défaut CDI + CDD ; modifiable par l'entreprise pour STAGE, CONSULTANT, etc.)
     let employeeCustomTaxTotal = 0;
     let employerCustomTaxTotal = 0;
     const customTaxDetails: Array<{
@@ -320,10 +320,14 @@ export class PayrollCalculatorService {
     }> = [];
 
     for (const tax of companyTaxes) {
-      // Taxes custom non applicables aux non-salariés (consultant/prestataire/intérim)
-      if (!isSalaried) {
+      // Types de contrat concernés, configurables par taxe (défaut : CDI + CDD).
+      // (le filtre par mois/récurrence est fait en amont via findActive)
+      const allowedContracts: string[] = tax.applicableContractTypes?.length
+        ? tax.applicableContractTypes
+        : ['CDI', 'CDD'];
+      if (!allowedContracts.includes(contractType)) {
         this.logger.log(
-          `⏭️ ${tax.code} ignorée — contrat ${contractType} non salarié`,
+          `⏭️ ${tax.code} ignorée — contrat ${contractType} non concerné (${allowedContracts.join('/')})`,
         );
         continue;
       }

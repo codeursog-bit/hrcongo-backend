@@ -3100,6 +3100,14 @@ model CompanyTax {
   //                         ex CAMU solidarité : (BI − 500 000) × 0,5%
   thresholdType      CompanyTaxThreshold @default(ELIGIBILITY)
 
+  // Types de contrat concernés (défaut : CDI + CDD)
+  applicableContractTypes ContractType[] @default([CDI, CDD])
+
+  // Périodicité : true = chaque mois ; false = uniquement applicableMonth/applicableYear
+  isRecurring     Boolean @default(true)
+  applicableMonth Int?    @db.SmallInt // 1-12
+  applicableYear  Int?    @db.SmallInt
+
   // Activation
   isActive Boolean @default(true)
 

@@ -17,10 +17,16 @@ import { MailService } from '../mail/mail.service';
 import { Response, Request } from 'express';
 import { normalizePhone } from '../common/utils/phone.util';
 import { clearLegacyCookies } from '../common/utils/cookie.util';
+import { IsString, MinLength } from 'class-validator';
 
+// 🔧 FIX : ces deux champs n'avaient AUCUN décorateur class-validator.
+// Avec ValidationPipe({ whitelist: true, forbidNonWhitelisted: true }) dans
+// main.ts, une propriété du body sans décorateur n'est pas reconnue comme
+// faisant partie du DTO — d'où l'erreur "property currentPassword should not
+// exist" / "property newPassword should not exist" sur tout /auth/change-password.
 export class ChangePasswordDto {
-  currentPassword!: string;
-  newPassword!: string;
+  @IsString() @MinLength(1) currentPassword!: string;
+  @IsString() @MinLength(8) newPassword!: string;
 }
 
 const MAX_LOGIN_ATTEMPTS = 10;
