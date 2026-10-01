@@ -46,6 +46,18 @@ async function bootstrap() {
     });
 
     // ════════════════════════════════════════════════════════════════════════
+    // 🌐 REVERSE PROXY (nginx / Caddy / Traefik) — IP réelle des clients
+    // Sans ceci, Express voit l'IP du proxy pour TOUT LE MONDE : le limiteur de débit
+    // par IP compte alors tous les utilisateurs ensemble et finit par bloquer tout le monde.
+    // TRUST_PROXY = nombre de proxys devant l'appli (1 = nginx/Caddy seul ; 2 = Cloudflare + nginx).
+    // À ne définir QUE derrière un proxy (sinon les clients pourraient falsifier leur IP).
+    // ════════════════════════════════════════════════════════════════════════
+    if (process.env.TRUST_PROXY) {
+      const hops = Number(process.env.TRUST_PROXY);
+      app.set('trust proxy', Number.isFinite(hops) && hops > 0 ? hops : process.env.TRUST_PROXY);
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
     // 🍪 COOKIE PARSER — obligatoire pour lire les cookies HttpOnly
     // ════════════════════════════════════════════════════════════════════════
     app.use(cookieParser());

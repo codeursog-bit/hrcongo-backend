@@ -324,6 +324,33 @@ export class AttendanceService {
   }
 
   // ============================================================================
+  // 🆕 MON POINTAGE DU JOUR — via ma fiche employé, indépendamment de l'entreprise active
+  // (admin multi-entreprises dont la fiche employé est dans une autre entreprise que l'active).
+  // Renvoie un tableau (0 ou 1 élément) pour rester compatible avec la page « Ma pointeuse ».
+  // ============================================================================
+  async findMyToday(userId: string) {
+    const u = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { employeeId: true },
+    });
+    if (!u?.employeeId) return [];
+    return (this.prisma.attendance as any).findMany({
+      where: { employeeId: u.employeeId, date: this.utils.getTodayString() },
+      include: {
+        pause: true,
+        employee: {
+          select: {
+            firstName: true,
+            lastName: true,
+            position: true,
+            department: { select: { id: true, name: true } },
+          },
+        },
+      },
+    });
+  }
+
+  // ============================================================================
   // ✅ HISTORIQUE MENSUEL — filtré par département si MANAGER
   // ============================================================================
   async findAll(userId: string, month: number, year: number, overrideCompanyId?: string) {

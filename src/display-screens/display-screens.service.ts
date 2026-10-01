@@ -18,13 +18,14 @@ import {
   HttpException,
   HttpStatus,
   Injectable,
+  Logger,
   NotFoundException,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { AttendanceService } from '../attendance/attendance.service';
 import { AttendanceBreakService } from '../attendance/services/attendance-break.service';
-import { AttemptLimiter } from './attempt-limiter';
+import { AttemptLimiter, RateLimiter } from './attempt-limiter';
 import {
   PAIRING_TTL_MS,
   QR_BATCH_SIZE,
@@ -82,6 +83,8 @@ function httpError(status: number, error: string, message: string): HttpExceptio
 @Injectable()
 export class DisplayScreensService {
   private readonly secretLimiter = new AttemptLimiter();
+  private readonly scanRate = new RateLimiter(); // scans par employé
+  private readonly logger = new Logger(DisplayScreensService.name);
 
   constructor(
     private readonly prisma: PrismaService,
@@ -101,13 +104,22 @@ export class DisplayScreensService {
         }),
         this.prisma.user.findUnique({
           where: { id: screen.ownerUserId },
-          select: { companyId: true, isActive: true, manageMultipleCompanies: true },
+          select: {
+            companyId: true,
+            isActive: true,
+            manageMultipleCompanies: true,
+            employee: { select: { companyId: true } },
+          },
         }),
       ]);
       // Admin désactivé ou plus multi-entreprises → l'écran portefeuille devient inerte
       if (!owner?.isActive || !owner.manageMultipleCompanies) return [];
       const ids = new Set(links.map((l) => l.companyId));
+      // Entreprise active de l'admin + entreprise de sa propre fiche employé : elles font
+      // partie de son portefeuille même si elles n'ont pas de ligne UserCompany (ex. entreprise
+      // d'origine, laissée après un changement d'entreprise active).
       if (owner.companyId) ids.add(owner.companyId);
+      if (owner.employee?.companyId) ids.add(owner.employee.companyId);
       return [...ids];
     }
     return screen.companyId ? [screen.companyId] : [];
@@ -118,7 +130,10 @@ export class DisplayScreensService {
     const [links, multiAdmins] = await Promise.all([
       this.prisma.userCompany.findMany({ where: { companyId }, select: { userId: true } }),
       this.prisma.user.findMany({
-        where: { companyId, manageMultipleCompanies: true },
+        where: {
+          manageMultipleCompanies: true,
+          OR: [{ companyId }, { employee: { is: { companyId } } }], // 🆕 y compris via sa fiche employé
+        },
         select: { id: true },
       }),
     ]);
@@ -306,6 +321,10 @@ export class DisplayScreensService {
   }
 
   async qrScan(userId: string, token: string, confirm?: boolean): Promise<PunchResult> {
+    // Limite PAR EMPLOYÉ (pas par IP : un bureau entier partage la même IP publique)
+    if (!this.scanRate.allow(userId, 10, 60_000)) {
+      throw httpError(429, 'TOO_MANY_SCANS', 'Trop de scans en peu de temps. Patientez une minute puis réessayez.');
+    }
     const parsed = parseQrToken(token);
     // Même message pour « inconnu / révoqué / signature fausse » : pas d'oracle pour un attaquant
     const invalid = httpError(400, 'QR_INVALID', 'QR code invalide. Scannez le QR affiché sur la tablette.');
@@ -325,6 +344,11 @@ export class DisplayScreensService {
 
     const allowed = await this.companyIdsForScreen(screen);
     if (!allowed.includes(employee.companyId)) {
+      // Diagnostic serveur (aucune donnée sensible) : écran, périmètre, entreprise de l'employé
+      this.logger.warn(
+        `NOT_IN_COMPANY screen=${screen.id} scope=${screen.scope} owner=${screen.ownerUserId ?? '-'} ` +
+          `employeeCompany=${employee.companyId} allowed=[${allowed.join(',')}]`,
+      );
       throw httpError(403, 'NOT_IN_COMPANY', NOT_IN_COMPANY_MESSAGE);
     }
 
@@ -353,7 +377,7 @@ export class DisplayScreensService {
     ) {
       // Un code d'une AUTRE entreprise est traité comme inconnu (aucune fuite entre tenants)
       this.secretLimiter.fail(screen.id);
-      throw httpError(404, 'SECRET_NOT_FOUND', 'Vérifiez votre code, ou demandez à votre RH de vous en attribuer un.');
+      throw httpError(404, 'SECRET_NOT_FOUND', 'Code non reconnu. Réessayez.');
     }
 
     this.secretLimiter.reset(screen.id);
@@ -600,17 +624,26 @@ export class DisplayScreensService {
     return { success: true };
   }
 
-  /** Employés de l'entreprise qui ont un code secret (jamais le code lui-même). */
+  async removeSecret(employeeId: string) {
+    await this.prisma.employeeSecret.deleteMany({ where: { employeeId } });
+    return { success: true };
+  }
+
+  /**
+   * Employés de l'entreprise qui ONT un code secret (traçabilité admin / RH).
+   * Ne renvoie jamais le code (seule son empreinte est stockée) : uniquement qui en a un,
+   * quand il a été défini et par qui.
+   */
   async listSecrets(companyId: string | null) {
-    if (!companyId) throw new BadRequestException('Aucune entreprise active.');
+    if (!companyId) return [];
     const rows = await this.prisma.employeeSecret.findMany({
       where: { companyId },
       orderBy: { updatedAt: 'desc' },
       select: {
         employeeId: true,
+        setByUserId: true,
         createdAt: true,
         updatedAt: true,
-        setByUserId: true,
         employee: {
           select: {
             firstName: true,
@@ -623,30 +656,25 @@ export class DisplayScreensService {
       },
     });
 
-    const authorIds = [...new Set(rows.map((r) => r.setByUserId).filter(Boolean))] as string[];
-    const authors = authorIds.length
+    const setterIds = [...new Set(rows.map((r) => r.setByUserId).filter((x): x is string => !!x))];
+    const setters = setterIds.length
       ? await this.prisma.user.findMany({
-          where: { id: { in: authorIds } },
+          where: { id: { in: setterIds } },
           select: { id: true, firstName: true, lastName: true },
         })
       : [];
-    const authorName = new Map(authors.map((u) => [u.id, `${u.firstName} ${u.lastName}`.trim()]));
+    const setterName = new Map(setters.map((u) => [u.id, `${u.firstName} ${u.lastName}`.trim()]));
 
     return rows.map((r) => ({
       employeeId: r.employeeId,
       fullName: `${r.employee.firstName} ${r.employee.lastName}`.trim(),
-      position: r.employee.position,
+      position: r.employee.position ?? null,
       department: r.employee.department?.name ?? null,
-      status: r.employee.status,
+      status: r.employee.status as string,
       createdAt: r.createdAt,
       updatedAt: r.updatedAt,
-      setByName: r.setByUserId ? authorName.get(r.setByUserId) ?? null : null,
+      setByName: r.setByUserId ? setterName.get(r.setByUserId) ?? null : null,
     }));
-  }
-
-  async removeSecret(employeeId: string) {
-    await this.prisma.employeeSecret.deleteMany({ where: { employeeId } });
-    return { success: true };
   }
 
   async ownEmployee(userId: string) {

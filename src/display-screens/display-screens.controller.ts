@@ -41,13 +41,13 @@ export class DisplayDeviceController {
   constructor(private readonly service: DisplayScreensService) {}
 
   @Post('pairing/start')
-  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  @Throttle({ short: { limit: 10, ttl: 60_000 } })
   startPairing() {
     return this.service.startPairing();
   }
 
   @Post('pairing/poll')
-  @Throttle({ default: { limit: 60, ttl: 60_000 } })
+  @Throttle({ short: { limit: 60, ttl: 60_000 } })
   pollPairing(@Body() dto: PollPairingDto) {
     return this.service.pollPairing(dto.pollToken);
   }
@@ -66,7 +66,7 @@ export class DisplayDeviceController {
 
   @Post('secret-punch')
   @UseGuards(DisplayDeviceGuard)
-  @Throttle({ default: { limit: 30, ttl: 60_000 } })
+  @Throttle({ short: { limit: 30, ttl: 60_000 } })
   secretPunch(@Body() dto: SecretPunchDto, @Request() req) {
     return this.service.secretPunch(req.displayScreen, dto.secret, dto.confirm);
   }
@@ -87,7 +87,7 @@ export class DisplayAdminController {
   }
 
   @Post('approve')
-  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  @Throttle({ short: { limit: 10, ttl: 60_000 } })
   approve(@Body() dto: ApproveScreenDto, @Request() req) {
     return this.service.approve(req.user, dto);
   }
@@ -109,7 +109,7 @@ export class DisplayAdminController {
   // 🆕 Régénération du QR : change le sel de l'écran → tous les QR déjà émis
   // (y compris ceux partagés en photo) deviennent invalides immédiatement.
   @Post(':id/regenerate')
-  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  @Throttle({ short: { limit: 10, ttl: 60_000 } })
   regenerate(@Param('id', new ParseUUIDPipe()) id: string, @Request() req) {
     return this.service.regenerateQr(req.user, id);
   }
@@ -131,7 +131,12 @@ export class EmployeeQrController {
 
   @Post('scan')
   @UseGuards(AuthGuard('jwt'))
-  @Throttle({ default: { limit: 20, ttl: 60_000 } })
+  // Scan employé : plafond relevé (beaucoup d'employés derrière la même IP de bureau à l'heure de
+  // pointage). La protection fine est PAR EMPLOYÉ, dans le service (10 scans / minute).
+  @Throttle({
+    short: { limit: 300, ttl: 60_000 },
+    medium: { limit: 3_000, ttl: 900_000 },
+  })
   scan(@Body() dto: QrScanDto, @Request() req) {
     return this.service.qrScan(req.user.id, dto.token, dto.confirm);
   }
@@ -160,7 +165,7 @@ export class EmployeeQrController {
   @Put('secret/employee/:employeeId')
   @UseGuards(AuthGuard('jwt'), RolesGuard)
   @Roles('ADMIN', 'HR_MANAGER', 'SUPER_ADMIN')
-  @Throttle({ default: { limit: 30, ttl: 60_000 } })
+  @Throttle({ short: { limit: 30, ttl: 60_000 } })
   async setEmployeeSecret(
     @Param('employeeId', new ParseUUIDPipe()) employeeId: string,
     @Body() dto: SetSecretDto,

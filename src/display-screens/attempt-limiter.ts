@@ -51,3 +51,31 @@ export class AttemptLimiter {
     }
   }
 }
+
+/**
+ * Limiteur « N appels par fenêtre » par clé (ex. par employé). Fenêtre glissante, en mémoire :
+ * suffisant pour une instance ; à passer sur Redis si vous lancez plusieurs instances du backend.
+ */
+export class RateLimiter {
+  private readonly hits = new Map<string, number[]>();
+
+  /** true = autorisé (et compté), false = limite atteinte. */
+  allow(key: string, max: number, windowMs: number): boolean {
+    const now = Date.now();
+    const recent = (this.hits.get(key) ?? []).filter((t) => now - t < windowMs);
+    if (recent.length >= max) {
+      this.hits.set(key, recent);
+      return false;
+    }
+    recent.push(now);
+    this.hits.set(key, recent);
+    if (this.hits.size > 2000) this.prune(now, windowMs);
+    return true;
+  }
+
+  private prune(now: number, windowMs: number): void {
+    for (const [k, arr] of this.hits) {
+      if (!arr.length || now - arr[arr.length - 1] >= windowMs) this.hits.delete(k);
+    }
+  }
+}

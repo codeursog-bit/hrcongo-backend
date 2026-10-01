@@ -145,6 +145,12 @@ export class AttendanceController {
     }
   }
 
+  // 🆕 Mon pointage du jour (ma fiche employé) — fonctionne pour tous les rôles
+  @Get('my-today')
+  async findMyToday(@Request() req) {
+    return this.attendanceService.findMyToday(req.user.userId);
+  }
+
   @Get()
   async findAll(
     @Query('month') month: string,
