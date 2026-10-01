@@ -10,6 +10,7 @@
 //   - Tous les délégués pointent vers les services v5.1
 // ============================================================================
 
+import { resolveUserEmployeeId } from '../common/utils/user-employee.util';
 import { Injectable, ForbiddenException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateAttendanceDto } from './dto/create-attendance.dto';
@@ -329,13 +330,10 @@ export class AttendanceService {
   // Renvoie un tableau (0 ou 1 élément) pour rester compatible avec la page « Ma pointeuse ».
   // ============================================================================
   async findMyToday(userId: string) {
-    const u = await this.prisma.user.findUnique({
-      where: { id: userId },
-      select: { employeeId: true },
-    });
-    if (!u?.employeeId) return [];
+    const myEmployeeId = await resolveUserEmployeeId(this.prisma, userId); // 🆕 lie la fiche si besoin
+    if (!myEmployeeId) return [];
     return (this.prisma.attendance as any).findMany({
-      where: { employeeId: u.employeeId, date: this.utils.getTodayString() },
+      where: { employeeId: myEmployeeId, date: this.utils.getTodayString() },
       include: {
         pause: true,
         employee: {

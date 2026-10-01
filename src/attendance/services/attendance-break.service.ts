@@ -16,6 +16,7 @@ import {
 } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AttendanceUtilsService } from './attendance-utils.service';
+import { resolveUserEmployeeId } from '../../common/utils/user-employee.util';
 import { CompanySiteService } from '../../companies/company-site.service';
 import {
   LocationRequiredException,
@@ -93,14 +94,15 @@ export class AttendanceBreakService {
   }
 
   private async me(userId: string) {
-    const u = await this.prisma.user.findUnique({
-      where: { id: userId },
-      select: { employeeId: true, companyId: true },
-    });
-    if (!u?.employeeId || !u.companyId) {
+    const employeeId = await resolveUserEmployeeId(this.prisma, userId); // 🆕 lie la fiche si besoin
+    const emp = employeeId
+      ? await this.prisma.employee.findUnique({ where: { id: employeeId }, select: { companyId: true } })
+      : null;
+    if (!employeeId || !emp) {
       throw new ForbiddenException('Aucune fiche employé liée à ce compte.');
     }
-    return { employeeId: u.employeeId, companyId: u.companyId };
+    // Entreprise de la FICHE (pas l'entreprise active du compte)
+    return { employeeId, companyId: emp.companyId };
   }
 
   private async todayAttendance(employeeId: string) {

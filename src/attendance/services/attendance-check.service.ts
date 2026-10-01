@@ -11,6 +11,7 @@ import { CreateAttendanceDto } from '../dto/create-attendance.dto';
 import { SubscriptionGuard } from '../../subscriptions/guards/subscription.guard';
 import { CompanySiteService } from '../../companies/company-site.service';
 import { AttendanceBreakService } from './attendance-break.service';
+import { resolveUserEmployeeId } from '../../common/utils/user-employee.util';
 import {
   CompanyNotFoundException,
   EmployeeNotFoundException,
@@ -151,8 +152,7 @@ export class AttendanceCheckService {
   /** Méthode par défaut quand l'appelant n'en précise pas : soi-même → GPS, pour un autre → MANUAL. */
   private async defaultPunchMethod(employeeId: string, userId: string): Promise<PunchMethodValue> {
     if (!userId) return 'MANUAL';
-    const u = await this.prisma.user.findUnique({ where: { id: userId }, select: { employeeId: true } });
-    return u?.employeeId === employeeId ? 'GPS' : 'MANUAL';
+    return (await resolveUserEmployeeId(this.prisma, userId)) === employeeId ? 'GPS' : 'MANUAL';
   }
 
   // ============================================================================

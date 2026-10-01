@@ -667,6 +667,7 @@
 //   }
 // }
 
+import { resolveUserEmployeeId } from '../common/utils/user-employee.util';
 import {
   Injectable,
   NotFoundException,
@@ -1530,6 +1531,17 @@ export class EmployeesService {
 
   async findByUser(userId: string) {
     const user = await this.getVerifiedUser(userId);
+
+    // 🆕 D'abord la fiche LIÉE au compte (ou retrouvée par e-mail dans son portefeuille, puis liée) :
+    // couvre l'admin dont la fiche est dans une autre entreprise que l'entreprise active.
+    const linkedId = await resolveUserEmployeeId(this.prisma, userId);
+    if (linkedId) {
+      const linked = await this.prisma.employee.findUnique({
+        where: { id: linkedId },
+        include: { department: true },
+      });
+      if (linked) return linked;
+    }
 
     return this.prisma.employee.findFirst({
       where: { email: user.email ?? undefined, companyId: user.companyId },

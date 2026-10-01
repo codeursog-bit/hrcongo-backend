@@ -24,6 +24,7 @@ import {
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { AttendanceService } from '../attendance/attendance.service';
+import { resolveUserEmployeeId } from '../common/utils/user-employee.util';
 import { AttendanceBreakService } from '../attendance/services/attendance-break.service';
 import { AttemptLimiter, RateLimiter } from './attempt-limiter';
 import {
@@ -294,28 +295,32 @@ export class DisplayScreensService {
   private async resolveEmployeeOfUser(userId: string): Promise<PunchEmployee> {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
-      select: {
-        id: true,
-        isActive: true,
-        employee: { select: { id: true, companyId: true, firstName: true, status: true } },
-      },
+      select: { id: true, isActive: true },
     });
-    if (!user?.isActive || !user.employee) {
+    // 🆕 Fiche liée au compte, ou retrouvée par e-mail puis liée (admin dont la fiche a été créée après coup)
+    const employeeId = user?.isActive ? await resolveUserEmployeeId(this.prisma, userId) : null;
+    const employee = employeeId
+      ? await this.prisma.employee.findUnique({
+          where: { id: employeeId },
+          select: { id: true, companyId: true, firstName: true, status: true },
+        })
+      : null;
+    if (!user?.isActive || !employee) {
       throw httpError(403, 'NO_EMPLOYEE', "Aucune fiche employé n'est liée à votre compte.");
     }
-    if (!PUNCH_ALLOWED_STATUSES.includes(user.employee.status as string)) {
+    if (!PUNCH_ALLOWED_STATUSES.includes(employee.status as string)) {
       throw httpError(403, 'EMPLOYEE_INACTIVE', "Votre fiche employé n'est pas active.");
     }
-    return { ...user.employee, userId: user.id };
+    return { ...employee, userId: user.id };
   }
 
   /** Le pointage par scan est « configuré » si un écran approuvé couvre l'entreprise. */
   async employeeConfig(userId: string) {
-    const user = await this.prisma.user.findUnique({
-      where: { id: userId },
-      select: { employee: { select: { companyId: true } } },
-    });
-    const companyId = user?.employee?.companyId;
+    const employeeId = await resolveUserEmployeeId(this.prisma, userId); // 🆕 lie la fiche si besoin
+    const emp = employeeId
+      ? await this.prisma.employee.findUnique({ where: { id: employeeId }, select: { companyId: true } })
+      : null;
+    const companyId = emp?.companyId;
     const enabled = companyId ? await this.hasScreenFor(companyId) : false;
     return { enabled, defaultMode: enabled ? ('SCAN' as const) : ('GPS' as const) };
   }
