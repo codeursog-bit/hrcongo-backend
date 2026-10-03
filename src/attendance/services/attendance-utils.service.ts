@@ -32,6 +32,7 @@
 //   → TODO : à implémenter quand les retours RH confirment la règle exacte
 // ============================================================================
 
+import { atCongoTime, congoDateString, congoDayOfWeek, congoHours, congoMinutesOfDay } from '../../common/utils/congo-time';
 import { Injectable } from '@nestjs/common';
 
 // ─── Enums & interfaces ──────────────────────────────────────────────────────
@@ -95,6 +96,8 @@ export interface MonthlyReportItem {
   overtime100: number;
   /** Heures au-delà de l'horaire, à titre informatif (HS non payées / forfait) */
   extraHoursInfo: number;
+  /** false = heures sup désactivées pour l'entreprise : aucune HS ne doit être affichée */
+  overtimeEnabled: boolean;
   status: string;
   trend: string;
   details: Array<{
@@ -170,11 +173,10 @@ export function getHeuresLegalesMois(
 export class AttendanceUtilsService {
   // ── Dates ─────────────────────────────────────────────────────────────────
 
+  // 🕐 Jour calendaire du CONGO (et non celui du serveur, en UTC). Reste exact pour les dates
+  // « minuit local » construites par new Date(y, m, d) : décalées de +1 h, elles gardent le même jour.
   formatDate(date: Date): string {
-    const y = date.getFullYear();
-    const m = String(date.getMonth() + 1).padStart(2, '0');
-    const d = String(date.getDate()).padStart(2, '0');
-    return `${y}-${m}-${d}`;
+    return congoDateString(date);
   }
 
   createLocalDate(dateString: string): Date {
@@ -189,8 +191,8 @@ export class AttendanceUtilsService {
   // ── Numéro de semaine ISO (lundi = début) ──────────────────────────────────
 
   getISOWeekNumber(date: Date): number {
-    const d = new Date(date);
-    d.setHours(0, 0, 0, 0);
+    // 🕐 On part du jour calendaire du Congo (minuit local), pas de l'heure du serveur
+    const d = this.createLocalDate(this.formatDate(date));
     d.setDate(d.getDate() + 4 - (d.getDay() || 7));
     const yearStart = new Date(d.getFullYear(), 0, 1);
     return Math.ceil(
@@ -200,7 +202,7 @@ export class AttendanceUtilsService {
 
   // Lundi de la semaine contenant la date donnée
   getMondayOfWeek(date: Date): Date {
-    const d = new Date(date);
+    const d = this.createLocalDate(this.formatDate(date)); // 🕐 jour calendaire du Congo
     const day = d.getDay(); // 0=dim
     const diff = day === 0 ? -6 : 1 - day;
     d.setDate(d.getDate() + diff);
@@ -234,7 +236,7 @@ export class AttendanceUtilsService {
   // ── Jours ouvrables ───────────────────────────────────────────────────────
 
   isWorkingDay(date: Date, companyWorkDays?: number[]): boolean {
-    return (companyWorkDays ?? DEFAULT_WORK_DAYS).includes(date.getDay());
+    return (companyWorkDays ?? DEFAULT_WORK_DAYS).includes(congoDayOfWeek(date));
   }
 
   // ── Retard ────────────────────────────────────────────────────────────────
@@ -246,7 +248,7 @@ export class AttendanceUtilsService {
     startMinute: number = 0,
   ): boolean {
     const threshold = startHour * 60 + startMinute + toleranceMinutes;
-    const actual = checkInTime.getHours() * 60 + checkInTime.getMinutes();
+    const actual = congoMinutesOfDay(checkInTime);
     return actual > threshold;
   }
 
@@ -261,10 +263,10 @@ export class AttendanceUtilsService {
     const floor = Math.floor(pendingHours);
     let night = 0;
     for (let i = 0; i < floor; i++) {
-      if (this.isNightHour((overtimeStart.getHours() + i) % 24)) night++;
+      if (this.isNightHour((congoHours(overtimeStart) + i) % 24)) night++;
     }
     const frac = pendingHours - floor;
-    if (frac > 0 && this.isNightHour((overtimeStart.getHours() + floor) % 24))
+    if (frac > 0 && this.isNightHour((congoHours(overtimeStart) + floor) % 24))
       night += frac;
     return night;
   }
@@ -332,15 +334,14 @@ export class AttendanceUtilsService {
         overtime25: 0,
         overtime50: 0,
         overtime100: 0,
-        isNightShift: this.isNightHour(checkInTime.getHours()),
+        isNightShift: this.isNightHour(congoHours(checkInTime)),
       };
     }
 
     // Heure de fin contractuelle
-    const shiftEnd = new Date(checkInTime);
-    shiftEnd.setHours(ctx.shiftEndHour, ctx.shiftEndMinute, 0, 0);
+    let shiftEnd = atCongoTime(checkInTime, ctx.shiftEndHour, ctx.shiftEndMinute);
     if (ctx.crossesMidnight && shiftEnd <= checkInTime) {
-      shiftEnd.setDate(shiftEnd.getDate() + 1);
+      shiftEnd = new Date(shiftEnd.getTime() + 86_400_000);
     }
 
     const contractHours = Math.max(
@@ -358,7 +359,7 @@ export class AttendanceUtilsService {
         overtime25: 0,
         overtime50: 0,
         overtime100: 0,
-        isNightShift: this.isNightHour(checkInTime.getHours()),
+        isNightShift: this.isNightHour(congoHours(checkInTime)),
       };
     }
 
@@ -381,7 +382,7 @@ export class AttendanceUtilsService {
       overtime25: 0,
       overtime50: parseFloat(ot50.toFixed(2)),
       overtime100: parseFloat(ot100.toFixed(2)),
-      isNightShift: this.isNightHour(checkInTime.getHours()),
+      isNightShift: this.isNightHour(congoHours(checkInTime)),
     };
   }
 
@@ -407,7 +408,7 @@ export class AttendanceUtilsService {
       attendanceDate,
       overtimeEnabled,
     } = params;
-    const isWorkDay = workDays.includes(attendanceDate.getDay());
+    const isWorkDay = workDays.includes(congoDayOfWeek(attendanceDate));
     const isRestDay = !shift && (!isWorkDay || isHoliday);
     return {
       overtimeEnabled,
@@ -472,20 +473,20 @@ export class AttendanceUtilsService {
       overtime50: parseFloat(ot50.toFixed(2)),
       overtime100: parseFloat(ot100.toFixed(2)),
       isNightShift: checkInTime
-        ? this.isNightHour(checkInTime.getHours())
+        ? this.isNightHour(congoHours(checkInTime))
         : false,
     };
   }
 
   getNormalizedDayOfWeek(date: Date): number {
-    const day = date.getDay();
+    const day = congoDayOfWeek(date);
     return day === 0 ? 7 : day;
   }
 
   isNightShift(checkIn: Date, checkOut: Date): boolean {
     return (
-      this.isNightHour(checkIn.getHours()) ||
-      this.isNightHour(checkOut.getHours())
+      this.isNightHour(congoHours(checkIn)) ||
+      this.isNightHour(congoHours(checkOut))
     );
   }
 

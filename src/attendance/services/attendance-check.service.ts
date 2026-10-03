@@ -3,6 +3,7 @@
 // ✅ v5.1 — Fix TS : AttendanceStatus cast + logique v5 complète
 // ============================================================================
 
+import { atCongoTime, congoDayOfWeek } from '../../common/utils/congo-time';
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AppGateway } from '../../app.gateway';
@@ -101,7 +102,7 @@ async function loadShift(
       OR: [
         { specificDate: date },
         {
-          dayOfWeek: now.getDay(),
+          dayOfWeek: congoDayOfWeek(now),
           specificDate: null,
           OR: [{ validFrom: null }, { validFrom: { lte: new Date(date) } }],
           AND: [
@@ -260,7 +261,7 @@ export class AttendanceCheckService {
     // ── Confirmation repos/férié ───────────────────────────────────────────
     // Shift planifié → pas de blocage (travail prévu)
     // Pas de shift ET (hors workDays OU férié) → confirmation requise
-    const isOutsideWorkDays = !workDays.includes(now.getDay());
+    const isOutsideWorkDays = !workDays.includes(congoDayOfWeek(now));
     const needsConfirmation = !shift && (isOutsideWorkDays || isHoliday);
 
     if (needsConfirmation && !confirmRestDay) {
@@ -340,8 +341,7 @@ export class AttendanceCheckService {
     );
 
     // ── Arrivée anticipée ──────────────────────────────────────────────────
-    const shiftStartThreshold = new Date(now);
-    shiftStartThreshold.setHours(startHour, startMinute, 0, 0);
+    const shiftStartThreshold = atCongoTime(now, startHour, startMinute);
     const isEarly = now < shiftStartThreshold && !shift?.crossesMidnight;
 
     // ── ✅ Fix TS : cast explicite en AttendanceStatus ─────────────────────
@@ -548,8 +548,7 @@ export class AttendanceCheckService {
     const startH = shift?.startHour ?? officialStartHour;
     const startMin = shift?.startMinute ?? 0;
     const realCheckIn = new Date(record.checkIn);
-    const shiftStartThreshold = new Date(realCheckIn);
-    shiftStartThreshold.setHours(startH, startMin, 0, 0);
+    const shiftStartThreshold = atCongoTime(realCheckIn, startH, startMin);
     const effectiveCheckIn =
       realCheckIn < shiftStartThreshold && !shift?.crossesMidnight
         ? shiftStartThreshold
@@ -567,10 +566,9 @@ export class AttendanceCheckService {
       if (ctx.isRestDay || ctx.isHoliday) {
         extra = (now.getTime() - effectiveCheckIn.getTime()) / 3_600_000; // tout le temps travaillé
       } else {
-        const shiftEndInfo = new Date(effectiveCheckIn);
-        shiftEndInfo.setHours(ctx.shiftEndHour, ctx.shiftEndMinute, 0, 0);
+        let shiftEndInfo = atCongoTime(effectiveCheckIn, ctx.shiftEndHour, ctx.shiftEndMinute);
         if (ctx.crossesMidnight && shiftEndInfo <= effectiveCheckIn) {
-          shiftEndInfo.setDate(shiftEndInfo.getDate() + 1);
+          shiftEndInfo = new Date(shiftEndInfo.getTime() + 86_400_000);
         }
         const from = Math.max(shiftEndInfo.getTime(), effectiveCheckIn.getTime());
         extra = (now.getTime() - from) / 3_600_000;
@@ -889,7 +887,7 @@ export class AttendanceCheckService {
     companyId: string,
     date: Date,
   ): Promise<number> {
-    const monday = this.utils.getMondayOfWeek(date);
+    const monday = this.utils.getMondayOfWeek(this.utils.createLocalDate(this.utils.formatDate(date))); // 🕐 semaine du Congo
     const sunday = new Date(monday);
     sunday.setDate(monday.getDate() + 6);
 

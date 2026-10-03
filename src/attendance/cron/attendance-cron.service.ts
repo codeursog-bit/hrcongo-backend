@@ -3,6 +3,7 @@
 // ✅ v5.1 — Fix TS : randomMsg typed correctly (no mixed string | function)
 // ============================================================================
 
+import { atCongoTime, congoDayOfWeek } from '../../common/utils/congo-time';
 import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { PrismaService } from '../../prisma/prisma.service';
@@ -159,12 +160,17 @@ export class AttendanceCronService implements OnModuleDestroy {
         if (!workDays.includes(dayOfWeek)) continue;
 
         const officialStartHour = settings.officialStartHour ?? 8;
-        const target = officialStartHour * 60 - preShiftMinutes;
+        const startMin = officialStartHour * 60;
+        const target = startMin - preShiftMinutes;
         // Fenêtre resserrée à 2 min (au lieu de 5) maintenant que le cron
         // tourne toutes les minutes : ça absorbe un tick raté (lock déjà pris
         // par un run précédent trop lent) sans laisser traîner le rappel.
-        const withinTick = nowMin >= target && nowMin < target + 2;
+        // 🆕 Fenêtre = de « début − X min » jusqu'à l'heure de début (avant : 2 min seulement).
+        // Si le serveur dormait, redémarrait ou ratait un tick, le rappel part au tick suivant
+        // au lieu d'être perdu. Dédoublonnage par employé et par jour : jamais en double.
+        const withinTick = nowMin >= target && nowMin < startMin;
         if (!withinTick) continue;
+        const minutesLeft = Math.max(1, startMin - nowMin); // texte exact même en cas de retard
 
         // Tous les employés actifs pas encore pointés aujourd'hui, prévenus
         // en même temps — plus de logique de shift individuel.
@@ -182,7 +188,7 @@ export class AttendanceCronService implements OnModuleDestroy {
             },
           },
           include: {
-            user: { select: { id: true, pushToken: true, pushNotifEnabled: true } },
+            user: { select: { id: true, pushToken: true, pushNotifEnabled: true, pushSubscriptions: { select: { id: true } } } },
           },
         });
 
@@ -212,7 +218,7 @@ export class AttendanceCronService implements OnModuleDestroy {
 
           const msg = randomItem(PRE_SHIFT_MESSAGES);
           const title = msg.title;
-          const body = msg.body(preShiftMinutes);
+          const body = msg.body(minutesLeft);
 
           await this.notif({
             userId: emp.user.id,
@@ -225,8 +231,8 @@ export class AttendanceCronService implements OnModuleDestroy {
 
           if (!emp.user.pushNotifEnabled) {
             skipped.push({ employeeId: emp.id, name: empName, reason: 'Notif in-app créée, mais push désactivé dans le profil' });
-          } else if (!emp.user.pushToken) {
-            skipped.push({ employeeId: emp.id, name: empName, reason: 'Notif in-app créée, mais aucun token push enregistré' });
+          } else if (emp.user.pushSubscriptions.length === 0 && !emp.user.pushToken) {
+            skipped.push({ employeeId: emp.id, name: empName, reason: 'Notif in-app créée, mais aucun appareil enregistré pour le push' });
           }
 
           await this.pushService.sendPushToUser(emp.user.id, {
@@ -284,7 +290,7 @@ export class AttendanceCronService implements OnModuleDestroy {
   // ============================================================================
   private static readonly POST_END_DELAY_MINUTES = 30;
 
-  @Cron('*/5 0-10,16-20 * * *', { timeZone: 'Africa/Brazzaville' })
+  @Cron('*/5 * * * *', { timeZone: 'Africa/Brazzaville' })
   async handlePostOfficialEndReminder(): Promise<void> {
     const LOCK = 'attendance-cron:post-end';
     if (!(await this.cronLock.acquire(LOCK, 270))) {
@@ -314,7 +320,8 @@ export class AttendanceCronService implements OnModuleDestroy {
           (settings as any).officialEndHour ??
           (settings.officialStartHour ?? 8) + Number(settings.workHoursPerDay ?? 8);
         const target = officialEndHour * 60 + AttendanceCronService.POST_END_DELAY_MINUTES;
-        const withinTick = nowMin >= target && nowMin < target + 5;
+        // 🆕 Fenêtre de 90 min (avant : 5 min) : un tick raté n'annule plus le rappel
+        const withinTick = nowMin >= target && nowMin < target + 90;
         if (!withinTick) continue;
 
         // Employés ayant pointé l'entrée mais pas encore la sortie.
@@ -328,7 +335,7 @@ export class AttendanceCronService implements OnModuleDestroy {
           include: {
             employee: {
               include: {
-                user: { select: { id: true, pushToken: true, pushNotifEnabled: true } },
+                user: { select: { id: true, pushToken: true, pushNotifEnabled: true, pushSubscriptions: { select: { id: true } } } },
               },
             },
           },
@@ -394,8 +401,8 @@ export class AttendanceCronService implements OnModuleDestroy {
 
             if (!att.employee.user.pushNotifEnabled) {
               skipped.push({ employeeId: att.employeeId, name: empName, reason: 'Notif in-app créée, mais push désactivé dans le profil' });
-            } else if (!att.employee.user.pushToken) {
-              skipped.push({ employeeId: att.employeeId, name: empName, reason: 'Notif in-app créée, mais aucun token push enregistré' });
+            } else if (att.employee.user.pushSubscriptions.length === 0 && !att.employee.user.pushToken) {
+              skipped.push({ employeeId: att.employeeId, name: empName, reason: 'Notif in-app créée, mais aucun appareil enregistré pour le push' });
             }
 
             await this.pushService.sendPushToUser(att.employee.user.id, {
@@ -426,8 +433,8 @@ export class AttendanceCronService implements OnModuleDestroy {
 
             if (!att.employee.user.pushNotifEnabled) {
               skipped.push({ employeeId: att.employeeId, name: empName, reason: 'Notif in-app créée, mais push désactivé dans le profil' });
-            } else if (!att.employee.user.pushToken) {
-              skipped.push({ employeeId: att.employeeId, name: empName, reason: 'Notif in-app créée, mais aucun token push enregistré' });
+            } else if (att.employee.user.pushSubscriptions.length === 0 && !att.employee.user.pushToken) {
+              skipped.push({ employeeId: att.employeeId, name: empName, reason: 'Notif in-app créée, mais aucun appareil enregistré pour le push' });
             }
 
             await this.pushService.sendPushToUser(att.employee.user.id, {
@@ -643,7 +650,7 @@ export class AttendanceCronService implements OnModuleDestroy {
         OR: [
           { specificDate: date },
           {
-            dayOfWeek: d.getDay(),
+            dayOfWeek: congoDayOfWeek(d),
             specificDate: null,
             AND: [
               { OR: [{ validFrom: null }, { validFrom: { lte: d } }] },
@@ -665,8 +672,7 @@ export class AttendanceCronService implements OnModuleDestroy {
     this.logger.log('⏰ Auto-close minuit...');
     try {
       const yesterday = this.yesterday();
-      const midnight = new Date();
-      midnight.setHours(0, 1, 0, 0);
+      const midnight = atCongoTime(new Date(), 0, 1); // 🕐 00:01 heure du Congo
 
       const open = await this.prisma.attendance.findMany({
         where: { date: yesterday, checkIn: { not: null }, checkOut: null },
@@ -702,8 +708,7 @@ export class AttendanceCronService implements OnModuleDestroy {
         const wh = Number(s?.workHoursPerDay ?? 8);
         // 🆕 Fin officielle = officialEndHour (repli : début + durée si absent)
         const endH = Number((s as any)?.officialEndHour ?? startH + wh);
-        const closure = new Date(yesterday);
-        closure.setHours(endH, 0, 0, 0);
+        const closure = atCongoTime(yesterday, endH, 0); // 🕐 fin officielle, heure du Congo
         // 🆕 Pause ouverte à la fermeture auto = « reprise non pointée » : clôturée à la durée prévue
         const breakMinutes = await this.closeBreakAt(att.id, closure);
         const total = Math.max(
@@ -716,7 +721,7 @@ export class AttendanceCronService implements OnModuleDestroy {
           data: {
             checkOut: closure,
             totalHours: parseFloat(total.toFixed(2)),
-            normalHours: parseFloat(Math.min(total, wh).toFixed(2)),
+            normalHours: parseFloat(total.toFixed(2)), // 🆕 = totalHours (fermeture à la fin officielle : aucune HS)
             breakMinutes,
             overtimeStatus: 'AUTO_CLOSED',
             autoClosedAt: midnight,
@@ -792,17 +797,26 @@ export class AttendanceCronService implements OnModuleDestroy {
     const s = att.employee.company.payrollSettings[0];
     const startH = s?.officialStartHour ?? 8;
     const wh = Number(s?.workHoursPerDay ?? 8);
-    const closure = new Date(att.date);
-    closure.setHours(startH + wh, 0, 0, 0);
-    const total =
-      (closure.getTime() - new Date(att.checkIn!).getTime()) / 3_600_000;
+    // 🆕 Fin officielle = officialEndHour (repli : début + durée), jamais avant l'entrée
+    const endH = Number((s as any)?.officialEndHour ?? startH + wh);
+    const closure = atCongoTime(att.date as any, endH, 0); // 🕐 fin officielle, heure du Congo
+    if (closure.getTime() < new Date(att.checkIn!).getTime()) {
+      closure.setTime(new Date(att.checkIn!).getTime());
+    }
+    // 🆕 La pause (si prise) n'est pas comptée
+    const breakMinutes = await this.closeBreakAt(attendanceId, closure);
+    const total = Math.max(
+      0,
+      (closure.getTime() - new Date(att.checkIn!).getTime()) / 3_600_000 - breakMinutes / 60,
+    );
 
     await this.prisma.attendance.update({
       where: { id: attendanceId },
       data: {
         checkOut: closure,
         totalHours: parseFloat(total.toFixed(2)),
-        normalHours: parseFloat(Math.min(total, wh).toFixed(2)),
+        normalHours: parseFloat(total.toFixed(2)), // 🆕 = totalHours
+        breakMinutes,
         overtime10: 0,
         overtime25: 0,
         overtime50: 0,
@@ -833,6 +847,16 @@ export class AttendanceCronService implements OnModuleDestroy {
       include: { employee: { include: { user: { select: { id: true } } } } },
     });
     if (!att) throw new Error('Pointage introuvable');
+
+    // 🔒 HS désactivées pour l'entreprise : aucune demande d'heures sup possible (même par appel direct)
+    const otSettings: any = await this.prisma.payrollSettings.findFirst({
+      where: { companyId: att.employee.companyId },
+      orderBy: { effectiveDate: 'desc' },
+      select: { overtimeEnabled: true },
+    });
+    if (otSettings && otSettings.overtimeEnabled === false) {
+      throw new Error("Les heures supplémentaires ne sont pas activées pour votre entreprise.");
+    }
 
     await this.prisma.attendance.update({
       where: { id: attendanceId },
@@ -914,7 +938,7 @@ export class AttendanceCronService implements OnModuleDestroy {
     );
 
     const attDate = new Date(att.date);
-    const isOutside = !workDays.includes(attDate.getDay());
+    const isOutside = !workDays.includes(congoDayOfWeek(attDate));
     const holiday = await this.prisma.publicHoliday.findFirst({
       where: { companyId: att.employee.companyId, date: att.date },
     });
@@ -1037,17 +1061,26 @@ export class AttendanceCronService implements OnModuleDestroy {
     const s = att.employee.company.payrollSettings[0];
     const startH = s?.officialStartHour ?? 8;
     const wh = Number(s?.workHoursPerDay ?? 8);
-    const closure = new Date(att.date);
-    closure.setHours(startH + wh, 0, 0, 0);
-    const total =
-      (closure.getTime() - new Date(att.checkIn!).getTime()) / 3_600_000;
+    // 🆕 Fin officielle = officialEndHour (repli : début + durée), jamais avant l'entrée
+    const endH = Number((s as any)?.officialEndHour ?? startH + wh);
+    const closure = atCongoTime(att.date as any, endH, 0); // 🕐 fin officielle, heure du Congo
+    if (closure.getTime() < new Date(att.checkIn!).getTime()) {
+      closure.setTime(new Date(att.checkIn!).getTime());
+    }
+    // 🆕 La pause (si prise) n'est pas comptée
+    const breakMinutes = await this.closeBreakAt(attendanceId, closure);
+    const total = Math.max(
+      0,
+      (closure.getTime() - new Date(att.checkIn!).getTime()) / 3_600_000 - breakMinutes / 60,
+    );
 
     await this.prisma.attendance.update({
       where: { id: attendanceId },
       data: {
         checkOut: closure,
         totalHours: parseFloat(total.toFixed(2)),
-        normalHours: parseFloat(Math.min(total, wh).toFixed(2)),
+        normalHours: parseFloat(total.toFixed(2)), // 🆕 = totalHours
+        breakMinutes,
         overtime10: 0,
         overtime25: 0,
         overtime50: 0,

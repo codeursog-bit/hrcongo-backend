@@ -8,6 +8,7 @@
 //   • Reprise non pointée + sortie → la pause est clôturée à la durée prévue et
 //     marquée « reprise non pointée » ; l'admin peut corriger avec justification.
 // ============================================================================
+import { congoDayOfWeek } from '../../common/utils/congo-time';
 import {
   BadRequestException,
   ForbiddenException,
@@ -79,7 +80,7 @@ export class AttendanceBreakService {
         OR: [
           { specificDate: date },
           {
-            dayOfWeek: d.getDay(),
+            dayOfWeek: congoDayOfWeek(d),
             specificDate: null,
             AND: [
               { OR: [{ validFrom: null }, { validFrom: { lte: d } }] },

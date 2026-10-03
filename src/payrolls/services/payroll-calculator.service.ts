@@ -10,6 +10,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { IrppCalculatorService } from '../../payroll/fiscal/irpp-calculator.service';
 import { LEGAL_WORK_HOURS_PER_MONTH } from '../constants/payroll.constants';
 import { FISCAL_MODE } from '../../payroll/fiscal/tax-brackets.constant';
+import { computeCustomTaxes } from '../../company-taxes/custom-tax.calculator';
 import type { CalculatedPayroll } from '../constants/payroll.constants';
 import type { LeaveCalculationOptions } from './payroll-generator.service';
 
@@ -31,9 +32,7 @@ const SALARIED_CONTRACTS = ['CDI', 'CDD', 'STAGE'];
 // INTERIM  → pas de bulletin (géré par agence)
 // CONSULTANT / PRESTATAIRE → facture + BNC, pas de bulletin classique
 
-// ─── TOL : uniquement CDI/CDD ────────────────────────────────────────────────
-// Consultant, Prestataire, Stagiaire, Intérim → jamais de TOL, même si "salarié"
-const TOL_CONTRACTS = ['CDI', 'CDD'];
+// ─── TOL : règle CDI/CDD uniquement → voir company-taxes/custom-tax.calculator.ts
 
 @Injectable()
 export class PayrollCalculatorService {
@@ -161,9 +160,13 @@ export class PayrollCalculatorService {
     //    STAGE   → 0% (le stagiaire ne cotise pas — seul l'employeur cotise AT)
     //    CONSULTANT/PRESTATAIRE/INTERIM → 0%
     let cnssSalarial = 0;
+    // CNSS non arrondie : utilisée uniquement pour le calcul de l'ITS (comme le
+    // classeur Excel / le cours Gnanga : aucun arrondi avant l'arrondi final).
+    let cnssSalarialExact = 0;
     if (isSalaried && !isStagiaire && employee?.isSubjectToCnss !== false) {
       const base = Math.min(Math.max(0, grossSalaryCnss), CNSS_PENSION_CEILING);
-      cnssSalarial = Math.round(base * CNSS_SALARIAL_RATE);
+      cnssSalarialExact = base * CNSS_SALARIAL_RATE;
+      cnssSalarial = Math.round(cnssSalarialExact); // montant retenu / affiché
     }
 
     // 7. CNSS patronale — 3 branches
@@ -267,7 +270,7 @@ export class PayrollCalculatorService {
       } else {
         irppResult = this.irppCalculator.calculateIRPP(
           grossSalary,
-          cnssSalarial,
+          cnssSalarialExact,
           employee?.maritalStatus ?? 'SINGLE',
           employee?.numberOfChildren ?? 0,
           fiscalMode as any,
@@ -302,169 +305,23 @@ export class PayrollCalculatorService {
     // ── 10. TAXES CUSTOM (CAMU, TOL, taxe apprentissage, etc.) ──────────────
     //   Taxes custom : applicables selon `applicableContractTypes` de chaque taxe
     //   (défaut CDI + CDD ; modifiable par l'entreprise pour STAGE, CONSULTANT, etc.)
-    let employeeCustomTaxTotal = 0;
-    let employerCustomTaxTotal = 0;
-    const customTaxDetails: Array<{
-      id: string;
-      name: string;
-      code: string;
-      employeeAmount: number;
-      employerAmount: number;
-      base: number;
-      // ✅ NOUVEAU — voir patch "vrai taux CAMU/TOL" : transmis au front via
-      // payroll-items.service.ts pour ne plus afficher rate=1 sur les
-      // taxes custom au pourcentage (CAMU...).
-      baseType: string;
-      employeeRate: number | null;
-      employerRate: number | null;
-    }> = [];
-
-    for (const tax of companyTaxes) {
-      // Types de contrat concernés, configurables par taxe (défaut : CDI + CDD).
-      // (le filtre par mois/récurrence est fait en amont via findActive)
-      const allowedContracts: string[] = tax.applicableContractTypes?.length
-        ? tax.applicableContractTypes
-        : ['CDI', 'CDD'];
-      if (!allowedContracts.includes(contractType)) {
-        this.logger.log(
-          `⏭️ ${tax.code} ignorée — contrat ${contractType} non concerné (${allowedContracts.join('/')})`,
-        );
-        continue;
-      }
-      // ✅ TOL : réservée aux CDI/CDD — jamais pour stagiaire (même si "salarié"),
-      //    consultant, prestataire ou intérim.
-      if (tax.code === 'TOL' && !TOL_CONTRACTS.includes(contractType)) {
-        this.logger.log(
-          `⏭️ TOL ignorée — contrat ${contractType} non éligible (CDI/CDD uniquement)`,
-        );
-        continue;
-      }
-      // Seuil minimum de salaire
-      if (
-        tax.minSalaryThreshold &&
-        grossSalary < Number(tax.minSalaryThreshold)
-      ) {
-        this.logger.log(
-          `⏭️ ${tax.code} ignorée — brut ${grossSalary} < seuil ${tax.minSalaryThreshold}`,
-        );
-        continue;
-      }
-
-      // ── Respect des exonérations individuelles ──────────────────────────
-      // Si la base de la taxe est TAXABLE (brut-CNSS) ou NET_IMPOSABLE,
-      // elle dépend de l'ITS → si l'employé est exonéré ITS, on ignore ces taxes.
-      // Exception : TOL et taxes FIXED sont toujours applicables aux salariés.
-      const isExemptIts = employee?.isSubjectToIrpp === false;
-      const isExemptCnss = employee?.isSubjectToCnss === false;
-
-      if (tax.baseType === 'TAXABLE' && isExemptCnss) {
-        // Base = brut - CNSS, mais si pas de CNSS → base = brut (on calcule quand même)
-        // Laisser passer, la base sera simplement grossSalary
-      }
-      if (tax.baseType === 'NET_IMPOSABLE' && isExemptIts) {
-        // Cette taxe est calculée sur le revenu net imposable (après ITS)
-        // Si exonéré ITS → pas de revenu net imposable → on ignore la taxe
-        this.logger.log(
-          `⏭️ ${tax.code} ignorée — employé exonéré ITS (base NET_IMPOSABLE)`,
-        );
-        continue;
-      }
-
-      const taxableBase = grossSalary - cnssSalarial;
-      const netImposable = irppResult?.revenuNetImposable ?? grossSalary;
-
-      let base = 0;
-      if (tax.baseType === 'GROSS') base = grossSalary;
-      else if (tax.baseType === 'TAXABLE') base = taxableBase;
-      else if (tax.baseType === 'NET_IMPOSABLE') base = netImposable;
-      // FIXED → on utilise directement fixedEmployee / fixedEmployer
-
-      // ── EXCESS_ONLY : taxe sur l'excédent au-dessus du seuil ──────────
-      // ex: CAMU solidarité → (BI − 500 000) × 0,5%
-      // ELIGIBILITY (défaut) = filtre binaire déjà appliqué ci-dessus
-      if (tax.thresholdType === 'EXCESS_ONLY' && tax.minSalaryThreshold) {
-        base = Math.max(0, base - Number(tax.minSalaryThreshold));
-        this.logger.log(
-          `📐 ${tax.code} EXCESS_ONLY : base excédent = ${base.toLocaleString('fr-FR')} F (seuil ${Number(tax.minSalaryThreshold).toLocaleString('fr-FR')} F)`,
-        );
-      }
-
-      if (tax.hasCeiling && tax.ceiling)
-        base = Math.min(base, Number(tax.ceiling));
-
-      let employeeAmount = 0;
-      let employerAmount = 0;
-
-      if (tax.baseType === 'FIXED') {
-        // ✅ TOL : montant selon la zone de l'employé (VILLE=5000, PERIPHERIE=1000)
-        if (tax.code === 'TOL') {
-          const zone = employee?.tolZone ?? 'VILLE';
-          employeeAmount = zone === 'PERIPHERIE' ? 1000 : 5000;
-          this.logger.log(`📍 TOL zone=${zone} → ${employeeAmount} F`);
-        } else {
-          employeeAmount = Number(tax.fixedEmployee ?? 0);
-        }
-        employerAmount = Number(tax.fixedEmployer ?? 0);
-      } else {
-        // ✅ Les taux sont stockés en décimal dans la BDD (ex: 0.0227 = 2,27%) — conforme au DTO @Max(1)
-        employeeAmount =
-          Math.round(base * Number(tax.employeeRate ?? 0)) +
-          Number(tax.fixedEmployee ?? 0);
-        employerAmount =
-          Math.round(base * Number(tax.employerRate ?? 0)) +
-          Number(tax.fixedEmployer ?? 0);
-      }
-
-      employeeCustomTaxTotal += employeeAmount;
-      employerCustomTaxTotal += employerAmount;
-      customTaxDetails.push({
-        id: tax.id,
-        name: tax.name,
-        code: tax.code,
-        employeeAmount,
-        employerAmount,
-        base,
-        // ✅ NOUVEAU — transmis au front (via payroll-items.service.ts) pour
-        // afficher le VRAI taux sur le bulletin. Avant ce patch, seuls
-        // employeeAmount/employerAmount/base étaient transmis : le service
-        // de génération des lignes n'avait aucun moyen de savoir qu'une taxe
-        // EXCESS_ONLY/PERCENTAGE comme CAMU (0,5%) n'est PAS à montant fixe
-        // comme TOL, et affichait "1" pour les deux (rate=1 codé en dur dès
-        // que base > 0) — masquant le vrai taux de CAMU.
-        baseType: tax.baseType,
-        employeeRate: tax.baseType === 'FIXED' ? null : Number(tax.employeeRate ?? 0),
-        employerRate: tax.baseType === 'FIXED' ? null : Number(tax.employerRate ?? 0),
-      });
-
-      this.logger.log(
-        `💼 ${tax.code} : sal=${employeeAmount} F | pat=${employerAmount} F`,
-      );
-    }
-
-    // ✅ TOL NATIVE — taxe fixe obligatoire indépendante des taxes configurables
-    // Skip si TOL déjà dans companyTaxes pour éviter doublon
-    // ✅ Réservée aux CDI/CDD uniquement — jamais pour stagiaire/consultant/prestataire/intérim
-    const hasTolInCompanyTaxes = companyTaxes.some(
-      (t: any) => t.code === 'TOL',
+    // Calcul centralisé (même moteur que l'estimation de salaire et la génération
+    // de contrat) : taxes configurées selon types de contrat / seuils / bases + TOL.
+    const customTaxResult = computeCustomTaxes(
+      companyTaxes,
+      {
+        contractType,
+        grossSalary,
+        cnssSalarial,
+        revenuNetImposable: irppResult?.revenuNetImposable,
+        isSubjectToIrpp: employee?.isSubjectToIrpp,
+        tolZone: employee?.tolZone,
+      },
+      (msg) => this.logger.log(msg),
     );
-    if (!hasTolInCompanyTaxes && TOL_CONTRACTS.includes(contractType)) {
-      const tolZone = employee?.tolZone ?? 'VILLE';
-      const tolAmount = tolZone === 'PERIPHERIE' ? 1000 : 5000;
-      employeeCustomTaxTotal += tolAmount;
-      customTaxDetails.push({
-        id: 'TOL_NATIVE',
-        name: "Taxe d'Occupation des Locaux (TOL)",
-        code: 'TOL',
-        employeeAmount: tolAmount,
-        employerAmount: 0,
-        base: tolAmount,
-        // ✅ Cohérent avec le patch ci-dessus — TOL natif reste bien FIXED
-        baseType: 'FIXED',
-        employeeRate: null,
-        employerRate: null,
-      });
-      this.logger.log(`📍 TOL NATIVE zone=${tolZone} → ${tolAmount} F`);
-    }
+    const employeeCustomTaxTotal = customTaxResult.employeeTotal;
+    const employerCustomTaxTotal = customTaxResult.employerTotal;
+    const customTaxDetails = customTaxResult.details;
 
     // 11. Déductions prêts/avances
     const totalOtherDeductions = deductions.reduce(

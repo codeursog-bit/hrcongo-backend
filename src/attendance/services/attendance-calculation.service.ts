@@ -47,7 +47,7 @@ export class AttendanceCalculationService {
     const endDateStr = this.utils.formatDate(endDate);
 
     const now = new Date();
-    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const today = this.utils.createLocalDate(this.utils.getTodayString()); // 🕐 jour du Congo
 
     const payrollSettings = await this.prisma.payrollSettings.findFirst({
       where: { companyId },
@@ -149,7 +149,7 @@ export class AttendanceCalculationService {
     absenceDates?: Map<string, { type: string; isPaid: boolean }>,
   ): DayStatus[] {
     const now = new Date();
-    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const today = this.utils.createLocalDate(this.utils.getTodayString()); // 🕐 jour du Congo
 
     const attendanceMap = new Map(employeeAttendances.map((a) => [a.date, a]));
     const leaveDates = this.buildLeaveDates(employeeLeaves);

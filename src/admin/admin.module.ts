@@ -19,10 +19,11 @@ import { PortfolioAdminService } from './services/portfolio-admin.service';
 import { CleanupModule } from '../cleanup/cleanup.module';
 import { PrismaModule } from '../prisma/prisma.module';
 import { PlatformSettingsModule } from '../platform-settings/platform-settings.module';
+import { NotificationsModule } from '../notifications/notifications.module';
 import { UltraAdminGuard } from './guards/ultra-admin.guard';
 
 @Module({
-  imports: [PrismaModule, CleanupModule, PlatformSettingsModule],
+  imports: [PrismaModule, CleanupModule, PlatformSettingsModule, NotificationsModule],
   controllers: [AdminController, PortfolioAdminController],
   providers: [
     // Services

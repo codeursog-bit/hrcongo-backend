@@ -52,6 +52,8 @@ export interface ContractTemplateData {
   retenuesCnss: string;
   retenuesIts: string;
   tol: string;
+  /** Autres taxes configurées par l'entreprise (absent des anciens contrats) */
+  taxes?: { label: string; montant: string }[];
   transport: string;
   indemniteTransport: string;
   indemnites: { label: string; montant: string }[];
@@ -118,6 +120,9 @@ function salaryRows(d: ContractTemplateData): SalaryRow[] {
   rows.push({ label: 'Retenues CNSS', value: `- ${d.retenuesCnss} FCFA`, muted: true });
   rows.push({ label: 'Retenues ITS', value: `- ${d.retenuesIts} FCFA`, muted: true });
   rows.push({ label: 'TOL', value: `- ${d.tol} FCFA`, muted: true });
+  (d.taxes || []).forEach((t) =>
+    rows.push({ label: t.label.replace(/\s*:\s*$/, ''), value: `- ${t.montant} FCFA`, muted: true }),
+  );
   if (Number(d.indemniteTransport.replace(/\D/g, '')) > 0)
     rows.push({ label: 'Indemnité de transport', value: `${d.indemniteTransport} FCFA` });
   d.indemnites.forEach((i) => rows.push({ label: i.label, value: `${i.montant} FCFA` }));

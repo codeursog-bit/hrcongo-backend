@@ -9,7 +9,9 @@
 //   ✅ IRPP Legacy : ancien barème (464k/1M/3M — taux 1/10/25/40%)
 //   ✅ Abattement 20% identique pour les deux modes
 //   ✅ Annualisation × 12 avant application du barème
-//   ✅ Math.ceil sur ITS/IRPP mensuel (arrondi supérieur conforme)
+//   ✅ Aucun arrondi intermédiaire (comme le classeur Excel ITS_2026) ;
+//      un seul arrondi à l'entier le plus proche sur l'ITS mensuel final
+//      (ex. 347 318,08 → 347 318 ; 98 777,5 → 98 778). Pas d'arrondi au millier.
 //
 // FORMULE COMMUNE ITS 2026 et IRPP LEGACY :
 //   1. CNSS     = min(brut, 1 200 000) × 4%
@@ -17,7 +19,7 @@
 //   3. BI       = SBT × 80%  (abattement 20%)
 //   4. QF       = BI × 12 / parts fiscales
 //   5. ITS/part = barème(QF)  [selon le mode]
-//   6. ITS      = ITS/part × parts / 12  → arrondi supérieur
+//   6. ITS      = ITS/part × parts / 12  → arrondi à l'entier le plus proche
 //
 // ============================================================================
 
@@ -97,7 +99,9 @@ export class IrppCalculatorService {
     //
     // L'ancien code utilisait 30% plafonné 75k pour IRPP_LEGACY — C'ÉTAIT FAUX.
     //
-    const abattement = Math.round(baseImposable * ABATTEMENT_RATE);
+    // Pas d'arrondi ici : on garde la valeur exacte pour le calcul (comme Excel).
+    // Seul l'affichage (valeurs retournées) est arrondi.
+    const abattement = baseImposable * ABATTEMENT_RATE;
     const revenuNetImposable = baseImposable - abattement; // mensuel
 
     // ── 3. Annualisation ────────────────────────────────────────────────────
@@ -133,8 +137,9 @@ export class IrppCalculatorService {
     // ── 6. Remultiplier × parts → impôt annuel ──────────────────────────────
     const irppAnnuel = irppBeforeMultiplier * fiscalParts;
 
-    // ── 7. Mensualiser avec arrondi supérieur ───────────────────────────────
-    const irppTotal = Math.ceil(irppAnnuel / 12);
+    // ── 7. Mensualiser — arrondi à l'entier le plus proche ──────────────────
+    // < 0,5 → on garde l'entier ; ≥ 0,5 → +1 (ex. 347 318,08 → 347 318)
+    const irppTotal = Math.round(irppAnnuel / 12);
 
     // ── 8. Taux effectif sur baseImposable ──────────────────────────────────
     const effectiveRate =
@@ -144,11 +149,11 @@ export class IrppCalculatorService {
 
     this.logCalculation({
       grossSalary,
-      cnssSalarial,
-      baseImposable,
-      abattement,
-      revenuNetImposable,
-      rniAnnuel,
+      cnssSalarial: Math.round(cnssSalarial),
+      baseImposable: Math.round(baseImposable),
+      abattement: Math.round(abattement),
+      revenuNetImposable: Math.round(revenuNetImposable),
+      rniAnnuel: Math.round(rniAnnuel),
       fiscalParts,
       irppTotal,
       effectiveRate,
@@ -156,10 +161,10 @@ export class IrppCalculatorService {
     });
 
     return {
-      baseImposable,
-      abattement,
-      revenuNetImposable,
-      rniAnnuel,
+      baseImposable: Math.round(baseImposable),
+      abattement: Math.round(abattement),
+      revenuNetImposable: Math.round(revenuNetImposable),
+      rniAnnuel: Math.round(rniAnnuel),
       fiscalParts,
       revenuParPart: Math.floor(revenuParPart),
       irppBeforeMultiplier: Math.round(irppBeforeMultiplier),
@@ -211,14 +216,14 @@ export class IrppCalculatorService {
         Math.min(revenuParPart, bracket.max) - bracket.min;
       if (taxableInBracket <= 0) continue;
 
-      const impotTranche = Math.round(taxableInBracket * bracket.rate);
+      const impotTranche = taxableInBracket * bracket.rate; // exact (pas d'arrondi)
       irppBeforeMultiplier += impotTranche;
 
       details.push({
         tranche: this.formatBracket(bracket),
         base: Math.round(taxableInBracket),
         taux: bracket.rate * 100,
-        montant: impotTranche,
+        montant: Math.round(impotTranche),
       });
     }
 

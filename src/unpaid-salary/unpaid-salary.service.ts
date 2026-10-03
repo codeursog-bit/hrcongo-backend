@@ -83,7 +83,7 @@ export class UnpaidSalaryService {
     return periods;
   }
 
-  @Cron('0 8 * * *')
+  @Cron('0 8 * * *', { timeZone: 'Africa/Brazzaville' })
   async checkAllCompanies() {
     this.logger.log('Verification quotidienne des salaires impayes...');
     const companies = await this.prisma.company.findMany({

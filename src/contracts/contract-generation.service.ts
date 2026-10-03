@@ -19,6 +19,7 @@ import Docxtemplater from 'docxtemplater';
 import { PrismaService } from '../prisma/prisma.service';
 import { IrppCalculatorService } from '../payroll/fiscal/irpp-calculator.service';
 import { MaritalStatus } from '../payroll/fiscal/fiscal-parts.service';
+import { computeCustomTaxes } from '../company-taxes/custom-tax.calculator';
 import { buildContractPdf } from './contract-pdf-builder';
 import { ContractTemplateData } from './contract-content';
 import {
@@ -76,6 +77,10 @@ export class ContractGenerationService {
     maritalStatus?: MaritalStatus;
     numberOfChildren?: number;
     applyDeductions: boolean; // false pour STAGE / PRESTATION (pas de salarié CNSS/ITS)
+    // ── Taxes configurées par l'entreprise (CAMU, etc.) — même moteur que la paie
+    companyTaxes?: any[]; // taxes actives RÉCURRENTES de l'entreprise
+    contractType?: 'CDI' | 'CDD'; // pour filtrer les taxes par type de contrat
+    isSubjectToIrpp?: boolean | null;
   }) {
     const sursalaire = input.sursalaire || 0;
     const heuresSupplementaires = input.heuresSupplementaires || 0;
@@ -93,20 +98,42 @@ export class ContractGenerationService {
     let cnssDeduction = 0;
     let itsDeduction = 0;
     let tolDeduction = 0;
+    // Autres taxes configurées (hors TOL) : détail + total
+    let taxes: { code: string; label: string; amount: number }[] = [];
+    let otherTaxesTotal = 0;
 
     if (input.applyDeductions) {
       const cnssBase = Math.min(totalGross, CNSS_PENSION_CEILING);
-      cnssDeduction = Math.round(cnssBase * CNSS_SALARIAL_RATE);
+      // CNSS non arrondie pour l'ITS (comme Excel), arrondie pour la retenue
+      const cnssExact = cnssBase * CNSS_SALARIAL_RATE;
+      cnssDeduction = Math.round(cnssExact);
 
       const irppResult = this.irppCalculator.calculateIRPP(
         totalGross,
-        cnssDeduction,
+        cnssExact,
         input.maritalStatus ?? MaritalStatus.SINGLE,
         input.numberOfChildren ?? 0,
       );
       itsDeduction = irppResult.irppTotal;
 
-      tolDeduction = input.tolZone === 'PERIPHERIE' ? 1000 : 5000;
+      // TOL + taxes de l'entreprise : même moteur que le bulletin réel
+      const custom = computeCustomTaxes(input.companyTaxes ?? [], {
+        contractType: input.contractType ?? 'CDI',
+        grossSalary: totalGross,
+        cnssSalarial: cnssDeduction,
+        revenuNetImposable: irppResult.revenuNetImposable,
+        isSubjectToIrpp: input.isSubjectToIrpp,
+        tolZone: input.tolZone,
+      });
+      for (const d of custom.details) {
+        if (d.employeeAmount <= 0) continue;
+        if (d.code === 'TOL') {
+          tolDeduction += d.employeeAmount;
+        } else {
+          otherTaxesTotal += d.employeeAmount;
+          taxes.push({ code: d.code, label: d.name, amount: d.employeeAmount });
+        }
+      }
     }
 
     return {
@@ -115,7 +142,18 @@ export class ContractGenerationService {
       itsDeduction,
       tolDeduction,
       primesTotal,
+      taxes,
+      otherTaxesTotal,
     };
+  }
+
+  /** Taxes actives RÉCURRENTES de l'entreprise (un contrat est un montant stable :
+   * une taxe à « mois précis » est temporaire et n'y figure pas). */
+  private loadCompanyTaxes(companyId: string) {
+    return this.prisma.companyTax.findMany({
+      where: { companyId, isActive: true, isRecurring: true },
+      orderBy: { name: 'asc' },
+    });
   }
 
   /**
@@ -137,11 +175,14 @@ export class ContractGenerationService {
     indemnites?: { label: string; amount: number }[];
     situationMatrimoniale?: string;
     nombreEnfants?: number;
+    contractDuration?: string;
   }) {
     const employee = await this.prisma.employee.findFirst({
       where: { id: input.employeeId, companyId: input.companyId },
     });
     if (!employee) throw new NotFoundException('Employé introuvable');
+
+    const companyTaxes = await this.loadCompanyTaxes(input.companyId);
 
     const breakdown = this.computeBreakdown({
       salaireBase: input.salaireBase,
@@ -154,11 +195,15 @@ export class ContractGenerationService {
       maritalStatus: (input.situationMatrimoniale as MaritalStatus) || employee.maritalStatus,
       numberOfChildren: input.nombreEnfants ?? employee.numberOfChildren,
       applyDeductions: true,
+      companyTaxes,
+      contractType: input.contractDuration === 'DETERMINEE' ? 'CDD' : 'CDI',
+      isSubjectToIrpp: (employee as any).isSubjectToIrpp,
     });
 
     const indemnitesTotal = (input.indemnites || []).reduce((s, i) => s + (i.amount || 0), 0);
     const netPay =
-      breakdown.totalGross - breakdown.cnssDeduction - breakdown.itsDeduction - breakdown.tolDeduction +
+      breakdown.totalGross - breakdown.cnssDeduction - breakdown.itsDeduction - breakdown.tolDeduction -
+      breakdown.otherTaxesTotal +
       (input.indemniteTransport || 0) + indemnitesTotal;
 
     return {
@@ -166,6 +211,8 @@ export class ContractGenerationService {
       cnssDeduction: breakdown.cnssDeduction,
       itsDeduction: breakdown.itsDeduction,
       tolDeduction: breakdown.tolDeduction,
+      taxes: breakdown.taxes, // autres taxes configurées (CAMU…) : [{code,label,amount}]
+      otherTaxesTotal: breakdown.otherTaxesTotal,
       primesTotal: breakdown.primesTotal,
       indemnitesTotal,
       netPay,
@@ -256,7 +303,9 @@ export class ContractGenerationService {
     // ── CONTRAT_TRAVAIL : décomposition brut → CNSS → ITS → TOL → net ───────
     let totalGross = 0, cnssDeduction = 0, itsDeduction = 0, tolDeduction = 0, netPay = 0;
     let tauxBnc = 0;
+    let contractTaxes: { code: string; label: string; amount: number }[] = [];
     if (isTravail) {
+      const companyTaxes = await this.loadCompanyTaxes(companyId);
       const breakdown = this.computeBreakdown({
         salaireBase: dto.salaireBase || 0,
         sursalaire: dto.sursalaire,
@@ -268,14 +317,18 @@ export class ContractGenerationService {
         maritalStatus: (dto.situationMatrimoniale as MaritalStatus) || employee.maritalStatus,
         numberOfChildren: dto.nombreEnfants ?? employee.numberOfChildren,
         applyDeductions: true,
+        companyTaxes,
+        contractType: dto.contractDuration === 'DETERMINEE' ? 'CDD' : 'CDI',
+        isSubjectToIrpp: (employee as any).isSubjectToIrpp,
       });
       const indemnitesTotal = (dto.indemnites || []).reduce((s, i) => s + (i.amount || 0), 0);
       totalGross = breakdown.totalGross;
       cnssDeduction = breakdown.cnssDeduction;
       itsDeduction = breakdown.itsDeduction;
       tolDeduction = breakdown.tolDeduction;
+      contractTaxes = breakdown.taxes;
       netPay =
-        totalGross - cnssDeduction - itsDeduction - tolDeduction +
+        totalGross - cnssDeduction - itsDeduction - tolDeduction - breakdown.otherTaxesTotal +
         (dto.indemniteTransport || 0) + indemnitesTotal;
     } else if (isStage) {
       // ✅ Stage : montant forfaitaire net, aucune retenue.
@@ -341,6 +394,8 @@ export class ContractGenerationService {
       retenuesCnss: fmt(cnssDeduction),
       retenuesIts: fmt(itsDeduction),
       tol: fmt(tolDeduction),
+      // Autres taxes configurées par l'entreprise (CAMU…) — une ligne chacune
+      taxes: contractTaxes.map((t) => ({ label: `${t.label} :`, montant: fmt(t.amount) })),
       transport: fmt(dto.transport || 0),
       indemniteTransport: fmt(dto.indemniteTransport || 0),
       indemnites: (dto.indemnites || []).map((i) => ({ label: i.label, montant: fmt(i.amount) })),

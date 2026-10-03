@@ -2593,6 +2593,28 @@ model ActivityLog {
   @@map("activity_logs")
 }
 
+
+model PushDelivery {
+  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId       String   @db.Uuid
+  title        String   @db.VarChar(255)
+  tag          String?  @db.VarChar(100)
+  status       String   @db.VarChar(20)
+  devicesTotal Int      @default(0) @db.SmallInt
+  devicesOk    Int      @default(0) @db.SmallInt
+  error        String?  @db.VarChar(300)
+  createdAt    DateTime @default(now()) @db.Timestamptz
+
+  ackAt        DateTime? @db.Timestamptz
+  ackedDevices Int       @default(0) @db.SmallInt
+
+  @@index([userId, createdAt])
+  @@index([createdAt])
+  @@index([status])
+  @@map("push_deliveries")
+}
+
+
 // ─── Sessions JWT révocables ──────────────────────────────────────────────────
 model UserSession {
   id        String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid

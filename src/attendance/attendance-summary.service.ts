@@ -24,6 +24,7 @@
 //   Pas de comparaison à 40h — la base est ce qu'il devait faire
 // ============================================================================
 
+import { atCongoTime, congoDayOfWeek } from '../common/utils/congo-time';
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { DayStatusEnum } from './attendance.service';
@@ -148,7 +149,7 @@ export class AttendanceSummaryService {
       const recurring = shiftAssignments.find(
         (s) =>
           !s.specificDate &&
-          s.dayOfWeek === d.getDay() &&
+          s.dayOfWeek === congoDayOfWeek(d) &&
           (!s.validFrom || new Date(s.validFrom) <= d) &&
           (!s.validUntil || new Date(s.validUntil) >= d),
       );
@@ -246,7 +247,7 @@ export class AttendanceSummaryService {
       const shift = getShift(record.date);
       const dateObj = new Date(record.date);
       const isHoliday = holidaySet.has(record.date);
-      const isWorkDay = workDays.includes(dateObj.getDay());
+      const isWorkDay = workDays.includes(congoDayOfWeek(dateObj));
       const isRestDay = !shift && (!isWorkDay || isHoliday);
       const weekNum = this.utils.getISOWeekNumber(dateObj);
 
@@ -272,16 +273,14 @@ export class AttendanceSummaryService {
         const checkOut = new Date(record.checkOut);
 
         // Bridage arrivée anticipée
-        const shiftStart = new Date(checkIn);
-        shiftStart.setHours(shiftStartH, shiftStartMin, 0, 0);
+        const shiftStart = atCongoTime(checkIn, shiftStartH, shiftStartMin);
         const effectiveStart =
           checkIn < shiftStart && !crossesMid ? shiftStart : checkIn;
 
         // Fin du shift
-        const shiftEnd = new Date(effectiveStart);
-        shiftEnd.setHours(shiftEndH, shiftEndMin, 0, 0);
+        let shiftEnd = atCongoTime(effectiveStart, shiftEndH, shiftEndMin);
         if (crossesMid && shiftEnd <= effectiveStart) {
-          shiftEnd.setDate(shiftEnd.getDate() + 1);
+          shiftEnd = new Date(shiftEnd.getTime() + 86_400_000);
         }
 
         const totalH = Math.max(

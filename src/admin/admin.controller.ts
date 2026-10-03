@@ -92,6 +92,34 @@ export class AdminController {
     return this.userActivityService.getPushDiagnostics();
   }
 
+  // 🆕 Notification de test envoyée à l'admin qui clique (vérification de bout en bout)
+  @Post('push/test')
+  async sendTestPush(@Request() req: any) {
+    return this.userActivityService.sendTestPush(req.user.userId);
+  }
+
+  // 🆕 Réceptions : qui a reçu chaque notification dans l'app et hors app (push)
+  @Get('push/receipts')
+  async getPushReceipts(
+    @Query('hours') hours?: string,
+    @Query('type') type?: string,
+    @Query('push') push?: string,
+    @Query('read') read?: string,
+    @Query('search') search?: string,
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+  ) {
+    return this.userActivityService.getPushReceipts({
+      hours: hours ? Number(hours) : undefined,
+      type,
+      push,
+      read,
+      search,
+      page: page ? Number(page) : undefined,
+      limit: limit ? Number(limit) : undefined,
+    });
+  }
+
   // ==========================================================================
   // 🏢 SECTION COMPANIES
   // ==========================================================================

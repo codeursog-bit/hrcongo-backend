@@ -145,4 +145,6 @@ export class PreviewBreakdownDto {
   indemnites?: ContractLineItemDto[];
   @IsOptional() @IsString() situationMatrimoniale?: string;
   @IsOptional() @IsInt() @Min(0) nombreEnfants?: number;
+  /** 'INDETERMINEE' (CDI) | 'DETERMINEE' (CDD) — sert à filtrer les taxes par type de contrat */
+  @IsOptional() @IsString() contractDuration?: string;
 }

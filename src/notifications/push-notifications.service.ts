@@ -152,6 +152,7 @@ export class PushNotificationsService implements OnModuleInit {
     if (!this.vapidConfigured) {
       // Déjà loggé en ALERT au démarrage — pas la peine de spammer les logs
       // à chaque tentative d'envoi, juste sortir proprement.
+      await this.recordDelivery(userId, payload, 'NO_VAPID');
       return;
     }
 
@@ -159,14 +160,28 @@ export class PushNotificationsService implements OnModuleInit {
       where: { id: userId },
       select: { pushNotifEnabled: true },
     });
-    if (!user?.pushNotifEnabled) return;
+    if (!user?.pushNotifEnabled) {
+      await this.recordDelivery(userId, payload, 'DISABLED');
+      return;
+    }
 
     const subscriptions = await this.prisma.pushSubscription.findMany({
       where: { userId },
     });
-    if (subscriptions.length === 0) return;
+    if (subscriptions.length === 0) {
+      await this.recordDelivery(userId, payload, 'NO_DEVICE');
+      return;
+    }
+
+    // 🆕 On crée la trace AVANT l'envoi pour glisser son id dans la notification : le service
+    // worker de l'appareil s'en servira pour confirmer que la notification s'est bien affichée.
+    const deliveryId = await this.createPendingDelivery(userId, payload, subscriptions.length);
+    const apiPublicUrl = (process.env.API_PUBLIC_URL || '').replace(/\/+$/, '');
 
     const pushPayload = JSON.stringify({
+      ...(deliveryId && apiPublicUrl
+        ? { ackId: deliveryId, ackUrl: `${apiPublicUrl}/push/ack/${deliveryId}` }
+        : {}),
       title: payload.title,
       body: payload.body,
       url: payload.url ?? '/',
@@ -181,9 +196,118 @@ export class PushNotificationsService implements OnModuleInit {
 
     // Chaque appareil est indépendant : un échec sur l'un ne doit jamais
     // empêcher l'envoi aux autres.
-    await Promise.all(
+    const results = await Promise.all(
       subscriptions.map((sub) => this.sendToOneSubscription(sub, pushPayload, userId, payload.title)),
     );
+
+    // 🆕 Trace de l'envoi (consultable dans le super admin). « SENT » = accepté par le service
+    // push du navigateur/téléphone (FCM, Mozilla, Apple) : c'est la preuve la plus fiable côté serveur.
+    const ok = results.filter((r) => r.ok).length;
+    const status =
+      ok === results.length ? 'SENT'
+      : ok > 0 ? 'PARTIAL'
+      : results.every((r) => r.expired) ? 'EXPIRED'
+      : 'FAILED';
+    await this.finishDelivery(
+      deliveryId,
+      userId,
+      payload,
+      status,
+      results.length,
+      ok,
+      results.find((r) => !r.ok)?.error,
+    );
+  }
+
+  /** Crée la ligne de suivi « PENDING » avant l'envoi (renvoie son id, ou null si la base refuse). */
+  private async createPendingDelivery(
+    userId: string,
+    payload: { title: string; tag?: string },
+    devicesTotal: number,
+  ): Promise<string | null> {
+    try {
+      const row = await (this.prisma as any).pushDelivery.create({
+        data: {
+          userId,
+          title: payload.title.slice(0, 255),
+          tag: payload.tag?.slice(0, 100) ?? null,
+          status: 'PENDING',
+          devicesTotal,
+          devicesOk: 0,
+        },
+        select: { id: true },
+      });
+      return row.id as string;
+    } catch {
+      return null; // le suivi ne doit jamais empêcher un envoi
+    }
+  }
+
+  private async finishDelivery(
+    deliveryId: string | null,
+    userId: string,
+    payload: { title: string; tag?: string },
+    status: 'SENT' | 'PARTIAL' | 'FAILED' | 'EXPIRED',
+    devicesTotal: number,
+    devicesOk: number,
+    error?: string,
+  ): Promise<void> {
+    if (!deliveryId) {
+      await this.recordDelivery(userId, payload, status, devicesTotal, devicesOk, error);
+      return;
+    }
+    try {
+      await (this.prisma as any).pushDelivery.update({
+        where: { id: deliveryId },
+        data: { status, devicesTotal, devicesOk, error: error ? error.slice(0, 300) : null },
+      });
+    } catch {
+      /* suivi best-effort */
+    }
+  }
+
+  /**
+   * 🆕 Appelé par le service worker de l'appareil quand la notification vient de s'afficher.
+   * Preuve de réception « hors app » : plus forte que « accepté par le service push ».
+   */
+  async acknowledge(deliveryId: string): Promise<void> {
+    try {
+      await (this.prisma as any).pushDelivery.updateMany({
+        where: { id: deliveryId, ackAt: null },
+        data: { ackAt: new Date() },
+      });
+      await (this.prisma as any).pushDelivery.updateMany({
+        where: { id: deliveryId },
+        data: { ackedDevices: { increment: 1 } },
+      });
+    } catch {
+      /* best-effort */
+    }
+  }
+
+  private async recordDelivery(
+    userId: string,
+    payload: { title: string; tag?: string },
+    status: 'SENT' | 'PARTIAL' | 'FAILED' | 'EXPIRED' | 'NO_DEVICE' | 'DISABLED' | 'NO_VAPID',
+    devicesTotal = 0,
+    devicesOk = 0,
+    error?: string,
+  ): Promise<void> {
+    try {
+      await (this.prisma as any).pushDelivery.create({
+        data: {
+          userId,
+          title: payload.title.slice(0, 255),
+          tag: payload.tag?.slice(0, 100) ?? null,
+          status,
+          devicesTotal,
+          devicesOk,
+          error: error ? error.slice(0, 300) : null,
+        },
+      });
+    } catch {
+      // Le suivi ne doit JAMAIS empêcher ni faire échouer un envoi
+    }
   }
 
   private async sendToOneSubscription(
@@ -191,7 +315,7 @@ export class PushNotificationsService implements OnModuleInit {
     pushPayload: string,
     userId: string,
     title: string,
-  ): Promise<void> {
+  ): Promise<{ ok: boolean; expired?: boolean; error?: string }> {
     let subscription: webpush.PushSubscription;
     try {
       subscription = JSON.parse(sub.token) as webpush.PushSubscription;
@@ -203,12 +327,13 @@ export class PushNotificationsService implements OnModuleInit {
         level: 'WARNING',
         message: `Token push illisible (JSON invalide) pour userId ${userId} — appareil retiré`,
       });
-      return;
+      return { ok: false, error: 'Token illisible' };
     }
 
     try {
       await webpush.sendNotification(subscription, pushPayload);
       this.logger.log(`✅ Push envoyé → userId: ${userId} | "${title}"`);
+      return { ok: true };
     } catch (err: any) {
       if (err.statusCode === 410 || err.statusCode === 404) {
         this.logger.warn(`🗑️  Abonnement push expiré (id: ${sub.id}) pour userId: ${userId} — suppression`);
@@ -228,6 +353,7 @@ export class PushNotificationsService implements OnModuleInit {
           message: `Abonnement push expiré (${err.statusCode}) pour userId ${userId} — un appareil retiré, ${remaining} restant(s)`,
           details: { evaluated: 1, skipped: [{ employeeId: userId, reason: `Abonnement expiré (HTTP ${err.statusCode})` }] },
         });
+        return { ok: false, expired: true, error: `HTTP ${err.statusCode}` };
       } else {
         this.logger.error(`❌ Erreur push pour userId: ${userId}:`, err.message);
         await this.systemLogs.log({
@@ -236,6 +362,7 @@ export class PushNotificationsService implements OnModuleInit {
           message: `Échec d'envoi push pour userId ${userId} : ${err.message}`,
           details: { errors: [String(err?.stack ?? err)] },
         });
+        return { ok: false, error: String(err?.message ?? err).slice(0, 300) };
       }
     }
   }

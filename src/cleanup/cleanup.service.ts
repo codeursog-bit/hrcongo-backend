@@ -271,4 +271,19 @@ export class CleanupService {
       auditLogs: (a as any)?.deleted ?? 0,
     };
   }
+
+  // ============================================================================
+  // 🆕 Purge du suivi des envois push (30 jours) — chaque rappel en crée une ligne
+  // ============================================================================
+  @Cron('30 4 * * *', { timeZone: 'Africa/Brazzaville' })
+  async purgePushDeliveries(): Promise<void> {
+    try {
+      const r = await (this.prisma as any).pushDelivery.deleteMany({
+        where: { createdAt: { lt: new Date(Date.now() - 30 * 86_400_000) } },
+      });
+      if (r?.count) this.logger.log(`🧹 ${r.count} suivi(s) d'envoi push de plus de 30 jours supprimé(s)`);
+    } catch (e: any) {
+      this.logger.warn(`Purge push_deliveries: ${e?.message ?? e}`);
+    }
+  }
 }

@@ -428,9 +428,10 @@ export class EmployeesController {
 
   // ==========================================================================
   // GET /employees/:id/salary-estimate — Brut/net contractuel estimé
-  // 🆕 Salaire de base + primes MENSUELLES imposables actives, moins
-  // CNSS/ITS/TOL uniquement (aucune autre retenue, aucun prêt/avance,
-  // indépendant du simulateur de paie complet — voir SalaryEstimateService)
+  // 🆕 Salaire de base + primes MENSUELLES actives (imposables ET indemnités
+  // non imposables), moins CNSS/ITS/TOL et taxes récurrentes de l'entreprise
+  // (aucun prêt/avance, indépendant du simulateur de paie complet — voir
+  // SalaryEstimateService)
   // ✅ Query params optionnels pour prévisualiser une prime pas encore
   // enregistrée (page primes employé, avant de cliquer "Attribuer") :
   // ?previewAmount=25000&previewTaxable=true&previewCnss=true
@@ -442,6 +443,7 @@ export class EmployeesController {
     @Query('previewAmount') previewAmount?: string,
     @Query('previewTaxable') previewTaxable?: string,
     @Query('previewCnss') previewCnss?: string,
+    @Query('previewFiscalType') previewFiscalType?: string,
   ) {
     try {
       const employee = await this.employeesService.findOne(id, req.user.userId);
@@ -451,6 +453,7 @@ export class EmployeesController {
               amount: Number(previewAmount),
               isTaxable: previewTaxable !== 'false',
               isCnss: previewCnss !== 'false',
+              fiscalType: previewFiscalType || null,
             }
           : undefined;
       return await this.salaryEstimateService.estimate(employee as any, preview);

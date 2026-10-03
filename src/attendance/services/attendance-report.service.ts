@@ -274,6 +274,14 @@ export class AttendanceReportService {
     const endDate = new Date(year, month, 0);
     const report: MonthlyReportItem[] = [];
 
+    // 🔒 HS désactivées : le Résumé ne montre AUCUNE heure sup (même issue d'anciens pointages)
+    const otSettings: any = await this.prisma.payrollSettings.findFirst({
+      where: { companyId: targetCompanyId },
+      orderBy: { effectiveDate: 'desc' },
+      select: { overtimeEnabled: true },
+    });
+    const overtimeEnabled = otSettings?.overtimeEnabled ?? true;
+
     // 🆕 Heures en plus INFORMATIVES du mois (une seule requête pour tous les employés)
     const monthPrefix = `${year}-${String(month).padStart(2, '0')}-`;
     const extraRows: Array<{ employeeId: string; date: string; extraHoursInfo: any }> =
@@ -330,34 +338,39 @@ export class AttendanceReportService {
       ).length;
 
       // ── Heures réelles depuis les pointages ──────────────────────────────────
-      // normalHours = heures dans le shift (pas forfait)
-      const normalHours = dayStatuses.reduce(
+      // 🆕 SOURCE DE VÉRITÉ : totalHours du pointage (déjà net de la pause).
+      // Au checkout, totalHours = normalHours + toutes les HS du jour : on ne doit PAS rajouter
+      // les HS une seconde fois (avant, le Résumé les comptait deux fois dès que les HS étaient payées).
+      const dayTotalHours = dayStatuses.reduce(
         (sum, d) => sum + (d.totalHours || 0),
         0,
       );
 
       // ✅ v5.1 : lire les 4 catégories HS depuis la DB
       // overtime10 = heures de jour brutes (ventilation hebdo dans summary)
-      const overtime10 = dayStatuses.reduce(
+      const overtime10 = !overtimeEnabled ? 0 : dayStatuses.reduce(
         (sum, d) => sum + ((d as any).overtime10 || 0),
         0,
       );
-      const overtime25 = dayStatuses.reduce(
+      const overtime25 = !overtimeEnabled ? 0 : dayStatuses.reduce(
         (sum, d) => sum + ((d as any).overtime25 || 0),
         0,
       );
-      const overtime50 = dayStatuses.reduce(
+      const overtime50 = !overtimeEnabled ? 0 : dayStatuses.reduce(
         (sum, d) => sum + (d.overtime50 || 0),
         0,
       );
-      const overtime100 = dayStatuses.reduce(
+      const overtime100 = !overtimeEnabled ? 0 : dayStatuses.reduce(
         (sum, d) => sum + ((d as any).overtime100 || 0),
         0,
       );
 
-      // ✅ totalHours = normalHours + toutes les HS
-      const totalHours =
-        normalHours + overtime10 + overtime25 + overtime50 + overtime100;
+      // ✅ Total = somme des totalHours du pointage ; heures normales = total − HS
+      const totalHours = dayTotalHours;
+      const normalHours = Math.max(
+        0,
+        totalHours - (overtime10 + overtime25 + overtime50 + overtime100),
+      );
 
       report.push({
         id: emp.id,
@@ -385,6 +398,7 @@ export class AttendanceReportService {
         overtime50: parseFloat(overtime50.toFixed(2)),
         overtime100: parseFloat(overtime100.toFixed(2)),
         extraHoursInfo: parseFloat(extraHoursInfo.toFixed(2)),
+        overtimeEnabled, // 🔒 le front masque toute la partie HS quand c'est false
 
         status:
           daysAbsentUnpaid === 0 && daysPresent >= 20 ? 'perfect' : 'warning',
@@ -398,20 +412,22 @@ export class AttendanceReportService {
             ? new Date(d.checkIn).toLocaleTimeString('fr-FR', {
                 hour: '2-digit',
                 minute: '2-digit',
+                timeZone: 'Africa/Brazzaville', // 🆕 le serveur tourne en UTC : sans ça, 1 h de moins
               })
             : '-',
           out: d.checkOut
             ? new Date(d.checkOut).toLocaleTimeString('fr-FR', {
                 hour: '2-digit',
                 minute: '2-digit',
+                timeZone: 'Africa/Brazzaville',
               })
             : '-',
           total: d.totalHours?.toFixed(2) || '0.00',
           // HS du jour
-          ot10: ((d as any).overtime10 || 0).toFixed(2),
-          ot25: ((d as any).overtime25 || 0).toFixed(2),
-          ot50: (d.overtime50 || 0).toFixed(2),
-          ot100: ((d as any).overtime100 || 0).toFixed(2),
+          ot10: (overtimeEnabled ? ((d as any).overtime10 || 0) : 0).toFixed(2),
+          ot25: (overtimeEnabled ? ((d as any).overtime25 || 0) : 0).toFixed(2),
+          ot50: (overtimeEnabled ? (d.overtime50 || 0) : 0).toFixed(2),
+          ot100: (overtimeEnabled ? ((d as any).overtime100 || 0) : 0).toFixed(2),
           type: d.status,
           leaveType: d.leaveType,
           absenceType: (d as any).absenceType,

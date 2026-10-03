@@ -10,6 +10,7 @@
 //   - Tous les délégués pointent vers les services v5.1
 // ============================================================================
 
+import { atCongoTime, congoDayOfWeek } from '../common/utils/congo-time';
 import { resolveUserEmployeeId } from '../common/utils/user-employee.util';
 import { Injectable, ForbiddenException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
@@ -591,7 +592,7 @@ export class AttendanceService {
           OR: [
             { specificDate: body.date },
             {
-              dayOfWeek: dateObj.getDay(),
+              dayOfWeek: congoDayOfWeek(dateObj),
               specificDate: null,
               OR: [{ validFrom: null }, { validFrom: { lte: dateObj } }],
               AND: [
@@ -628,8 +629,7 @@ export class AttendanceService {
       // ✅ Bridage arrivée anticipée
       const startH = shift?.startHour ?? officialStartHour;
       const startMin = shift?.startMinute ?? 0;
-      const shiftStartThreshold = new Date(checkInDate);
-      shiftStartThreshold.setHours(startH, startMin, 0, 0);
+      const shiftStartThreshold = atCongoTime(checkInDate, startH, startMin);
       const effectiveCheckIn =
         checkInDate < shiftStartThreshold && !shift?.crossesMidnight
           ? shiftStartThreshold
@@ -964,7 +964,7 @@ export class AttendanceService {
     date: string,
   ): Promise<any | null> {
     const dateObj = new Date(date);
-    const dayOfWeek = dateObj.getDay();
+    const dayOfWeek = congoDayOfWeek(dateObj);
 
     const specific = await this.prisma.employeeShiftAssignment.findFirst({
       where: { employeeId, specificDate: date },

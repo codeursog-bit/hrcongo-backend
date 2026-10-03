@@ -714,10 +714,13 @@ export class PayrollGeneratorService {
           seniorityMode,
         );
 
-        const ot10 = Number((summary as any).overtime10Hours || 0);
-        const ot25 = Number((summary as any).overtime25Hours || 0);
-        const ot50 = Number(summary.overtime50Hours || 0);
-        const ot100 = Number((summary as any).overtime100Hours || 0);
+        // 🔒 HS désactivées pour l'entreprise : AUCUNE heure sup dans la paie, même si un résumé
+        // ancien (calculé quand elles étaient actives) en contient encore.
+        const otAllowed = (settings as any)?.overtimeEnabled !== false;
+        const ot10 = otAllowed ? Number((summary as any).overtime10Hours || 0) : 0;
+        const ot25 = otAllowed ? Number((summary as any).overtime25Hours || 0) : 0;
+        const ot50 = otAllowed ? Number(summary.overtime50Hours || 0) : 0;
+        const ot100 = otAllowed ? Number((summary as any).overtime100Hours || 0) : 0;
 
         // ✅ CORRECTIF ("le trou") : brut de travail (sans indemnité congé)
         // de CE mois, calculé maintenant qu'on a calculatedBonuses — sert à
@@ -1028,10 +1031,10 @@ export class PayrollGeneratorService {
             daysRemote: data.summary.daysRemote,
             daysHoliday: data.summary.daysHoliday,
             // ✅ FIX ERR 4 : suppression du doublon overtimeHours10 (gardé une seule fois)
-            overtimeHours10: Number(data.summary.overtime10Hours || 0),
-            overtimeHours25: Number(data.summary.overtime25Hours || 0),
-            overtimeHours50: Number(data.summary.overtime50Hours || 0),
-            overtimeHours100: Number(data.summary.overtime100Hours || 0),
+            overtimeHours10: (data.settings as any)?.overtimeEnabled === false ? 0 : Number(data.summary.overtime10Hours || 0),
+            overtimeHours25: (data.settings as any)?.overtimeEnabled === false ? 0 : Number(data.summary.overtime25Hours || 0),
+            overtimeHours50: (data.settings as any)?.overtimeEnabled === false ? 0 : Number(data.summary.overtime50Hours || 0),
+            overtimeHours100: (data.settings as any)?.overtimeEnabled === false ? 0 : Number(data.summary.overtime100Hours || 0),
             baseSalary: Number(data.emp.baseSalary),
             adjustedBaseSalary: data.calc.adjustedBaseSalary,
             absenceDeduction: data.calc.absenceDeduction,
