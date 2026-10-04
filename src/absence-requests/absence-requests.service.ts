@@ -21,6 +21,8 @@ import { NotificationType } from '@prisma/client';
 import { NotificationsService } from '../notifications/notifications.service';
 import { SubscriptionGuard } from '../subscriptions/guards/subscription.guard';
 import { resolveResponsableName } from '../common/resolve-responsable.util';
+// ✅ LOT C — avis demandé aux titulaires de fonctions
+import { ApprovalNotifierService } from '../approvals/core/approval-notifier.service';
 import * as WorkingDays from '../common/working-days.util';
 import {
   fillOrcaWordTemplate, swapCachetImage, fetchImageBuffer,
@@ -42,6 +44,7 @@ export class AbsenceRequestsService {
     private prisma: PrismaService,
     private notificationsService: NotificationsService,
     private subscriptionGuard: SubscriptionGuard,
+    private approvalNotifier: ApprovalNotifierService, // ✅ LOT C — avis demandé aux titulaires (aucun effet sans circuit actif)
   ) {}
 
   // ============================================================================
@@ -359,6 +362,15 @@ private async getUserWithCompany(userId: string, overrideCompanyId?: string): Pr
         metadata: { absenceRequestId: absenceRequest.id, employeeId: employee.id },
       });
     }
+
+    // ✅ LOT C — si un circuit d'avis est actif, les titulaires de fonctions sont aussi prévenus.
+    void this.approvalNotifier.notifyOpinionRequested({
+      companyId: employee.companyId,
+      type: 'ABSENCE',
+      requestId: absenceRequest.id,
+      employeeName: `${employee.firstName} ${employee.lastName}`,
+      detail: `${workingDays} jour(s) du ${start.toLocaleDateString('fr-FR')} au ${end.toLocaleDateString('fr-FR')}`,
+    });
 
     return absenceRequest;
   }

@@ -44,6 +44,7 @@ model User {
   role                      UserRole @default(EMPLOYEE)
   isActive                  Boolean  @default(true)
   canRecordAttendanceForAll Boolean  @default(false)
+  signatureUrl              String?  @db.VarChar(500)
   manageMultipleCompanies   Boolean  @default(false) // flag ADMIN multi-entreprises
   maxCompanies              Int      @default(5) // relevable par le super admin
 
@@ -112,7 +113,8 @@ model User {
   kioskDeviceCompanyLinks KioskDeviceCompany[]
   ownedCompanies          UserCompany[]
   ownedDisplayScreens     DisplayScreen[]      @relation("DisplayScreenOwner")
-  approvedDisplayScreens  DisplayScreen[]      @relation("DisplayScreenApprover")
+  approvedDisplayScreens  DisplayScreen[]      @relation("DisplayScreenApprover") 
+ approvalFunctions UserApprovalFunction[]
 
   @@index([email])
   @@index([companyId])
@@ -247,6 +249,8 @@ model Company {
   // Relations existantes
 
   users                    User[]
+  approvalFunctions        UserApprovalFunction[]
+  approvalCircuits         ApprovalCircuit[]
   employees                Employee[]
   departments              Department[]
   payrolls                 Payroll[]
@@ -293,6 +297,16 @@ model Company {
   blogMonthlyQuota      BlogMonthlyQuota[]
   generatedContracts    GeneratedContract[]
   echelonSuggestions    EchelonSuggestion[] // relation inverse
+
+  // … après : echelonSuggestions    EchelonSuggestion[] // relation inverse
+  reviewCycles          ReviewCycle[]
+  evaluationTemplates   EvaluationTemplate[]
+  competencies          Competency[]
+  jobProfiles           JobProfile[]
+  careerEvents          CareerEvent[]
+  promotionProposals    PromotionProposal[]
+  developmentPlans      DevelopmentPlan[]
+
   affiliatedBy          String?                   @db.Uuid
   affiliate             Affiliate?                @relation("AffiliateCompanies", fields: [affiliatedBy], references: [id], onDelete: SetNull)
   affiliateCompany      AffiliateCompany?
@@ -496,6 +510,13 @@ model Employee {
   performanceReviews   PerformanceReview[]       @relation("Reviewee")
   goals                Goal[]
   trainings            EmployeeTraining[]
+
+  // … après : trainings            EmployeeTraining[]
+  competencyAssessments CompetencyAssessment[]
+  careerEvents          CareerEvent[]
+  promotionProposals    PromotionProposal[]
+  developmentPlans      DevelopmentPlan[]
+
   onboardingProcess    OnboardingProcess?
   assets               Asset[]                   @relation("AssignedAssets")
   attendanceSummaries  AttendanceSummary[]
@@ -1853,10 +1874,24 @@ model Goal {
   createdAt DateTime @default(now()) @db.Timestamptz
   updatedAt DateTime @updatedAt @db.Timestamptz
 
+
+  weight           Decimal?  @db.Decimal(5, 2) // poids en % (Σ = 100 par fiche)
+  kpi              String?   @db.Text // livrables / KPI / éléments de preuve
+  support          String?   @db.VarChar(255) // support / dépendances (objectifs T+1)
+  score            Int?      @db.SmallInt // note 1–5 donnée à l'évaluation
+  managerComment   String?   @db.Text
+  validatedAt      DateTime? @db.Timestamptz // validation manager (objectifs T+1)
+  evaluatedInReviewId String? @db.Uuid // revue qui NOTE cet objectif
+  evaluatedInReview   PerformanceReview? @relation("GoalEvaluatedIn", fields: [evaluatedInReviewId], references: [id], onDelete: SetNull)
+  plannedInReviewId   String? @db.Uuid // revue qui a FIXÉ cet objectif (T+1)
+  plannedInReview     PerformanceReview? @relation("GoalPlannedIn", fields: [plannedInReviewId], references: [id], onDelete: SetNull)
+
   keyResults KeyResult[]
 
   @@index([employeeId])
   @@index([status])
+  @@index([evaluatedInReviewId])
+  @@index([plannedInReviewId])
   @@map("goals")
 }
 
@@ -1937,14 +1972,369 @@ model PerformanceReview {
   acknowledgedAt DateTime?    @db.Timestamptz
   acknowledgedBy String?      @db.Uuid
 
+//🆕 Cycle d'évaluation + fiche pondérée
+  cycleId String?      @db.Uuid
+  cycle   ReviewCycle? @relation(fields: [cycleId], references: [id], onDelete: SetNull)
+  objectivesScore   Decimal? @db.Decimal(4, 2) // note /5 de la section objectifs
+  competenciesScore Decimal? @db.Decimal(4, 2) // note /5 facteurs de succès / compétences
+  verdict           String?  @db.VarChar(40)
+  // Auto-évaluation (optionnelle) : { goals:[{goalId,score,comment}], criteria:[{id,score,comment}], comment }
+  selfAssessment  Json?
+  selfSubmittedAt DateTime? @db.Timestamptz
+  // Droit de réponse de l'employé
+  employeeComment   String?   @db.Text
+  employeeCommentAt DateTime? @db.Timestamptz
+
+
   createdAt DateTime @default(now()) @db.Timestamptz
   updatedAt DateTime @updatedAt @db.Timestamptz
+
+
+  goalsEvaluated Goal[] @relation("GoalEvaluatedIn")
+  goalsPlanned   Goal[] @relation("GoalPlannedIn")
 
   @@index([employeeId])
   @@index([reviewerId])
   @@index([status])
+  @@index([cycleId])
+  @@unique([cycleId, employeeId])
   @@map("performance_reviews")
 }
+
+enum ReviewCycleStatus {
+  OPEN
+  CLOSED
+
+  @@map("review_cycle_status")
+}
+
+model ReviewCycle {
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+
+  companyId String  @db.Uuid
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  name      String   @db.VarChar(100) // ex : "T4 2026"
+  type      ReviewType @default(QUARTERLY)
+  startDate DateTime @db.Date
+  endDate   DateTime @db.Date
+
+  status ReviewCycleStatus @default(OPEN)
+
+  // Part des objectifs dans la note finale (le reste = facteurs de succès / compétences)
+  objectivesWeight      Int     @default(80) @db.SmallInt
+  selfAssessmentEnabled Boolean @default(false)
+
+  templateId String?             @db.Uuid
+  template   EvaluationTemplate? @relation(fields: [templateId], references: [id], onDelete: SetNull)
+
+  createdById String   @db.Uuid
+  launchedAt  DateTime? @db.Timestamptz
+  closedAt    DateTime? @db.Timestamptz
+
+  reviews PerformanceReview[]
+
+  createdAt DateTime @default(now()) @db.Timestamptz
+  updatedAt DateTime @updatedAt @db.Timestamptz
+
+  @@index([companyId, status])
+  @@map("review_cycles")
+}
+
+model EvaluationTemplate {
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+
+  companyId String  @db.Uuid
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  name        String  @db.VarChar(100)
+  description String? @db.Text
+
+  // Poste visé (comparé à Employee.position) — null = modèle général
+  jobTitle String? @db.VarChar(100)
+
+  // [{ id, label, description?, weight, competencyId? }]  → facteurs de succès / compétences
+  criteria Json
+  // [{ title, kpi?, weight }]  → objectifs proposés au lancement (si l'employé n'en a pas déjà)
+  objectives Json?
+
+  cycles ReviewCycle[]
+
+  createdAt DateTime @default(now()) @db.Timestamptz
+  updatedAt DateTime @updatedAt @db.Timestamptz
+
+  @@index([companyId])
+  @@map("evaluation_templates")
+}
+
+enum CompetencyCategory {
+  TECHNICAL
+  BEHAVIORAL
+  MANAGERIAL
+
+  @@map("competency_category")
+}
+
+model Competency {
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+
+  companyId String  @db.Uuid
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  name        String             @db.VarChar(120)
+  category    CompetencyCategory @default(TECHNICAL)
+  description String?            @db.Text
+  // Descripteurs par niveau : { "1": "...", "2": "...", ... "5": "..." }
+  levels      Json?
+  isActive    Boolean            @default(true)
+
+  jobRequirements JobProfileCompetency[]
+  assessments     CompetencyAssessment[]
+  courses         CompetencyCourse[]
+  developmentActions DevelopmentAction[]
+
+  createdAt DateTime @default(now()) @db.Timestamptz
+  updatedAt DateTime @updatedAt @db.Timestamptz
+
+  @@unique([companyId, name])
+  @@index([companyId])
+  @@map("competencies")
+}
+
+model JobProfile {
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+
+  companyId String  @db.Uuid
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  // Comparé à Employee.position (insensible à la casse)
+  title       String  @db.VarChar(120)
+  description String? @db.Text
+
+  requirements JobProfileCompetency[]
+
+  createdAt DateTime @default(now()) @db.Timestamptz
+  updatedAt DateTime @updatedAt @db.Timestamptz
+
+  @@unique([companyId, title])
+  @@index([companyId])
+  @@map("job_profiles")
+}
+
+model JobProfileCompetency {
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+
+  jobProfileId String     @db.Uuid
+  jobProfile   JobProfile @relation(fields: [jobProfileId], references: [id], onDelete: Cascade)
+
+  competencyId String     @db.Uuid
+  competency   Competency @relation(fields: [competencyId], references: [id], onDelete: Cascade)
+
+  requiredLevel Int @default(3) @db.SmallInt // 1–5
+
+  @@unique([jobProfileId, competencyId])
+  @@index([competencyId])
+  @@map("job_profile_competencies")
+}
+
+model CompetencyAssessment {
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+
+  employeeId String   @db.Uuid
+  employee   Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+
+  competencyId String     @db.Uuid
+  competency   Competency @relation(fields: [competencyId], references: [id], onDelete: Cascade)
+
+  level        Int      @db.SmallInt // 1–5
+  source       String   @default("MANUAL") @db.VarChar(10) // REVIEW | MANUAL
+  reviewId     String?  @db.Uuid
+  assessedById String?  @db.Uuid // User
+  comment      String?  @db.Text
+  assessedAt   DateTime @default(now()) @db.Timestamptz
+
+  @@index([employeeId, competencyId, assessedAt])
+  @@index([reviewId])
+  @@map("competency_assessments")
+}
+
+model CompetencyCourse {
+  competencyId String     @db.Uuid
+  competency   Competency @relation(fields: [competencyId], references: [id], onDelete: Cascade)
+
+  courseId String         @db.Uuid
+  course   TrainingCourse @relation(fields: [courseId], references: [id], onDelete: Cascade)
+
+  @@id([competencyId, courseId])
+  @@map("competency_courses")
+}
+
+enum CareerEventType {
+  POSITION_CHANGE
+  DEPARTMENT_CHANGE
+  ECHELON_CHANGE
+  CONTRACT_CHANGE
+  PROMOTION
+  CONFIRMATION
+  OTHER
+
+  @@map("career_event_type")
+}
+
+model CareerEvent {
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+
+  companyId String  @db.Uuid
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  employeeId String   @db.Uuid
+  employee   Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+
+  type          CareerEventType
+  effectiveDate DateTime        @db.Date
+  title         String          @db.VarChar(160)
+  fromValue     String?         @db.VarChar(120)
+  toValue       String?         @db.VarChar(120)
+  notes         String?         @db.Text // visible RH / supérieurs uniquement
+
+  source     String  @default("MANUAL") @db.VarChar(10) // MANUAL | PROPOSAL
+  proposalId String? @db.Uuid
+  createdById String? @db.Uuid
+
+  createdAt DateTime @default(now()) @db.Timestamptz
+
+  @@index([employeeId, effectiveDate])
+  @@index([companyId])
+  @@map("career_events")
+}
+
+enum PromotionType {
+  POSITION_CHANGE
+  ECHELON_MERIT
+  OTHER
+
+  @@map("promotion_type")
+}
+
+enum PromotionStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  CANCELLED
+
+  @@map("promotion_status")
+}
+
+model PromotionProposal {
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+
+  companyId String  @db.Uuid
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  employeeId String   @db.Uuid
+  employee   Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+
+  type          PromotionType
+  currentValue  String?       @db.VarChar(120) // poste / échelon au moment de la proposition
+  targetValue   String        @db.VarChar(120)
+  justification String        @db.Text
+  reviewId      String?       @db.Uuid // évaluation qui appuie la proposition
+
+  status          PromotionStatus @default(PENDING)
+  proposedById    String          @db.Uuid
+  decidedById     String?         @db.Uuid
+  decidedAt       DateTime?       @db.Timestamptz
+  decisionComment String?         @db.Text
+  effectiveDate   DateTime?       @db.Date
+  appliedToEmployee Boolean       @default(false) // le poste a été mis à jour automatiquement
+
+  createdAt DateTime @default(now()) @db.Timestamptz
+  updatedAt DateTime @updatedAt @db.Timestamptz
+
+  @@index([companyId, status])
+  @@index([employeeId])
+  @@index([proposedById])
+  @@map("promotion_proposals")
+}
+
+enum DevelopmentPlanStatus {
+  ACTIVE
+  COMPLETED
+  CANCELLED
+
+  @@map("development_plan_status")
+}
+
+enum DevelopmentActionType {
+  TRAINING
+  MENTORING
+  PROJECT
+  SELF_STUDY
+  OTHER
+
+  @@map("development_action_type")
+}
+
+enum DevelopmentActionStatus {
+  TODO
+  IN_PROGRESS
+  DONE
+
+  @@map("development_action_status")
+}
+
+model DevelopmentPlan {
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+
+  companyId String  @db.Uuid
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  employeeId String   @db.Uuid
+  employee   Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+
+  title       String                @db.VarChar(160)
+  status      DevelopmentPlanStatus @default(ACTIVE)
+  dueDate     DateTime?             @db.Date
+  createdById String                @db.Uuid
+
+  actions DevelopmentAction[]
+
+  createdAt DateTime @default(now()) @db.Timestamptz
+  updatedAt DateTime @updatedAt @db.Timestamptz
+
+  @@index([employeeId, status])
+  @@index([companyId])
+  @@map("development_plans")
+}
+
+model DevelopmentAction {
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+
+  planId String          @db.Uuid
+  plan   DevelopmentPlan @relation(fields: [planId], references: [id], onDelete: Cascade)
+
+  type        DevelopmentActionType   @default(OTHER)
+  title       String                  @db.VarChar(200)
+  description String?                 @db.Text
+  status      DevelopmentActionStatus @default(TODO)
+  dueDate     DateTime?               @db.Date
+  completedAt DateTime?               @db.Timestamptz
+  employeeNote String?                @db.Text
+  sortOrder   Int                     @default(0)
+
+  competencyId String?     @db.Uuid
+  competency   Competency? @relation(fields: [competencyId], references: [id], onDelete: SetNull)
+
+  courseId String?          @db.Uuid
+  course   TrainingCourse?  @relation(fields: [courseId], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now()) @db.Timestamptz
+  updatedAt DateTime @updatedAt @db.Timestamptz
+
+  @@index([planId])
+  @@map("development_actions")
+}
+
 
 // ============================================================================
 // 1️⃣2️⃣ FORMATION
@@ -1977,6 +2367,10 @@ model TrainingCourse {
   updatedAt DateTime @updatedAt @db.Timestamptz
 
   sessions EmployeeTraining[]
+
+    // … après : sessions EmployeeTraining[]
+  competencies CompetencyCourse[]
+  developmentActions DevelopmentAction[]
 
   @@index([companyId])
   @@map("training_courses")
@@ -2567,6 +2961,10 @@ enum NotificationType {
 
   SUBSCRIPTION_EXPIRING // Rappel J-7 / J-3 / J-1 avant fin d'essai ou d'abonnement
   SUBSCRIPTION_EXPIRED // Abonnement/essai arrivé à échéance sans renouvellement
+
+  OPINION_REQUEST // Votre avis est demandé sur une demande
+  OPINION_GIVEN // Un avis a été donné sur une décision en attente
+  DECISION_NEEDS_CONFIRMATION // Décision en attente à confirmer
 
   @@map("notification_type")
 }
@@ -4476,3 +4874,111 @@ model PushSubscription {
   @@index([userId])
   @@map("push_subscriptions")
 }
+
+
+
+
+
+
+
+// ============================================================================
+// ✅ LOT A — Fonctions de validation (avis) attribuées par l'admin
+// Un utilisateur peut cumuler plusieurs fonctions (ex. RH + DG).
+// `code` = chaîne validée côté code (approvals.constants.ts), pas un enum :
+// ajouter une fonction plus tard ne demande aucune migration.
+// ============================================================================
+model UserApprovalFunction {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId    String   @db.Uuid
+  companyId String   @db.Uuid
+  code      String   @db.VarChar(40)
+  canSign   Boolean  @default(false)
+  createdBy String?  @db.Uuid
+  createdAt DateTime @default(now()) @db.Timestamptz
+  updatedAt DateTime @updatedAt @db.Timestamptz
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, companyId, code])
+  @@index([companyId, code])
+  @@index([userId])
+  @@map("user_approval_functions")
+}
+
+// ============================================================================
+// ✅ LOT B — Circuits d'avis, avis, décisions en attente
+// `requestType` = 'LOAN' | 'ADVANCE' | 'ABSENCE' (chaînes validées côté code —
+// les congés viendront ensuite sans migration). Aucune FK vers les demandes
+// (prêts / avances / absences) : l'existant n'est pas touché.
+// ============================================================================
+model ApprovalCircuit {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId   String   @db.Uuid
+  requestType String   @db.VarChar(20)
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now()) @db.Timestamptz
+  updatedAt   DateTime @updatedAt @db.Timestamptz
+
+  company Company               @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  steps   ApprovalCircuitStep[]
+
+  @@unique([companyId, requestType])
+  @@map("approval_circuits")
+}
+
+model ApprovalCircuitStep {
+  id           String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  circuitId    String @db.Uuid
+  position     Int
+  functionCode String @db.VarChar(40)
+
+  circuit ApprovalCircuit @relation(fields: [circuitId], references: [id], onDelete: Cascade)
+
+  @@unique([circuitId, functionCode])
+  @@index([circuitId, position])
+  @@map("approval_circuit_steps")
+}
+
+model ApprovalOpinion {
+  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId    String   @db.Uuid
+  requestType  String   @db.VarChar(20)
+  requestId    String   @db.Uuid
+  functionCode String   @db.VarChar(40)
+  userId       String?  @db.Uuid
+  authorName   String   @db.VarChar(200)
+  opinion      String   @db.VarChar(15) // FAVORABLE | UNFAVORABLE
+  comment      String?  @db.Text
+  signatureUrl String?  @db.VarChar(500)
+  createdAt    DateTime @default(now()) @db.Timestamptz
+  updatedAt    DateTime @updatedAt @db.Timestamptz
+
+  @@unique([requestType, requestId, functionCode])
+  @@index([companyId, requestType, requestId])
+  @@map("approval_opinions")
+}
+
+model ApprovalPendingDecision {
+  id                String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId         String    @db.Uuid
+  requestType       String    @db.VarChar(20)
+  requestId         String    @db.Uuid
+  decision          String    @db.VarChar(10) // APPROVE
+  // WAITING_OPINIONS | NEEDS_CONFIRMATION | FINALIZING | FINALIZED | CANCELLED | SUPERSEDED
+  state             String    @db.VarChar(25)
+  decidedByUserId   String?   @db.Uuid
+  decidedByName     String    @db.VarChar(200)
+  payload           Json?
+  forced            Boolean   @default(false)
+  missingAtDecision Json?
+  finalizedByUserId String?   @db.Uuid
+  finalizedAt       DateTime? @db.Timestamptz
+  createdAt         DateTime  @default(now()) @db.Timestamptz
+  updatedAt         DateTime  @updatedAt @db.Timestamptz
+
+  @@unique([requestType, requestId])
+  @@index([companyId, state])
+  @@map("approval_pending_decisions")
+}
+

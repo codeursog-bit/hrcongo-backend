@@ -3213,7 +3213,7 @@ export class PayrollsService {
   // ============================================================================
   // SIMULATE FREE — pas de company réelle → taxes custom vides
   // ============================================================================
-  async simulateFree(body: any) {
+  async simulateFree(body: any, userId?: string) {
     const {
       firstName = 'Simulation',
       lastName = 'Libre',
@@ -3232,6 +3232,11 @@ export class PayrollsService {
       overtimeHours50 = 0,
       overtimeHours100 = 0,
       manualBonuses = [],
+      manualAdvances = [],
+      // 🆕 type de contrat / zone TOL / résidence (BNC) — mêmes règles que la paie réelle
+      contractType = 'CDI',
+      tolZone = null,
+      isResident = true,
     } = body;
     if (!baseSalary || baseSalary < 70400)
       throw new Error('Salaire de base invalide (minimum SMIG : 70 400 FCFA)');
@@ -3247,6 +3252,10 @@ export class PayrollsService {
       isSubjectToIrpp,
       isSubjectToTus: true,
       taxExemptionReason: null,
+      contractType,
+      tolZone,
+      isResident,
+      _payrollYear: year, // mode fiscal AUTO : barème selon l'année simulée
     };
     const fakeCompany = {
       appliesCnssEmployer: true,
@@ -3264,11 +3273,42 @@ export class PayrollsService {
         amount: Number(b.amount),
         isTaxable: b.isTaxable ?? true,
         isCnss: b.isCnss ?? true,
+        fiscalType: b.fiscalType ?? null,
         source: 'MANUAL',
         isRecurring: true,
       }));
 
-    // ✅ Simulation libre = pas de company réelle → companyTaxes vide
+    // 🆕 Avances saisies à la main → déduites du net (comme une vraie avance)
+    const freeAdvances = (manualAdvances as any[])
+      .filter((a) => Number(a?.amount) > 0)
+      .map((a, i) => ({
+        id: `free-adv-${i}`,
+        label: a.label ?? 'Avance',
+        amount: Number(a.amount),
+      }));
+    const totalAdvanceDeduction = freeAdvances.reduce((s, a) => s + a.amount, 0);
+
+    // 🆕 Taxes configurées de l'entreprise de l'utilisateur connecté (CAMU, etc.),
+    // filtrées par mois/année. Sans entreprise (ou en cas d'erreur) → seule la TOL
+    // native s'applique, comme pour un employé sans taxe configurée.
+    let companyTaxes: any[] = [];
+    if (userId) {
+      try {
+        const u = await this.prisma.user.findUnique({
+          where: { id: userId },
+          select: { companyId: true },
+        });
+        if (u?.companyId) {
+          companyTaxes = await this.companyTaxService.findActive(
+            u.companyId,
+            month && year ? { month: Number(month), year: Number(year) } : undefined,
+          );
+        }
+      } catch {
+        companyTaxes = [];
+      }
+    }
+
     const calc = this.calculator.calculate(
       baseSalary,
       overtimeHours10,
@@ -3276,13 +3316,13 @@ export class PayrollsService {
       overtimeHours50,
       overtimeHours100,
       calculatedBonuses,
-      [],
+      freeAdvances.map((a) => ({ amount: a.amount })),
       settings,
       daysToPay,
       settings.workDaysPerMonth,
       fakeEmployee,
       fakeCompany,
-      [],
+      companyTaxes,
     );
 
     return {
@@ -3327,13 +3367,19 @@ export class PayrollsService {
       tusTotal: calc.tusTotal,
       its: calc.its,
       irppDetails: calc.irppDetails,
-      customTaxes: [],
-      employeeCustomTaxTotal: 0,
-      employerCustomTaxTotal: 0,
+      // 🆕 TOL + taxes configurées : avant, [] / 0 alors que le net les déduisait
+      customTaxes: calc.customTaxDetails,
+      employeeCustomTaxTotal: calc.employeeCustomTaxTotal,
+      employerCustomTaxTotal: calc.employerCustomTaxTotal,
+      contractType: calc.contractType,
+      isBncWorker: calc.isBncWorker,
+      bncAmount: calc.bncAmount,
+      bncTaux: calc.bncTaux,
+      bncLabel: calc.bncLabel,
       loans: [],
-      advances: [],
+      advances: freeAdvances,
       totalLoanDeduction: 0,
-      totalAdvanceDeduction: 0,
+      totalAdvanceDeduction,
       totalDeductions: calc.totalDeductions,
       netSalary: calc.netSalary,
       totalEmployerCost: calc.totalEmployerCost,

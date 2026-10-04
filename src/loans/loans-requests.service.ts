@@ -17,6 +17,8 @@ import { SubscriptionGuard } from '../subscriptions/guards/subscription.guard';
 import { NotificationsService } from '../notifications/notifications.service';
 import { NotificationType } from '@prisma/client';
 import { LoansCommonService } from './loans-common.service';
+// ✅ LOT B — avis demandé aux titulaires de fonctions (aucun effet sans circuit actif)
+import { ApprovalNotifierService } from '../approvals/core/approval-notifier.service';
 import { FULL_ADMIN_ROLES, DRH_ROLES, FINANCE_ROLES } from './loans.constants';
 
 @Injectable()
@@ -28,6 +30,7 @@ export class LoansRequestsService {
     private common: LoansCommonService,
     private subscriptionGuard: SubscriptionGuard,
     private notificationsService: NotificationsService,
+    private approvalNotifier: ApprovalNotifierService,
   ) {}
 
   // ============================================================================
@@ -90,6 +93,14 @@ export class LoansRequestsService {
         message: `${employee.firstName} ${employee.lastName} demande un prêt (${(data.type ?? 'ARGENT').toLowerCase()}) de ${data.amount.toLocaleString()} FCFA`,
         link: '/loans',
         metadata: { loanId: loan.id, employeeId: employee.id },
+      });
+      // ✅ LOT B — si un circuit d'avis est actif, les titulaires de fonctions sont aussi prévenus.
+      void this.approvalNotifier.notifyOpinionRequested({
+        companyId: employee.companyId,
+        type: 'LOAN',
+        requestId: loan.id,
+        employeeName: `${employee.firstName} ${employee.lastName}`,
+        amount: Number(data.amount),
       });
     }
 
@@ -310,6 +321,14 @@ export class LoansRequestsService {
         message: `${employee.firstName} ${employee.lastName} demande une avance de ${data.amount.toLocaleString()} FCFA`,
         link: '/loans',
         metadata: { advanceId: advance.id, employeeId: employee.id },
+      });
+      // ✅ LOT B — si un circuit d'avis est actif, les titulaires de fonctions sont aussi prévenus.
+      void this.approvalNotifier.notifyOpinionRequested({
+        companyId: employee.companyId,
+        type: 'ADVANCE',
+        requestId: advance.id,
+        employeeName: `${employee.firstName} ${employee.lastName}`,
+        amount: Number(data.amount),
       });
     }
 

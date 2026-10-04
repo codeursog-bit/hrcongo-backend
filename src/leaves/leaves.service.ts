@@ -46,6 +46,8 @@ import {
 import { CONGO_LEAVE } from './leaves.constants';
 import { LeavesBalanceService } from './leaves-balance.service';
 import { LeavesIndemnityService } from './leaves-indemnity.service';
+// ✅ LOT E — avis demandé aux titulaires de fonctions (aucun effet sans circuit actif)
+import { ApprovalNotifierService } from '../approvals/core/approval-notifier.service';
 
 @Injectable()
 export class LeavesService {
@@ -58,6 +60,7 @@ export class LeavesService {
     private subscriptionGuard: SubscriptionGuard,
     private balanceService: LeavesBalanceService,
     private indemnityService: LeavesIndemnityService,
+    private approvalNotifier: ApprovalNotifierService, // ✅ LOT E
   ) {}
 
   // ============================================================================
@@ -1029,6 +1032,15 @@ export class LeavesService {
         },
       );
 
+      // ✅ LOT E — si un circuit d'avis est actif, les titulaires de fonctions sont aussi prévenus.
+      void this.approvalNotifier.notifyOpinionRequested({
+        companyId: user.companyId,
+        type: 'LEAVE',
+        requestId: leave.id,
+        employeeName: `${employee.firstName} ${employee.lastName}`,
+        detail: `${Math.round(workingDays)} jour(s) du ${start.toLocaleDateString('fr-FR')} au ${end.toLocaleDateString('fr-FR')}`,
+      });
+
       return earlyDepartureWarning || insufficientBalanceWarning
         ? { ...leave, earlyDepartureWarning, insufficientBalanceWarning }
         : leave;
@@ -1142,6 +1154,15 @@ export class LeavesService {
         },
       },
     );
+
+    // ✅ LOT E — si un circuit d'avis est actif, les titulaires de fonctions sont aussi prévenus.
+    void this.approvalNotifier.notifyOpinionRequested({
+      companyId,
+      type: 'LEAVE',
+      requestId: leave.id,
+      employeeName: `${employee.firstName} ${employee.lastName}`,
+      detail: `rattrapage de ${Math.round(workingDays)} jour(s) du ${start.toLocaleDateString('fr-FR')} au ${end.toLocaleDateString('fr-FR')}`,
+    });
 
     this.logger.log(
       `↩️ Demande de rattrapage de ${workingDays}j soumise par ${employee.firstName} ${employee.lastName} sur le reliquat du congé ${source.id} (${Math.round((remaining - workingDays) * 10) / 10}j restants après cette demande).`,
@@ -1791,9 +1812,10 @@ export class LeavesService {
       leave.type,
     );
     let debitedCycleStartDate: Date | undefined;
-    let plannedPayrollMonth: number | undefined;
-    let plannedPayrollYear: number | undefined;
-    let payrollIndemnityDays: number | undefined;
+    // ✅ LOT E — RÈGLE PAIE : valider une DEMANDE de congé ne déclenche plus aucune
+    // indemnité. plannedPayrollMonth / plannedPayrollYear / payrollIndemnityDays ne
+    // sont PLUS renseignés ici : l'indemnité n'est payée que pour un congé PLANIFIÉ
+    // par le RH (createManual / planification), jamais à la demande.
 
     if (status === 'APPROVED' && leave.carriedFromLeaveId) {
       // ✅ Rattrapage de reliquat — revalidation à la validation (le reliquat
@@ -1844,18 +1866,10 @@ export class LeavesService {
       // retrouver ce cycle en le recalculant "à l'instant présent".
       debitedCycleStartDate = balance.cycleStartDate;
 
-      // ✅ Même règle que createManual() : indemnité ANNUAL programmée sur
-      // le mois précédant le départ, jamais sur ANNUAL_ANTICIPATED. Voir
-      // getLeaveImpactForPayroll().
-      if (leave.type === 'ANNUAL') {
-        plannedPayrollMonth =
-          leave.startDate.getMonth() === 0 ? 12 : leave.startDate.getMonth();
-        plannedPayrollYear =
-          leave.startDate.getMonth() === 0
-            ? leave.startDate.getFullYear() - 1
-            : leave.startDate.getFullYear();
-        payrollIndemnityDays = Number(balance.annualEntitled);
-      }
+      // ✅ LOT E — (ancien bloc supprimé) : le mois de paie de l'indemnité n'était
+      // fixé ici, à la validation d'une demande, qu'à cause d'un ancien blocage
+      // (26 jours) aujourd'hui retiré. Désormais seule la planification RH
+      // (createManual) programme une indemnité — voir getLeaveImpactForPayroll().
 
       // ✅ Le cycle d'acquisition de 12 mois ne redémarre que sur un congé
       // ANNUEL normal (celui qui clôt le cycle) — pas sur un anticipé, qui
@@ -1868,17 +1882,7 @@ export class LeavesService {
       }
     }
 
-    if (status === 'APPROVED' && isAnnualFamily && !leave.carriedFromLeaveId) {
-      const { indemnity, basedOnAverage, monthsUsed, method } =
-        await this.calculateLeaveIndemnity(
-          leave.employeeId,
-          Number(leave.daysCount),
-          leave.companyId,
-        );
-      this.logger.log(
-        `✅ Congé ${id} approuvé — Indemnité [${method}]: ${indemnity} F (base: ${Math.round(basedOnAverage)} F/mois sur ${monthsUsed} mois)`,
-      );
-    }
+    // ✅ LOT E — plus de calcul d'indemnité à la validation d'une demande de congé.
 
     const updatedLeave = await this.prisma.leave.update({
       where: { id },
@@ -1892,9 +1896,6 @@ export class LeavesService {
         extraDaysGranted: status === 'APPROVED' ? extraDaysGranted : undefined,
         resumptionNote: status === 'APPROVED' ? resumptionNote : undefined,
         debitedCycleStartDate,
-        plannedPayrollMonth,
-        plannedPayrollYear,
-        payrollIndemnityDays,
       },
     });
 

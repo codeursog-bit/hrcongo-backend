@@ -44,6 +44,11 @@ import Docxtemplater from 'docxtemplater';
 // Chemin vers les templates stockés dans le projet
 const TEMPLATES_DIR = path.join(__dirname, 'templates');
 
+// Période cotisée = DERNIER jour du mois (31 pour janvier, 28/29 pour février…), jamais le 1er.
+function lastDayOfMonth(month: number, year: number): string {
+  return String(new Date(year, month, 0).getDate()).padStart(2, '0');
+}
+
 // ─── UTILITAIRES XML BAS NIVEAU ───────────────────────────────────────────
 
 // Échappe les caractères spéciaux XML (obligatoire : noms/prénoms peuvent
@@ -157,7 +162,7 @@ export async function fillDnmsTemplate(
   }
 
   const mm = String(month).padStart(2, '0');
-  const periode = `01/${mm}/${year}`;
+  const periode = `${lastDayOfMonth(month, year)}/${mm}/${year}`;
 
   const rows: CellSpec[][] = employees.map((emp) => [
     { col: 'A', kind: 'str', value: emp.matricule },
@@ -198,7 +203,7 @@ export async function fillTusTemplate(
   }
 
   const mm = String(month).padStart(2, '0');
-  const periode = `01/${mm}/${year}`;
+  const periode = `${lastDayOfMonth(month, year)}/${mm}/${year}`;
 
   const rows: CellSpec[][] = employees.map((emp) => [
     { col: 'A', kind: 'str', value: emp.matricule },
@@ -210,7 +215,7 @@ export async function fillTusTemplate(
     { col: 'G', kind: 'str', value: emp.departement || '' },
     { col: 'H', kind: 'str', value: periode },
     { col: 'I', kind: 'num', value: emp.brutGlobal },
-    { col: 'J', kind: 'num', value: emp.tusTotal }, // 7,5% total lu depuis BDD
+    { col: 'J', kind: 'num', value: emp.tusCnssAmount }, // part CNSS 5,475% UNIQUEMENT (la part DGI ne se déclare pas ici)
     { col: 'K', kind: 'num', value: emp.nbrJoursTravailles },
   ]);
 
@@ -374,7 +379,7 @@ export async function fillDgcTemplate(
     RAISON_SOCIALE: recap.company?.legalName || '',
     MATRICULE:
       recap.company?.cnssAffiliationNumber || recap.company?.cnssNumber || '',
-    P_JJ: '01',
+    P_JJ: lastDayOfMonth(month, year),
     P_MM: mm,
     P_AAAA: String(year),
     EFFECTIF: String(t.effectif),

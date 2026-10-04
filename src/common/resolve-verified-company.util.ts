@@ -45,6 +45,28 @@ export async function resolveVerifiedCompanyId(
     user.role === 'CABINET_ADMIN' || user.role === 'CABINET_GESTIONNAIRE';
   const canOverride = isCabinet || !!user.manageMultipleCompanies;
 
+  // 🔒 DURCISSEMENT (audit) — `requestedCompanyId` vient du client. Express
+  // (qs) transforme `?companyId[not]=x` en OBJET ; transmis tel quel à Prisma
+  // (`companyId: requestedCompanyId`) il devient un opérateur de filtre : la
+  // vérification d'appartenance « réussit » pour une entreprise du portefeuille
+  // et la valeur renvoyée — l'objet contrôlé par l'attaquant — est ensuite
+  // réutilisée par l'appelant dans ses requêtes, qui portent alors sur
+  // d'AUTRES entreprises. On exige donc une chaîne UUID stricte.
+  if (
+    requestedCompanyId !== undefined &&
+    requestedCompanyId !== null &&
+    requestedCompanyId !== ''
+  ) {
+    if (
+      typeof requestedCompanyId !== 'string' ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+        requestedCompanyId,
+      )
+    ) {
+      throw new ForbiddenException("Vous n'avez pas accès à cette entreprise.");
+    }
+  }
+
   // Pas d'override demandé, ou rôle qui n'a de toute façon pas ce droit →
   // comportement historique : sa propre entreprise (peut être null pour un
   // cabinet qui n'a pas encore ciblé d'entreprise — laissé au appelant de
@@ -117,6 +139,16 @@ export async function assertCompanyAccess(
   companyId: string,
   options: { write?: boolean } = {},
 ): Promise<void> {
+  // 🔒 companyId d'URL/corps : chaîne UUID stricte (voir resolveVerifiedCompanyId)
+  if (
+    typeof companyId !== 'string' ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+      companyId,
+    )
+  ) {
+    throw new ForbiddenException("Vous n'avez pas accès à cette entreprise.");
+  }
+
   const user = await prisma.user.findUnique({
     where: { id: userId },
     select: {

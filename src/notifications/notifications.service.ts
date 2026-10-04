@@ -4,12 +4,73 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { NotificationType, UserRole, Prisma } from '@prisma/client';
+import { PushNotificationsService } from './push-notifications.service';
+
+// ✅ LOT B — Types de notifications qui déclenchent AUSSI un push (hors app).
+// Liste blanche volontaire : les autres notifications (rappels CNSS, etc.)
+// gardent leur comportement actuel (cloche seulement). `urgent` = la
+// notification reste affichée jusqu'au clic (demandes à traiter).
+const PUSH_TYPES: Record<string, { urgent: boolean }> = {
+  LEAVE_REQUEST: { urgent: true },
+  LEAVE_APPROVED: { urgent: false },
+  LEAVE_REJECTED: { urgent: false },
+  ABSENCE_REQUEST: { urgent: true },
+  ABSENCE_APPROVED: { urgent: false },
+  ABSENCE_REJECTED: { urgent: false },
+  PERMISSION_REQUEST: { urgent: true },
+  PERMISSION_APPROVED: { urgent: false },
+  PERMISSION_REJECTED: { urgent: false },
+  LOAN_REQUEST: { urgent: true },
+  LOAN_APPROVED: { urgent: false },
+  LOAN_REJECTED: { urgent: false },
+  ADVANCE_REQUEST: { urgent: true },
+  ADVANCE_APPROVED: { urgent: false },
+  ADVANCE_REJECTED: { urgent: false },
+  OPINION_REQUEST: { urgent: true },
+  OPINION_GIVEN: { urgent: false },
+  DECISION_NEEDS_CONFIRMATION: { urgent: true },
+};
 
 @Injectable()
 export class NotificationsService {
   private readonly logger = new Logger(NotificationsService.name);
 
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private prisma: PrismaService,
+    private push: PushNotificationsService, // ✅ LOT B — push hors app
+  ) {}
+
+  // ============================================================================
+  // 🔔 PUSH (hors app) — best-effort, ne bloque ni ne fait jamais échouer la
+  // création de la notification en base.
+  // ============================================================================
+  private async pushSafe(
+    userId: string,
+    data: { type: string; title: string; message: string; link?: string; metadata?: any },
+    notificationId?: string,
+  ): Promise<void> {
+    try {
+      const cfg = PUSH_TYPES[data.type];
+      if (!cfg) return;
+
+      const m = (data.metadata ?? {}) as Record<string, any>;
+      const ref =
+        m.requestId ?? m.loanId ?? m.advanceId ?? m.leaveId ?? m.absenceRequestId ?? m.absenceId ?? m.ticketId ?? notificationId;
+      const suffix = m.event ? `:${m.event}` : m.waiting ? ':waiting' : '';
+      // Un tag par demande ET par événement : une mise à jour re-sonne, un doublon est fusionné.
+      const tag = ref ? `${data.type}:${ref}${suffix}` : `${data.type}:${Date.now()}`;
+
+      await this.push.sendPushToUser(userId, {
+        title: data.title,
+        body: data.message,
+        url: data.link || '/',
+        tag,
+        requireInteraction: cfg.urgent,
+      });
+    } catch (error) {
+      this.logger.warn(`Push non envoyé à ${userId} (${data.type}) : ${error}`);
+    }
+  }
 
   // ============================================================================
   // 📋 RÉCUPÉRER NOTIFICATIONS (Filtré par rôle et entreprise)
@@ -144,6 +205,7 @@ export class NotificationsService {
       });
 
       this.logger.log(`✅ Notification créée pour user ${data.userId}: ${data.title}`);
+      void this.pushSafe(data.userId, data, notification.id); // ✅ LOT B
       return notification;
     } catch (error) {
       this.logger.error(`❌ Erreur création notification:`, error);
@@ -196,6 +258,8 @@ export class NotificationsService {
       });
 
       this.logger.log(`✅ ${notifications.length} notifications créées pour rôles: ${roles.join(', ')}`);
+      // ✅ LOT B — push hors app pour chaque destinataire (types de la liste blanche uniquement)
+      for (const u of users) void this.pushSafe(u.id, data);
       return notifications;
     } catch (error) {
       this.logger.error(`❌ Erreur création notifications groupe:`, error);

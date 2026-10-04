@@ -84,7 +84,8 @@ export class PushNotificationsService implements OnModuleInit {
     await this.prisma.pushSubscription.upsert({
       where: { token },
       create: { userId, token, deviceLabel },
-      update: { lastUsedAt: new Date(), deviceLabel },
+      // userId aussi : si un autre compte se connecte sur le même appareil, le token lui est rattaché
+      update: { userId, lastUsedAt: new Date(), deviceLabel },
     });
 
     await this.prisma.user.update({

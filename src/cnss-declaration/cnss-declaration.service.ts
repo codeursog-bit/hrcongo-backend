@@ -24,6 +24,16 @@ function formatDateCnss(d: Date): string {
   return `${String(d.getDate()).padStart(2, '0')}/${String(d.getMonth() + 1).padStart(2, '0')}/${d.getFullYear()}`;
 }
 
+// 🐛 CORRIGÉ : la période cotisée est le DERNIER jour du mois (ex. paie de janvier
+// → 31/01/2026), et non le 1er. `new Date(year, month, 0)` = dernier jour du mois `month` (1-12).
+function periodEndCnss(month: number, year: number): string {
+  return formatDateCnss(new Date(year, month, 0));
+}
+
+// Seuls les CDI et CDD sont déclarés à la CNSS pour l'instant (prestataires, consultants,
+// intérimaires et stagiaires exclus — le cas des stagiaires reste à étudier).
+const CNSS_CONTRACT_TYPES = ['CDI', 'CDD'] as const;
+
 // Ex: "MBEMBA NKOSI" → ["MBEMBA", "NKOSI"]
 // Ex: "MBEMBA"       → ["MBEMBA", ""]
 function splitNomPostNom(lastName: string): [string, string] {
@@ -62,6 +72,7 @@ export class CnssDeclarationService {
         cnssAffiliationNumber: true,
         address: true,
         phone: true,
+        city: true, // 🏙️ colonne « Département ou commune » = ville de l'entreprise
       },
     });
 
@@ -75,7 +86,10 @@ export class CnssDeclarationService {
         // export de déclaration (DNMS, TUS, DGC) ni dans les totaux
         // (masse salariale, effectif...) — la déclaration CNSS ne concerne
         // que les salariés effectivement soumis à cotisation.
-        employee: { isSubjectToCnss: true },
+        employee: {
+          isSubjectToCnss: true,
+          contractType: { in: [...CNSS_CONTRACT_TYPES] },
+        },
       },
       select: {
         workedDays: true,
@@ -118,13 +132,18 @@ export class CnssDeclarationService {
         month,
         year,
         status: { not: 'DRAFT' },
-        employee: { isSubjectToCnss: false },
+        employee: {
+          OR: [
+            { isSubjectToCnss: false },
+            { contractType: { notIn: [...CNSS_CONTRACT_TYPES] } },
+          ],
+        },
       },
     });
 
     const deadline = getDeadline(month, year);
     const isLate = new Date() > deadline;
-    const periodeLabel = formatDateCnss(new Date(year, month - 1, 1));
+    const periodeLabel = periodEndCnss(month, year);
 
     // ── Cumulateurs ───────────────────────────────────────────────────────
     let totBrut = 0;
@@ -190,7 +209,10 @@ export class CnssDeclarationService {
         prenom: p.employee.firstName?.trim() || '',
         contractType: p.employee.contractType,
         typeWorker: isStagiaire ? 2 : 1,
-        departement: p.employee.department?.name || '',
+        // 🐛 CORRIGÉ : ce n'est pas le département de l'employé mais la ville de
+        // l'entreprise (Paramètres > Entreprise). Le nom du champ reste « departement »
+        // car les templates/exports le lisent sous ce nom.
+        departement: company?.city || '',
         poste: p.employee.position || '',
         periodeLabelCnss: periodeLabel,
         // Montants — lus directement BDD
@@ -443,7 +465,7 @@ export class CnssDeclarationService {
       month: 'long',
       year: 'numeric',
     });
-    const periode = `01/${mm}/${year}`;
+    const periode = periodEndCnss(month, year);
     const affil =
       recap.company?.cnssAffiliationNumber ||
       recap.company?.cnssNumber ||
@@ -668,7 +690,7 @@ export class CnssDeclarationService {
         emp.departement,
         periode,
         emp.brutGlobal,
-        emp.tusTotal,
+        emp.tusCnssAmount, // part CNSS uniquement (jamais la somme CNSS + DGI)
         emp.nbrJoursTravailles,
       ]);
       const bg = i % 2 === 0 ? 'FFF5EEF8' : 'FFFFFFFF';
@@ -693,7 +715,7 @@ export class CnssDeclarationService {
       '',
       '',
       recap.totals.masseSalariale,
-      recap.totals.tusTotal,
+      recap.totals.tusCnss,
       recap.totals.totalJours,
     ]);
     t2.height = 22;
@@ -706,9 +728,7 @@ export class CnssDeclarationService {
 
     ws2.addRow([]);
     const nr = ws2.addRow([
-      `NOTE : TUS total = ${f(recap.totals.tusTotal)} FCFA` +
-        ` (part CNSS 5,475% = ${f(recap.totals.tusCnss)} FCFA` +
-        ` + part DGI 2,025% = ${f(recap.totals.tusDgi)} FCFA). 100% patronal, sans plafond.`,
+      `NOTE : TUS part CNSS 5,475% = ${f(recap.totals.tusCnss)} FCFA. 100% patronal, sans plafond.`,
     ]);
     ws2.mergeCells(`A${nr.number}:K${nr.number}`);
     nr.getCell(1).font = { italic: true, size: 9, color: { argb: 'FF555555' } };
@@ -781,10 +801,10 @@ export class CnssDeclarationService {
       'FFE8F4FD',
     );
 
-    addTitle('SOUS-TOTAL (1) — TUS (Taxe Unique sur Salaires — 7,5%)', PURPLE);
+    addTitle('SOUS-TOTAL (1) — TUS part CNSS (5,475%)', PURPLE);
     addRow(
-      `TUS 7,5% × brut — dont CNSS 5,475% = ${f(recap.totals.tusCnss)} F`,
-      recap.totals.tusTotal,
+      'TUS CNSS 5,475% × brut',
+      recap.totals.tusCnss,
     );
     addRow(
       `Majoration retard (10% × ${recap.totals.monthsLate} mois)`,
@@ -841,13 +861,9 @@ export class CnssDeclarationService {
       `→ À verser CNSS : ${f(recap.totals.totalAVerserCnss)} F CFA  (Cotisations + TUS 5,475%)`,
       '',
     );
-    addRow(
-      `→ À verser DGI  : ${f(recap.totals.totalAVerserDgi)} F CFA  (TUS part Trésor 2,025%)`,
-      '',
-    );
     ws3.addRow([]);
     addRow(
-      `Fait à Brazzaville, le ${new Date().toLocaleDateString('fr-FR')}`,
+      `Fait à ${recap.company?.city || 'Brazzaville'}, le ${new Date().toLocaleDateString('fr-FR')}`,
       '',
     );
     addRow("(Cachet & Signature de l'Employeur)", '');
@@ -882,7 +898,7 @@ export class CnssDeclarationService {
   }> {
     const recap = await this.getMonthlyRecap(userId, month, year);
     const mm = String(month).padStart(2, '0');
-    const per = `01/${mm}/${year}`;
+    const per = periodEndCnss(month, year);
     const affil =
       recap.company?.cnssAffiliationNumber || recap.company?.cnssNumber || '';
 
@@ -969,7 +985,10 @@ export class CnssDeclarationService {
           month: m,
           year,
           status: { not: 'DRAFT' },
-          employee: { isSubjectToCnss: true },
+          employee: {
+            isSubjectToCnss: true,
+            contractType: { in: [...CNSS_CONTRACT_TYPES] },
+          },
         },
       });
       const deadline = getDeadline(m, year);
@@ -1107,7 +1126,8 @@ export class CnssDeclarationService {
       },
       month,
       year,
-      options,
+      // Ville du formulaire : celle passée en option, sinon la ville de l'entreprise
+      { ...options, ville: options?.ville || recap.company?.city || undefined },
     );
 
     return {

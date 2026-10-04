@@ -34,9 +34,11 @@ import { PrismaModule } from '../prisma/prisma.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { MailModule } from '../mail/mail.module';
 import { SubscriptionsModule } from '../subscriptions/subscriptions.module';
+// ✅ LOT E — noyau des circuits d'avis (sans dépendance vers ce module : pas de cycle)
+import { ApprovalsCoreModule } from '../approvals/core/approvals-core.module';
 
 @Module({
-  imports: [PrismaModule, SubscriptionsModule, NotificationsModule, MailModule],
+  imports: [PrismaModule, SubscriptionsModule, NotificationsModule, MailModule, ApprovalsCoreModule],
   controllers: [LeavesController],
   providers: [
     LeavesService,

@@ -241,8 +241,9 @@ export class PayrollsController {
   // POST /payrolls/simulate-free — Simulation libre sans compte
   // ─────────────────────────────────────────────────────────────────────────
   @Post('simulate-free')
-  simulateFree(@Body() body: any) {
-    return this.payrollsService.simulateFree(body);
+  simulateFree(@Body() body: any, @Request() req: any) {
+    // userId → charge les taxes configurées de l'entreprise (CAMU, etc.)
+    return this.payrollsService.simulateFree(body, req.user?.userId);
   }
 
   // ─────────────────────────────────────────────────────────────────────────

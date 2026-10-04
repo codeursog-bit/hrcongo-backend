@@ -11,9 +11,11 @@ import { LoansGenericExportService } from './loans-generic-export.service';
 import { PrismaModule } from '../prisma/prisma.module';
 import { SubscriptionsModule } from '../subscriptions/subscriptions.module';
 import { NotificationsModule } from '../notifications/notifications.module';
+// ✅ LOT B — noyau des circuits d'avis (sans dépendance vers ce module : pas de cycle)
+import { ApprovalsCoreModule } from '../approvals/core/approvals-core.module';
 
 @Module({
-  imports: [PrismaModule, SubscriptionsModule, NotificationsModule],
+  imports: [PrismaModule, SubscriptionsModule, NotificationsModule, ApprovalsCoreModule],
   controllers: [LoansController],
   providers: [
     LoansService,

@@ -1,5 +1,7 @@
 // ============================================================================
-// 📄 src/performance/performance.service.ts — CORRIGÉ
+// 📄 src/performance/performance.service.ts — SÉCURISÉ (phase 0)
+// Tous les accès passent par PerformanceAccessService ; la fiche d'évaluation
+// pondérée (cycles) vit dans ReviewSheetService / ReviewCyclesService.
 // ReviewStatus: DRAFT | SUBMITTED | ACKNOWLEDGED  (pas SHARED)
 // Notification: read (pas isRead)
 // companyId: toujours string (garanti non-null)
@@ -15,7 +17,52 @@ import {
 import { PrismaService } from '../prisma/prisma.service';
 import { SubscriptionGuard } from '../subscriptions/guards/subscription.guard';
 import { ReviewStatus } from '@prisma/client';
-import { resolveVerifiedCompanyId } from '../common/resolve-verified-company.util';
+import { PerformanceAccessService } from './performance-access.service';
+import { ReviewSheetService } from './review-sheet.service';
+import { verdictLabel } from './performance-scoring.util';
+import {
+  LIMITS, asArray, asBody, asDate, asNumber, asOptUuid, asRequiredText, asText, asUuid,
+} from './performance-validation.util';
+
+/** Assainit les critères d'une fiche libre : champs connus uniquement, bornés */
+function sanitizeCriteria(raw: unknown) {
+  if (raw === undefined || raw === null) return null;
+  return asArray<any>(raw, 'Critères', 30).map((c0, i) => {
+    const c = asBody(c0);
+    const description = asText(c.description, 'Description', 500);
+    return {
+      id: asRequiredText(c.id ?? `c${i}`, 'Critère', 80),
+      label: asRequiredText(c.label, 'Libellé du critère', 120),
+      ...(description && { description }),
+      weight: asNumber(c.weight ?? 0, 'Poids', 0, 100),
+      score: asNumber(c.score ?? 0, 'Note', 0, 5),
+      comment: asText(c.comment, 'Commentaire', 2000) ?? '',
+    };
+  });
+}
+
+/** JSON libre (objectifs suivants d'une ancienne fiche) : tableau, taille bornée */
+function sanitizeJsonList(raw: unknown, label: string) {
+  if (raw === undefined || raw === null) return undefined;
+  if (!Array.isArray(raw)) throw new BadRequestException(`${label} : liste attendue`);
+  if (raw.length > 30 || JSON.stringify(raw).length > 20000)
+    throw new BadRequestException(`${label} : contenu trop volumineux`);
+  return raw;
+}
+
+/** À quelle évaluation un objectif est rattaché (affiché dans la page Objectifs) */
+const GOAL_LINKS = {
+  evaluatedInReview: { select: { id: true, period: true, status: true } },
+  plannedInReview: { select: { id: true, period: true, status: true } },
+} as const;
+
+const REVIEW_TYPE_RE = /^[A-Za-z0-9_-]{1,40}$/;
+function cleanReviewType(v: unknown): string | undefined {
+  if (v === undefined || v === null || v === '') return undefined;
+  if (typeof v !== 'string' || !REVIEW_TYPE_RE.test(v))
+    throw new BadRequestException("Type d'évaluation invalide");
+  return v;
+}
 
 export const CRITERIA_TEMPLATES: Record<
   string,
@@ -135,6 +182,16 @@ export const CRITERIA_TEMPLATES: Record<
       },
     ],
   },
+  success_factors: {
+    label: 'Facteurs de succès (5 × 20 %)',
+    criteria: [
+      { id: 'ownership', label: 'Ownership & Responsabilité', weight: 20, score: 0, comment: '' },
+      { id: 'qualite_rigueur', label: 'Qualité & Rigueur', weight: 20, score: 0, comment: '' },
+      { id: 'collaboration', label: 'Collaboration', weight: 20, score: 0, comment: '' },
+      { id: 'initiative_resolution', label: 'Initiative & Résolution', weight: 20, score: 0, comment: '' },
+      { id: 'leadership_impact', label: 'Leadership / Impact', weight: 20, score: 0, comment: '' },
+    ],
+  },
   probation: {
     label: "Fin de période d'essai",
     criteria: [
@@ -184,6 +241,8 @@ export class PerformanceService {
   constructor(
     private prisma: PrismaService,
     private subscriptionGuard: SubscriptionGuard,
+    private access: PerformanceAccessService,
+    private sheet: ReviewSheetService,
   ) {}
 
   // ── Helpers ───────────────────────────────────────────────────────────────
@@ -228,16 +287,6 @@ export class PerformanceService {
     return `Annuel ${y}`;
   }
 
-  // companyId garanti non-null
-  private async getUserCtx(userId: string) {
-    const user = await this.prisma.user.findUnique({
-      where: { id: userId },
-      select: { id: true, companyId: true, role: true, email: true },
-    });
-    if (!user?.companyId) throw new ForbiddenException('Accès refusé');
-    return user as typeof user & { companyId: string };
-  }
-
   private reviewInclude() {
     return {
       employee: {
@@ -251,33 +300,6 @@ export class PerformanceService {
       },
       reviewer: { select: { id: true, firstName: true, lastName: true } },
     };
-  }
-
-  private async notifyUser(
-    email: string | null,
-    companyId: string,
-    title: string,
-    message: string,
-  ) {
-    if (!email) return;
-    try {
-      const u = await this.prisma.user.findFirst({
-        where: { email, companyId },
-        select: { id: true },
-      });
-      if (!u) return;
-      await this.prisma.notification.create({
-        data: {
-          userId: u.id,
-          type: 'SYSTEM_ALERT',
-          title,
-          message,
-          read: false,
-        }, // ← read pas isRead
-      });
-    } catch (e) {
-      this.logger.warn('Erreur notification performance', e);
-    }
   }
 
   // ──────────────────────────────────────────────────────────────────────────
@@ -298,338 +320,231 @@ export class PerformanceService {
     return { key, ...tpl };
   }
 
+
   // ──────────────────────────────────────────────────────────────────────────
-  // CREATE REVIEW
+  // CREATE REVIEW (fiche libre, hors cycle — conservé pour compatibilité)
   // ──────────────────────────────────────────────────────────────────────────
 
-  async createReview(data: any, reviewerId: string) {
-    const user = await this.getUserCtx(reviewerId);
+  async createReview(raw: unknown, reviewerId: string) {
+    const data = asBody(raw);
+    const employeeId = asUuid(data.employeeId, 'Employé');
+    const ctx = await this.access.getCtx(reviewerId);
+    this.access.assertCanManage(ctx);
+    const employee = await this.access.assertCanManageEmployee(ctx, employeeId);
+    await this.access.assertFeature(ctx);
 
-    const employee = await this.prisma.employee.findUnique({
-      where: { id: data.employeeId },
-      select: { id: true, companyId: true, firstName: true, lastName: true },
-    });
-    if (!employee) throw new NotFoundException('Employé introuvable');
-    if (employee.companyId !== user.companyId)
-      throw new ForbiddenException('Employé non autorisé');
-
-    await this.subscriptionGuard.checkFeatureAccess(
-      user.companyId,
-      'hasPerformanceReviews',
-    );
-
-    const criteria = data.criteria ?? null;
+    const reviewType = cleanReviewType(data.reviewType);
+    const criteria = sanitizeCriteria(data.criteria);
     const overallScore = criteria ? this.calcScore(criteria) : null;
-    const period = data.period || this.generatePeriod(data.reviewType);
+    const period = asText(data.period, 'Période', 60)?.trim() || this.generatePeriod(reviewType);
+    const manualRating = data.rating ?? data.score;
 
     return this.prisma.performanceReview.create({
       data: {
-        employeeId: data.employeeId,
+        employeeId: employee.id,
         reviewerId,
         period,
-        date: data.date ? new Date(data.date) : new Date(),
-        rating: overallScore ?? data.rating ?? data.score ?? null,
-        feedback: data.feedback ?? data.comments ?? null,
+        date: data.date ? asDate(data.date, 'Date') : new Date(),
+        rating: overallScore ?? (manualRating !== undefined && manualRating !== null ? asNumber(manualRating, 'Note', 0, 5) : null),
+        feedback: asText(data.feedback ?? data.comments, 'Commentaire', LIMITS.LONG) ?? null,
         status: ReviewStatus.DRAFT,
-        // Champs v2
-        ...(data.reviewType != null && { reviewType: data.reviewType }),
+        ...(reviewType != null && { reviewType }),
         ...(criteria != null && { criteria }),
         ...(overallScore != null && { overallScore }),
-        ...(data.strengths != null && { strengths: data.strengths }),
-        ...(data.improvements != null && { improvements: data.improvements }),
-        ...(data.nextGoals != null && { nextGoals: data.nextGoals }),
+        ...(data.strengths != null && { strengths: asText(data.strengths, 'Points forts', LIMITS.LONG) }),
+        ...(data.improvements != null && { improvements: asText(data.improvements, "Axes d'amélioration", LIMITS.LONG) }),
+        ...(data.nextGoals != null && { nextGoals: sanitizeJsonList(data.nextGoals, 'Objectifs suivants') as any }),
       },
       include: this.reviewInclude(),
     });
   }
 
   // ──────────────────────────────────────────────────────────────────────────
-  // UPDATE REVIEW
+  // UPDATE REVIEW (fiche libre) — les fiches de cycle passent par /sheet
   // ──────────────────────────────────────────────────────────────────────────
 
-  async updateReview(reviewId: string, data: any, userId: string) {
-    const user = await this.getUserCtx(userId);
+  async updateReview(reviewId: string, raw: unknown, userId: string) {
+    const data = asBody(raw);
+    const ctx = await this.access.getCtx(userId);
     const review = await this.prisma.performanceReview.findUnique({
       where: { id: reviewId },
-      include: { employee: { select: { companyId: true } } },
+      include: {
+        employee: {
+          select: {
+            id: true,
+            companyId: true,
+            department: { select: { managerId: true } },
+          },
+        },
+      },
     });
-    if (!review) throw new NotFoundException('Évaluation introuvable');
-    if (review.employee.companyId !== user.companyId)
+    if (!review || review.employee.companyId !== ctx.companyId)
+      throw new NotFoundException('Évaluation introuvable');
+    if (!this.access.canWriteReview(ctx, review as any))
       throw new ForbiddenException('Accès refusé');
     if (review.status !== ReviewStatus.DRAFT)
       throw new BadRequestException('Seuls les brouillons sont modifiables');
+    if (review.cycleId)
+      throw new BadRequestException(
+        "Cette évaluation fait partie d'un cycle : modifiez-la via la fiche d'évaluation",
+      );
 
-    const criteria = data.criteria ?? (review as any).criteria ?? null;
+    const newCriteria = sanitizeCriteria(data.criteria);
+    const criteria = newCriteria ?? (review as any).criteria ?? null;
     const overallScore = criteria ? this.calcScore(criteria) : null;
+    const reviewType = cleanReviewType(data.reviewType);
 
-    return this.prisma.performanceReview.update({
-      where: { id: reviewId },
+    // 🔒 Écriture conditionnelle : seulement tant que la fiche est un brouillon
+    const res = await this.prisma.performanceReview.updateMany({
+      where: { id: reviewId, status: ReviewStatus.DRAFT },
       data: {
-        ...(data.period != null && { period: data.period }),
-        ...(data.date != null && { date: new Date(data.date) }),
-        ...(criteria != null && {
-          criteria,
-          overallScore,
-          rating: overallScore,
-        }),
-        ...(data.feedback !== undefined && { feedback: data.feedback }),
-        ...(data.strengths !== undefined && { strengths: data.strengths }),
-        ...(data.improvements !== undefined && {
-          improvements: data.improvements,
-        }),
-        ...(data.nextGoals !== undefined && { nextGoals: data.nextGoals }),
-        ...(data.reviewType != null && { reviewType: data.reviewType }),
+        ...(data.period != null && { period: asRequiredText(data.period, 'Période', 60) }),
+        ...(data.date != null && { date: asDate(data.date, 'Date') }),
+        ...(criteria != null && { criteria, overallScore, rating: overallScore }),
+        ...(data.feedback !== undefined && { feedback: asText(data.feedback, 'Commentaire', LIMITS.LONG) }),
+        ...(data.strengths !== undefined && { strengths: asText(data.strengths, 'Points forts', LIMITS.LONG) }),
+        ...(data.improvements !== undefined && { improvements: asText(data.improvements, "Axes d'amélioration", LIMITS.LONG) }),
+        ...(data.nextGoals !== undefined && { nextGoals: sanitizeJsonList(data.nextGoals, 'Objectifs suivants') as any }),
+        ...(reviewType != null && { reviewType }),
       },
+    });
+    if (res.count !== 1) throw new BadRequestException('Seuls les brouillons sont modifiables');
+    return this.prisma.performanceReview.findUnique({
+      where: { id: reviewId },
       include: this.reviewInclude(),
     });
   }
 
   // ──────────────────────────────────────────────────────────────────────────
-  // SUBMIT (DRAFT → SUBMITTED)
+  // SUBMIT / ACKNOWLEDGE — délégués à la fiche (contrôles + notifications)
   // ──────────────────────────────────────────────────────────────────────────
 
-  async submitReview(reviewId: string, userId: string) {
-    const user = await this.getUserCtx(userId);
-    const review = await this.prisma.performanceReview.findUnique({
-      where: { id: reviewId },
-      include: {
-        employee: {
-          select: {
-            companyId: true,
-            email: true,
-            firstName: true,
-            lastName: true,
-          },
-        },
-        reviewer: { select: { firstName: true, lastName: true } },
-      },
-    });
-    if (!review) throw new NotFoundException('Évaluation introuvable');
-    if (review.employee.companyId !== user.companyId)
-      throw new ForbiddenException('Accès refusé');
-    if (review.status !== ReviewStatus.DRAFT)
-      throw new BadRequestException('Évaluation déjà soumise');
+  submitReview(reviewId: string, userId: string, companyId?: string) {
+    return this.sheet.submit(reviewId, userId, companyId);
+  }
 
-    const updated = await this.prisma.performanceReview.update({
-      where: { id: reviewId },
-      data: { status: ReviewStatus.SUBMITTED, submittedAt: new Date() } as any,
-      include: this.reviewInclude(),
-    });
-
-    await this.notifyUser(
-      review.employee.email,
-      user.companyId,
-      '📋 Votre évaluation est disponible',
-      `Votre évaluation "${review.period}" a été finalisée par ${review.reviewer.firstName} ${review.reviewer.lastName}.`,
-    );
-
-    return updated;
+  acknowledgeReview(
+    reviewId: string,
+    dto: { comment?: string },
+    userId: string,
+    companyId?: string,
+  ) {
+    return this.sheet.acknowledge(reviewId, dto ?? {}, userId, companyId);
   }
 
   // ──────────────────────────────────────────────────────────────────────────
-  // ACKNOWLEDGE (SUBMITTED → ACKNOWLEDGED)
+  // LECTURE
   // ──────────────────────────────────────────────────────────────────────────
 
-  async acknowledgeReview(reviewId: string, userId: string) {
-    const user = await this.getUserCtx(userId);
-    const review = await this.prisma.performanceReview.findUnique({
-      where: { id: reviewId },
-      include: {
-        employee: {
-          select: {
-            companyId: true,
-            email: true,
-            firstName: true,
-            lastName: true,
-          },
-        },
-      },
-    });
-    if (!review) throw new NotFoundException('Évaluation introuvable');
-    if (review.employee.companyId !== user.companyId)
-      throw new ForbiddenException('Accès refusé');
-    if (review.status !== ReviewStatus.SUBMITTED)
-      throw new BadRequestException('Évaluation non en attente de réception');
-
-    const updated = await this.prisma.performanceReview.update({
-      where: { id: reviewId },
-      data: {
-        status: ReviewStatus.ACKNOWLEDGED,
-        acknowledgedAt: new Date(),
-        acknowledgedBy: userId,
-      } as any,
-      include: this.reviewInclude(),
-    });
-
-    try {
-      await this.prisma.notification.create({
-        data: {
-          userId: review.reviewerId,
-          type: 'SYSTEM_ALERT',
-          title: '✅ Évaluation réceptionnée',
-          message: `${review.employee.firstName} ${review.employee.lastName} a accusé réception de son évaluation "${review.period}".`,
-          read: false, // ← read pas isRead
-        },
-      });
-    } catch {}
-
-    return updated;
+  private withLabel<T extends { rating: any; cycleId?: string | null }>(r: T) {
+    const score = r.rating !== null && r.rating !== undefined ? Number(r.rating) : null;
+    return {
+      ...r,
+      scoreLabel:
+        score === null
+          ? null
+          : r.cycleId
+            ? verdictLabel(score)
+            : PerformanceService.scoreLabel(score),
+    };
   }
-
-  // ──────────────────────────────────────────────────────────────────────────
-  // FIND ALL
-  // ──────────────────────────────────────────────────────────────────────────
 
   async findAllReviews(userId: string, overrideCompanyId?: string) {
-    const user = await this.prisma.user.findUnique({
-      where: { id: userId },
-      select: { id: true, companyId: true, role: true, email: true, manageMultipleCompanies: true },
-    });
-    if (!user) return [];
-    const isCabinet =
-      user.role === 'CABINET_ADMIN' || user.role === 'CABINET_GESTIONNAIRE';
-    // 🔒 CORRECTIF SÉCURITÉ (audit) : overrideCompanyId était accepté tel
-    // quel dès que isCabinet était vrai, jamais vérifié contre
-    // userCompany/cabinetCompany. Rebranché sur la fonction centrale.
-    const companyId = await resolveVerifiedCompanyId(
-      this.prisma,
-      user,
-      overrideCompanyId,
-    );
-    if (!companyId) return [];
+    let ctx;
+    try {
+      ctx = await this.access.getCtx(userId, overrideCompanyId);
+    } catch {
+      return [];
+    }
 
-    // EMPLOYEE → uniquement ses évaluations soumises/ackd
-    if (user?.role === 'EMPLOYEE') {
-      const emp = await this.prisma.employee.findFirst({
-        where: { email: user.email, companyId },
-        select: { id: true },
-      });
-      if (!emp) return [];
-      return this.prisma.performanceReview.findMany({
+    // EMPLOYEE (ou tout rôle sans mission de supervision) → ses évaluations non-brouillon
+    if (!ctx.isHR && !ctx.isManager) {
+      if (!ctx.employeeId) return [];
+      const mine = await this.prisma.performanceReview.findMany({
         where: {
-          employeeId: emp.id,
+          employeeId: ctx.employeeId,
           status: { in: [ReviewStatus.SUBMITTED, ReviewStatus.ACKNOWLEDGED] },
         },
         include: this.reviewInclude(),
         orderBy: { createdAt: 'desc' },
       });
+      return mine.map((r) => this.withLabel(r));
     }
 
-    const whereClause: any = { companyId };
-    if (!isCabinet && user!.role === 'MANAGER') {
-      const mgr = await this.prisma.employee.findFirst({
-        where: { email: user!.email, companyId },
-      });
-      if (mgr?.departmentId) whereClause.departmentId = mgr.departmentId;
-      else return [];
-    }
-
-    return this.prisma.performanceReview.findMany({
-      where: { employee: whereClause },
+    const employee = await this.access.superviseWhere(ctx);
+    const reviews = await this.prisma.performanceReview.findMany({
+      where: { employee },
       include: this.reviewInclude(),
       orderBy: { createdAt: 'desc' },
     });
+    return reviews.map((r) => this.withLabel(r));
   }
 
-  // ──────────────────────────────────────────────────────────────────────────
-  // FIND ONE
-  // ──────────────────────────────────────────────────────────────────────────
-
   async findOneReview(reviewId: string, userId: string) {
-    const user = await this.getUserCtx(userId);
+    const ctx = await this.access.getCtx(userId);
     const review = await this.prisma.performanceReview.findUnique({
       where: { id: reviewId },
       include: this.reviewInclude(),
     });
     if (!review) throw new NotFoundException('Évaluation introuvable');
-
-    const emp = await this.prisma.employee.findUnique({
-      where: { id: review.employeeId },
-      select: { companyId: true, email: true },
-    });
-    if (emp?.companyId !== user.companyId)
-      throw new ForbiddenException('Accès refusé');
-    if (user.role === 'EMPLOYEE') {
-      if (emp?.email !== user.email)
-        throw new ForbiddenException('Accès refusé');
-      if (review.status === ReviewStatus.DRAFT)
-        throw new ForbiddenException('Évaluation non disponible');
-    }
-
-    return {
-      ...review,
-      scoreLabel: review.rating
-        ? PerformanceService.scoreLabel(Number(review.rating))
-        : null,
-    };
+    await this.access.assertCanViewEmployee(ctx, review.employeeId);
+    // L'employé ne voit jamais un brouillon (même s'il est "self")
+    if (
+      this.access.isSelf(ctx, review.employeeId) &&
+      review.status === ReviewStatus.DRAFT
+    )
+      throw new ForbiddenException('Évaluation non disponible');
+    return this.withLabel(review);
   }
 
-  // ──────────────────────────────────────────────────────────────────────────
-  // HISTORIQUE EMPLOYÉ
-  // ──────────────────────────────────────────────────────────────────────────
-
   async findEmployeeHistory(employeeId: string, userId: string) {
-    const user = await this.getUserCtx(userId);
-    const employee = await this.prisma.employee.findUnique({
-      where: { id: employeeId },
-      select: { companyId: true, email: true },
-    });
-    if (!employee || employee.companyId !== user.companyId)
-      throw new NotFoundException('Employé introuvable');
+    const ctx = await this.access.getCtx(userId);
+    await this.access.assertCanViewEmployee(ctx, employeeId);
 
     const where: any = { employeeId };
-    if (user.role === 'EMPLOYEE') {
-      if (employee.email !== user.email)
-        throw new ForbiddenException('Accès refusé');
+    if (this.access.isSelf(ctx, employeeId)) {
       where.status = {
         in: [ReviewStatus.SUBMITTED, ReviewStatus.ACKNOWLEDGED],
       };
     }
-
     const reviews = await this.prisma.performanceReview.findMany({
       where,
       include: this.reviewInclude(),
       orderBy: { date: 'desc' },
     });
-    return reviews.map((r) => ({
-      ...r,
-      scoreLabel: r.rating
-        ? PerformanceService.scoreLabel(Number(r.rating))
-        : null,
-    }));
+    return reviews.map((r) => this.withLabel(r));
   }
 
   // ──────────────────────────────────────────────────────────────────────────
-  // STATS
+  // STATS (RH / managers uniquement, restreintes au périmètre)
   // ──────────────────────────────────────────────────────────────────────────
 
   async getStats(userId: string) {
-    const user = await this.getUserCtx(userId);
-    const companyId = user.companyId;
+    const ctx = await this.access.getCtx(userId);
+    this.access.assertCanManage(ctx);
+    const employee = await this.access.superviseWhere(ctx);
 
     const [total, drafts, submitted, acknowledged] = await Promise.all([
+      this.prisma.performanceReview.count({ where: { employee } }),
       this.prisma.performanceReview.count({
-        where: { employee: { companyId } },
+        where: { employee, status: ReviewStatus.DRAFT },
       }),
       this.prisma.performanceReview.count({
-        where: { employee: { companyId }, status: ReviewStatus.DRAFT },
+        where: { employee, status: ReviewStatus.SUBMITTED },
       }),
       this.prisma.performanceReview.count({
-        where: { employee: { companyId }, status: ReviewStatus.SUBMITTED },
-      }),
-      this.prisma.performanceReview.count({
-        where: { employee: { companyId }, status: ReviewStatus.ACKNOWLEDGED },
+        where: { employee, status: ReviewStatus.ACKNOWLEDGED },
       }),
     ]);
 
     const avgResult = await this.prisma.performanceReview.aggregate({
-      where: { employee: { companyId }, rating: { not: null } },
+      where: { employee, rating: { not: null } },
       _avg: { rating: true },
     });
 
     const topEmployees = await this.prisma.performanceReview.groupBy({
       by: ['employeeId'],
-      where: { employee: { companyId }, rating: { not: null } },
+      where: { employee, rating: { not: null } },
       _avg: { rating: true },
       orderBy: { _avg: { rating: 'desc' } },
       take: 5,
@@ -658,13 +573,12 @@ export class PerformanceService {
 
     const thisYearCount = await this.prisma.performanceReview.count({
       where: {
-        employee: { companyId },
+        employee,
         createdAt: { gte: new Date(new Date().getFullYear(), 0, 1) },
       },
     });
 
     const avg = avgResult._avg?.rating;
-
     return {
       total,
       drafts,
@@ -678,99 +592,167 @@ export class PerformanceService {
   }
 
   // ──────────────────────────────────────────────────────────────────────────
-  // GOALS — conservés intégralement
+  // GOALS — désormais isolés par entreprise, par rôle et par périmètre
   // ──────────────────────────────────────────────────────────────────────────
 
-  async createGoal(data: any) {
-    const employee = await this.prisma.employee.findUnique({
-      where: { id: data.employeeId },
-      select: { companyId: true },
-    });
-    if (!employee) throw new NotFoundException('Employé introuvable');
-    await this.subscriptionGuard.checkFeatureAccess(
-      employee.companyId,
-      'hasPerformanceReviews',
+  async createGoal(raw: unknown, userId: string) {
+    const data = asBody(raw);
+    const ctx = await this.access.getCtx(userId);
+    this.access.assertCanManage(ctx);
+    const employee = await this.access.assertCanManageEmployee(
+      ctx,
+      asUuid(data.employeeId, 'Employé'),
     );
+    await this.access.assertFeature(ctx);
+
+    const title = asRequiredText(data.title, 'Titre', LIMITS.TITLE);
+    const start = asDate(data.startDate, 'Date de début');
+    const end = asDate(data.endDate, 'Date de fin');
+    if (end < start) throw new BadRequestException('Dates invalides');
+    const weight = data.weight !== undefined && data.weight !== null ? asNumber(data.weight, 'Poids', 0, 100) : null;
+
+    const keyResults = asArray<any>(data.keyResults, 'Résultats clés', 20).map((k0) => {
+      const k = asBody(k0);
+      return {
+        title: asRequiredText(k.title, 'Résultat clé', LIMITS.TITLE),
+        targetValue: asNumber(k.target ?? k.targetValue ?? 0, 'Cible', 0, 1e9),
+        currentValue: asNumber(k.current ?? k.currentValue ?? 0, 'Valeur actuelle', 0, 1e9),
+        unit: asText(k.unit, 'Unité', 30) || undefined,
+      };
+    });
 
     return this.prisma.goal.create({
       data: {
-        title: data.title,
-        description: data.description,
-        employeeId: data.employeeId,
-        startDate: new Date(data.startDate),
-        endDate: new Date(data.endDate),
+        title,
+        description: asText(data.description, 'Description', LIMITS.COMMENT),
+        employeeId: employee.id,
+        startDate: start,
+        endDate: end,
         status: 'NOT_STARTED',
         progress: 0,
-        keyResults: {
-          create: (data.keyResults ?? []).map((kr: any) => ({
-            title: kr.title,
-            targetValue: kr.target || kr.targetValue,
-            currentValue: kr.current || kr.currentValue || 0,
-            unit: kr.unit,
-          })),
-        },
+        weight,
+        kpi: asText(data.kpi, 'KPI', LIMITS.KPI) ?? null,
+        support: asText(data.support, 'Support', 255) ?? null,
+        keyResults: { create: keyResults },
       },
       include: { keyResults: true },
     });
   }
 
-  async findAllGoals(employeeId: string) {
-    return this.prisma.goal.findMany({
+  /** Retire les champs réservés au manager quand c'est l'employé qui lit */
+  private stripManagerFields<T extends Record<string, any>>(g: T) {
+    const { score, managerComment, ...rest } = g;
+    return rest;
+  }
+
+  /** Objectifs d'un employé : lui-même, son supérieur ou la RH (les notes restent côté fiche) */
+  async findAllGoals(employeeId: string, userId: string) {
+    const ctx = await this.access.getCtx(userId);
+    await this.access.assertCanViewEmployee(ctx, employeeId);
+    const goals = await this.prisma.goal.findMany({
       where: { employeeId },
-      include: { keyResults: true },
+      include: { keyResults: true, ...GOAL_LINKS },
+      orderBy: { endDate: 'asc' },
     });
+    // L'employé ne reçoit jamais note/commentaire du manager via cette route
+    return this.access.isSelf(ctx, employeeId)
+      ? goals.map((g) => this.stripManagerFields(g))
+      : goals;
   }
 
   async findAllCompanyGoals(userId: string, overrideCompanyId?: string) {
-    const user = await this.prisma.user.findUnique({
-      where: { id: userId },
-      select: { id: true, companyId: true, role: true, email: true, manageMultipleCompanies: true },
-    });
-    if (!user) return [];
-    const isCabinet =
-      user.role === 'CABINET_ADMIN' || user.role === 'CABINET_GESTIONNAIRE';
-    // 🔒 CORRECTIF SÉCURITÉ (audit) : même correctif que findAllReviews.
-    const companyId = await resolveVerifiedCompanyId(
-      this.prisma,
-      user,
-      overrideCompanyId,
-    );
-    if (!companyId) return [];
-
-    const employeeWhere: any = { companyId };
-    if (!isCabinet && user?.role === 'MANAGER') {
-      const mgr = await this.prisma.employee.findFirst({
-        where: { email: user.email, companyId },
-      });
-      if (!mgr?.departmentId) return [];
-      employeeWhere.departmentId = mgr.departmentId;
+    let ctx;
+    try {
+      ctx = await this.access.getCtx(userId, overrideCompanyId);
+    } catch {
+      return [];
     }
+    const supervising = ctx.isHR || ctx.isManager;
+    // Un simple employé ne voit que ses propres objectifs
+    const employee = supervising
+      ? await this.access.superviseWhere(ctx)
+      : { companyId: ctx.companyId, id: ctx.employeeId ?? 'none' };
 
-    return this.prisma.goal.findMany({
-      where: { employee: employeeWhere },
+    const goals = await this.prisma.goal.findMany({
+      where: { employee },
       include: {
         keyResults: true,
+        ...GOAL_LINKS,
         employee: {
           select: { firstName: true, lastName: true, photoUrl: true },
         },
       },
+      orderBy: { endDate: 'asc' },
+      take: 500,
     });
+    return supervising ? goals : goals.map((g) => this.stripManagerFields(g));
   }
 
-  async updateGoalProgress(goalId: string, progress: number) {
+  private async loadGoalForUpdate(goalId: string, userId: string) {
+    const ctx = await this.access.getCtx(userId);
+    const goal = await this.prisma.goal.findUnique({
+      where: { id: goalId },
+      select: { id: true, employeeId: true },
+    });
+    if (!goal) throw new NotFoundException('Objectif introuvable');
+    // L'employé met à jour SA progression ; le supérieur / la RH aussi
+    await this.access.assertCanViewEmployee(ctx, goal.employeeId);
+    return goal;
+  }
+
+  async updateGoalProgress(goalId: string, progress: number, userId: string) {
+    await this.loadGoalForUpdate(goalId, userId);
+    const p = Number(progress);
+    if (!Number.isInteger(p) || p < 0 || p > 100)
+      throw new BadRequestException('Progression : entier de 0 à 100');
     return this.prisma.goal.update({
       where: { id: goalId },
       data: {
-        progress,
-        status: progress === 100 ? 'COMPLETED' : 'IN_PROGRESS',
+        progress: p,
+        status: p === 100 ? 'COMPLETED' : p > 0 ? 'IN_PROGRESS' : 'NOT_STARTED',
       },
     });
   }
 
-  async updateKeyResultValue(keyResultId: string, currentValue: number) {
-    return this.prisma.keyResult.update({
+  async updateKeyResultValue(
+    keyResultId: string,
+    currentValue: number,
+    userId: string,
+  ) {
+    const kr = await this.prisma.keyResult.findUnique({
       where: { id: keyResultId },
-      data: { currentValue },
+      select: { id: true, goalId: true },
+    });
+    if (!kr) throw new NotFoundException('Résultat clé introuvable');
+    await this.loadGoalForUpdate(kr.goalId, userId);
+    const v = Number(currentValue);
+    if (!Number.isFinite(v) || v < 0)
+      throw new BadRequestException('Valeur invalide');
+    // Mise à jour + recalcul de la progression de l'objectif (moyenne des résultats clés,
+    // chacun plafonné à 100 %) dans la même transaction.
+    return this.prisma.$transaction(async (tx) => {
+      const updated = await tx.keyResult.update({
+        where: { id: keyResultId },
+        data: { currentValue: v },
+      });
+      const all = await tx.keyResult.findMany({
+        where: { goalId: kr.goalId },
+        select: { targetValue: true, currentValue: true },
+      });
+      const pcts = all
+        .filter((k) => Number(k.targetValue) > 0)
+        .map((k) => Math.min(100, (Number(k.currentValue) / Number(k.targetValue)) * 100));
+      if (pcts.length) {
+        const progress = Math.round(pcts.reduce((a, b) => a + b, 0) / pcts.length);
+        await tx.goal.update({
+          where: { id: kr.goalId },
+          data: {
+            progress,
+            status: progress >= 100 ? 'COMPLETED' : progress > 0 ? 'IN_PROGRESS' : 'NOT_STARTED',
+          },
+        });
+      }
+      return updated;
     });
   }
 }

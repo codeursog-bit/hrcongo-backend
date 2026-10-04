@@ -60,6 +60,37 @@ export class UsersService {
         'Vous devez appartenir à une entreprise pour inviter.',
       );
     }
+
+    // 🔒 CORRECTIF SÉCURITÉ : aucune vérification de rôle n'existait ici — tout
+    // utilisateur connecté (même EMPLOYEE) pouvait créer un compte ADMIN dans
+    // son entreprise via POST /users/invite.
+    //   - ADMIN / SUPER_ADMIN / CABINET_ADMIN : peuvent inviter tous les rôles
+    //     proposés (comportement historique inchangé pour eux).
+    //   - HR_MANAGER / CABINET_GESTIONNAIRE : uniquement EMPLOYEE et MANAGER
+    //     (le formulaire de création d'employé invite un EMPLOYEE — conservé).
+    //   - Tout autre rôle : refusé.
+    const FULL_INVITERS = ['ADMIN', 'SUPER_ADMIN', 'CABINET_ADMIN'];
+    const LIMITED_INVITERS = ['HR_MANAGER', 'CABINET_GESTIONNAIRE'];
+    const LIMITED_TARGET_ROLES = ['EMPLOYEE', 'MANAGER'];
+
+    const inviterRole = admin.role as string;
+    if (
+      !FULL_INVITERS.includes(inviterRole) &&
+      !LIMITED_INVITERS.includes(inviterRole)
+    ) {
+      throw new ForbiddenException(
+        "Vous n'avez pas les droits pour inviter un utilisateur.",
+      );
+    }
+    if (
+      LIMITED_INVITERS.includes(inviterRole) &&
+      !LIMITED_TARGET_ROLES.includes(inviteDto.role)
+    ) {
+      throw new ForbiddenException(
+        'Vous ne pouvez inviter que des employés ou des managers.',
+      );
+    }
+
     // 🆕 Ajouter après vérification admin
     await this.subscriptionGuard.checkLimit(admin.companyId, 'maxUsers');
 
