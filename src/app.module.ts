@@ -60,6 +60,7 @@ import { BulletinTemplateModule } from './bulletin-template/bulletin-template.mo
 import { AbsenceRequestsModule } from './absence-requests/absence-requests.module';
 import { CheckinDevicesModule } from './checkin-devices/checkin-devices.module';
 import { DisplayScreensModule } from './display-screens/display-screens.module';
+import { ApprovalsModule } from './approvals/approvals.module';
 
 import { BlogModule } from './blog/blog.module';
 import { ContactModule } from './contact/contact.module';
@@ -156,6 +157,7 @@ import { PortfolioModule } from './portfolio/portfolio.module';
     AbsenceTrackingModule,
     CheckinDevicesModule,
     DisplayScreensModule, // 🆕 pointage par scan QR dynamique + code secret
+    ApprovalsModule,
   ],
   controllers: [AppController],
   providers: [
