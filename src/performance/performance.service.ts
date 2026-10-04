@@ -41,15 +41,6 @@ function sanitizeCriteria(raw: unknown) {
   });
 }
 
-/** JSON libre (objectifs suivants d'une ancienne fiche) : tableau, taille bornée */
-function sanitizeJsonList(raw: unknown, label: string) {
-  if (raw === undefined || raw === null) return undefined;
-  if (!Array.isArray(raw)) throw new BadRequestException(`${label} : liste attendue`);
-  if (raw.length > 30 || JSON.stringify(raw).length > 20000)
-    throw new BadRequestException(`${label} : contenu trop volumineux`);
-  return raw;
-}
-
 /** À quelle évaluation un objectif est rattaché (affiché dans la page Objectifs) */
 const GOAL_LINKS = {
   evaluatedInReview: { select: { id: true, period: true, status: true } },
@@ -353,7 +344,7 @@ export class PerformanceService {
         ...(overallScore != null && { overallScore }),
         ...(data.strengths != null && { strengths: asText(data.strengths, 'Points forts', LIMITS.LONG) }),
         ...(data.improvements != null && { improvements: asText(data.improvements, "Axes d'amélioration", LIMITS.LONG) }),
-        ...(data.nextGoals != null && { nextGoals: sanitizeJsonList(data.nextGoals, 'Objectifs suivants') as any }),
+        ...(data.nextGoals != null && { nextGoals: asText(data.nextGoals, 'Objectifs suivants', LIMITS.LONG) }),
       },
       include: this.reviewInclude(),
     });
@@ -404,7 +395,7 @@ export class PerformanceService {
         ...(data.feedback !== undefined && { feedback: asText(data.feedback, 'Commentaire', LIMITS.LONG) }),
         ...(data.strengths !== undefined && { strengths: asText(data.strengths, 'Points forts', LIMITS.LONG) }),
         ...(data.improvements !== undefined && { improvements: asText(data.improvements, "Axes d'amélioration", LIMITS.LONG) }),
-        ...(data.nextGoals !== undefined && { nextGoals: sanitizeJsonList(data.nextGoals, 'Objectifs suivants') as any }),
+        ...(data.nextGoals !== undefined && { nextGoals: asText(data.nextGoals, 'Objectifs suivants', LIMITS.LONG) }),
         ...(reviewType != null && { reviewType }),
       },
     });
