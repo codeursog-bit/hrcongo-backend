@@ -33,7 +33,6 @@ export interface CreateCycleDto {
   startDate: string;
   endDate: string;
   objectivesWeight?: number;
-  selfAssessmentEnabled?: boolean;
   templateId?: string | null;
 }
 
@@ -253,7 +252,7 @@ export class ReviewCyclesService {
         startDate: start,
         endDate: end,
         objectivesWeight,
-        selfAssessmentEnabled: dto.selfAssessmentEnabled === true,
+        selfAssessmentEnabled: false, // l'employé ne se note jamais (colonne conservée, jamais activée)
         templateId,
         createdById: ctx.userId,
       },
@@ -293,7 +292,6 @@ export class ReviewCyclesService {
         status: true,
         overallScore: true,
         verdict: true,
-        selfSubmittedAt: true,
         submittedAt: true,
         acknowledgedAt: true,
         employee: {
@@ -318,7 +316,6 @@ export class ReviewCyclesService {
       progress: {
         total: reviews.length,
         draft: count((r) => r.status === 'DRAFT'),
-        selfAssessed: count((r) => !!r.selfSubmittedAt),
         submitted: count((r) => r.status === 'SUBMITTED'),
         acknowledged: count((r) => r.status === 'ACKNOWLEDGED'),
       },
@@ -339,6 +336,52 @@ export class ReviewCyclesService {
       where: { id },
       data: { status: 'CLOSED', closedAt: new Date() },
     });
+  }
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // SUPPRESSION D'UN CYCLE (RH uniquement)
+  //  • supprime aussi ses évaluations en brouillon ;
+  //  • s'il contient des évaluations déjà transmises, il faut le demander explicitement
+  //    (withReviews) — elles sont alors supprimées aussi ;
+  //  • les objectifs rattachés redeviennent « libres » ; les niveaux de compétence issus
+  //    de ces évaluations sont retirés.
+  // ──────────────────────────────────────────────────────────────────────────
+  async deleteCycle(id: string, withReviews: boolean, userId: string, companyId?: string) {
+    const ctx = await this.access.getCtx(userId, companyId);
+    this.access.assertHR(ctx);
+    const cycle = await this.prisma.reviewCycle.findFirst({
+      where: { id, companyId: ctx.companyId },
+      select: { id: true, name: true },
+    });
+    if (!cycle) throw new NotFoundException('Cycle introuvable');
+
+    const transmitted = await this.prisma.performanceReview.count({
+      where: { cycleId: id, status: { not: 'DRAFT' } },
+    });
+    if (transmitted > 0 && !withReviews)
+      throw new BadRequestException(
+        `Ce cycle contient ${transmitted} évaluation(s) déjà transmise(s) aux employés. Confirmez la suppression complète pour les supprimer aussi.`,
+      );
+
+    const deleted = await this.prisma.$transaction(async (tx) => {
+      const reviews = await tx.performanceReview.findMany({
+        where: { cycleId: id },
+        select: { id: true },
+      });
+      const ids = reviews.map((r: any) => r.id);
+      if (ids.length) {
+        await tx.competencyAssessment.deleteMany({ where: { reviewId: { in: ids } } });
+        await tx.performanceReview.deleteMany({ where: { id: { in: ids }, cycleId: id } });
+      }
+      const gone = await tx.reviewCycle.deleteMany({ where: { id, companyId: ctx.companyId } });
+      if (gone.count !== 1) throw new NotFoundException('Cycle introuvable');
+      return ids.length;
+    });
+
+    this.logger.warn(
+      `Cycle supprimé : id=${id} nom="${cycle.name}" évaluations=${deleted} (dont transmises=${transmitted}) par=${ctx.userId} entreprise=${ctx.companyId}`,
+    );
+    return { success: true, deletedReviews: deleted };
   }
 
   // ──────────────────────────────────────────────────────────────────────────
@@ -447,7 +490,6 @@ export class ReviewCyclesService {
     let standaloneGoals = 0;
     const withoutGoals: string[] = [];
     const reviewerNotifs = new Map<string, number>();
-    const employeeNotifs: string[] = [];
 
     for (const emp of employees) {
       if (done.has(emp.id)) continue;
@@ -573,7 +615,6 @@ export class ReviewCyclesService {
 
       created++;
       reviewerNotifs.set(reviewerId, (reviewerNotifs.get(reviewerId) ?? 0) + 1);
-      if (cycle.selfAssessmentEnabled && empUser) employeeNotifs.push(empUser.id);
     }
 
     await this.prisma.reviewCycle.update({
@@ -590,14 +631,6 @@ export class ReviewCyclesService {
           title: `📋 Évaluations ${cycle.name}`,
           message: `${n} évaluation(s) à rédiger pour le cycle ${cycle.name}.`,
           link: '/performance',
-        })),
-        ...employeeNotifs.map((uid) => ({
-          userId: uid,
-          type: 'SYSTEM_ALERT' as any,
-          title: `📝 Auto-évaluation ${cycle.name}`,
-          message:
-            "Vous pouvez remplir votre auto-évaluation avant l'entretien avec votre responsable.",
-          link: '/performance/mon-espace',
         })),
       ];
       if (rows.length)

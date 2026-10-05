@@ -123,30 +123,6 @@ export function sanitizeSheetDto(raw: unknown) {
   };
 }
 
-function sanitizeSelfDto(raw: unknown) {
-  const b = asBody(raw);
-  return {
-    goals: asArray(b.goals, 'Objectifs', LIMITS.LIST).map((g) => {
-      const o = asBody(g);
-      return {
-        goalId: asUuid(o.goalId, 'Objectif'),
-        score: cleanScore(o.score, 'Auto-évaluation'),
-        comment: asText(o.comment, 'Commentaire', LIMITS.COMMENT),
-      };
-    }),
-    criteria: asArray(b.criteria, 'Critères', LIMITS.LIST).map((c) => {
-      const o = asBody(c);
-      return {
-        id: asRequiredText(o.id, 'Critère', 80),
-        score: cleanScore(o.score, 'Auto-évaluation'),
-        comment: asText(o.comment, 'Commentaire', LIMITS.COMMENT),
-      };
-    }),
-    comment: asText(b.comment, 'Message', LIMITS.COMMENT),
-    submit: b.submit === true,
-  };
-}
-
 @Injectable()
 export class ReviewSheetService {
   private readonly logger = new Logger(ReviewSheetService.name);
@@ -217,7 +193,9 @@ export class ReviewSheetService {
     const isDraft = review.status === 'DRAFT';
     const cycle = review.cycle;
 
-    if (mode === 'self' && isDraft && !cycle?.selfAssessmentEnabled)
+    // 🔒 L'employé n'accède à son évaluation qu'une fois transmise : il ne note jamais
+    // (ni lui-même, ni avant son responsable).
+    if (mode === 'self' && isDraft)
       throw new ForbiddenException('Évaluation non disponible');
 
     // L'employé ne voit RIEN du travail du manager tant que la fiche est en brouillon
@@ -250,9 +228,6 @@ export class ReviewSheetService {
             validatedAt: g.validatedAt,
           };
 
-    const selfVisible =
-      mode === 'self' || (mode === 'writer' && !!review.selfSubmittedAt);
-
     const canEdit =
       mode === 'writer' && isDraft && cycle?.status !== 'CLOSED';
 
@@ -278,7 +253,6 @@ export class ReviewSheetService {
               name: cycle.name,
               status: cycle.status,
               objectivesWeight: cycle.objectivesWeight,
-              selfAssessmentEnabled: cycle.selfAssessmentEnabled,
             }
           : null,
         objectivesScore: hide ? null : this.n(review.objectivesScore),
@@ -290,27 +264,22 @@ export class ReviewSheetService {
         feedback: hide ? null : review.feedback,
         employeeComment: review.employeeComment,
         employeeCommentAt: review.employeeCommentAt,
-        selfSubmittedAt: review.selfSubmittedAt,
         submittedAt: review.submittedAt,
         acknowledgedAt: review.acknowledgedAt,
       },
       goals: review.goalsEvaluated.map(goal),
       criteria,
       nextGoals: hide ? [] : review.goalsPlanned.map(goal),
-      selfAssessment: selfVisible ? review.selfAssessment : null,
       scoreLevels: SCORE_LEVELS,
       permissions: {
         isSelf: mode === 'self',
         canEdit,
         canSubmit: canEdit,
-        canSelfAssess:
-          mode === 'self' &&
-          isDraft &&
-          !!cycle?.selfAssessmentEnabled &&
-          cycle.status === 'OPEN' &&
-          !review.selfSubmittedAt,
         canAcknowledge:
           review.status === 'SUBMITTED' && (mode === 'self' || ctx.isHR),
+        // Brouillon : la RH ou le responsable du département · déjà transmise : la RH seule
+        canDelete:
+          mode === 'writer' && (isDraft || ctx.isHR),
       },
     };
   }
@@ -615,101 +584,6 @@ export class ReviewSheetService {
   }
 
   // ──────────────────────────────────────────────────────────────────────────
-  // AUTO-ÉVALUATION (employé, avant le manager)
-  // ──────────────────────────────────────────────────────────────────────────
-  async saveSelfAssessment(
-    reviewId: string,
-    rawDto: unknown,
-    userId: string,
-    companyId?: string,
-  ) {
-    const dto = sanitizeSelfDto(rawDto);
-    const ctx = await this.access.getCtx(userId, companyId);
-    const review = await this.loadReview(reviewId, ctx);
-    if (!this.access.isSelf(ctx, review.employeeId))
-      throw new ForbiddenException('Réservé à l\'employé concerné');
-    if (
-      review.status !== 'DRAFT' ||
-      !review.cycle?.selfAssessmentEnabled ||
-      review.cycle.status !== 'OPEN'
-    )
-      throw new BadRequestException("L'auto-évaluation n'est pas ouverte");
-    if (review.selfSubmittedAt)
-      throw new BadRequestException('Auto-évaluation déjà envoyée');
-
-    const goalIds = new Set<string>(review.goalsEvaluated.map((g) => g.id));
-    const critIds = new Set<string>(((review.criteria as any[]) ?? []).map((c) => c.id as string));
-    const current: any = (review.selfAssessment as any) ?? {
-      goals: [],
-      criteria: [],
-      comment: '',
-    };
-
-    const merge = (list: any[], key: string, patches: any[] | undefined, ok: Set<string>) => {
-      const out = [...(list ?? [])];
-      for (const p of patches ?? []) {
-        const id = p[key];
-        if (!ok.has(id)) throw new BadRequestException('Élément étranger à cette fiche');
-        const s = parseScore(p.score, 'Auto-évaluation');
-        const i = out.findIndex((x) => x[key] === id);
-        const row = i >= 0 ? out[i] : { [key]: id };
-        if (s !== undefined) row.score = s;
-        if (p.comment !== undefined) row.comment = p.comment;
-        if (i >= 0) out[i] = row;
-        else out.push(row);
-      }
-      return out;
-    };
-
-    const next = {
-      goals: merge(current.goals, 'goalId', dto.goals, goalIds),
-      criteria: merge(current.criteria, 'id', dto.criteria, critIds),
-      comment: dto.comment !== undefined ? dto.comment : current.comment ?? '',
-    };
-
-    if (dto.submit) {
-      const scored = (rows: any[], ids: Set<string>, key: string) =>
-        [...ids].every((id) => {
-          const r = rows.find((x) => x[key] === id);
-          return r && isValidScore(r.score);
-        });
-      if (!scored(next.goals, goalIds, 'goalId') || !scored(next.criteria, critIds, 'id'))
-        throw new BadRequestException(
-          'Notez chaque objectif et chaque critère avant d\'envoyer votre auto-évaluation.',
-        );
-    }
-
-    // 🔒 Écriture conditionnelle : seulement si la fiche est encore en brouillon
-    // et l'auto-évaluation pas déjà envoyée
-    const wrote = await this.prisma.performanceReview.updateMany({
-      where: { id: review.id, status: 'DRAFT', selfSubmittedAt: null },
-      data: {
-        selfAssessment: next as any,
-        ...(dto.submit && { selfSubmittedAt: new Date() }),
-      },
-    });
-    if (wrote.count !== 1)
-      throw new BadRequestException("L'auto-évaluation n'est plus modifiable");
-
-    if (dto.submit) {
-      try {
-        await this.prisma.notification.create({
-          data: {
-            userId: review.reviewerId,
-            type: 'SYSTEM_ALERT' as any,
-            title: '📝 Auto-évaluation reçue',
-            message: `${review.employee.firstName} ${review.employee.lastName} a envoyé son auto-évaluation "${review.period}".`,
-            link: '/performance',
-          },
-        });
-      } catch (e) {
-        this.logger.warn('Notification auto-évaluation échouée', e as any);
-      }
-    }
-    return this.getSheet(reviewId, userId, companyId);
-  }
-
-  // ──────────────────────────────────────────────────────────────────────────
   // ACCUSÉ DE RÉCEPTION + DROIT DE RÉPONSE (employé, ou RH pour signature papier)
   // ──────────────────────────────────────────────────────────────────────────
   async acknowledge(
@@ -769,23 +643,51 @@ export class ReviewSheetService {
   }
 
   // ──────────────────────────────────────────────────────────────────────────
+  // SUPPRESSION D'UNE ÉVALUATION
+  //  • brouillon      : la RH ou le responsable actuel du département
+  //  • déjà transmise : la RH uniquement (c'est un document que l'employé a pu lire)
+  //  • jamais l'employé concerné, jamais une autre entreprise
+  // Effets : les objectifs rattachés redeviennent « libres » (ils ne sont pas supprimés),
+  // les niveaux de compétence issus de cette évaluation sont retirés, et la suppression
+  // est tracée dans les journaux du serveur.
+  // ──────────────────────────────────────────────────────────────────────────
+  async deleteReview(reviewId: string, userId: string, companyId?: string) {
+    const ctx = await this.access.getCtx(userId, companyId);
+    const review = await this.loadReview(reviewId, ctx);
+    if (this.access.isSelf(ctx, review.employeeId))
+      throw new ForbiddenException('Vous ne pouvez pas supprimer votre propre évaluation');
+    if (!this.access.canWriteReview(ctx, review as any))
+      throw new ForbiddenException('Accès refusé');
+    if (review.status !== 'DRAFT' && !ctx.isHR)
+      throw new ForbiddenException(
+        'Seule la RH peut supprimer une évaluation déjà transmise à l\'employé',
+      );
+
+    await this.prisma.$transaction(async (tx) => {
+      // 🔒 Suppression conditionnée au statut lu : si la fiche a changé entre-temps, on refuse
+      const del = await tx.performanceReview.deleteMany({
+        where: { id: review.id, status: review.status },
+      });
+      if (del.count !== 1)
+        throw new BadRequestException('Cette évaluation vient de changer, actualisez la page');
+      await tx.competencyAssessment.deleteMany({ where: { reviewId: review.id } });
+    });
+
+    this.logger.warn(
+      `Évaluation supprimée : id=${review.id} statut=${review.status} employé=${review.employeeId} par=${ctx.userId} entreprise=${ctx.companyId}`,
+    );
+    return { success: true };
+  }
+
+  // ──────────────────────────────────────────────────────────────────────────
   // MON ESPACE
   // ──────────────────────────────────────────────────────────────────────────
   async getMe(userId: string, companyId?: string) {
     const ctx = await this.access.getCtx(userId, companyId);
     if (!ctx.employeeId)
-      return { employeeId: null, pendingSelfAssessments: [], reviews: [], goals: [] };
+      return { employeeId: null, reviews: [], goals: [] };
 
-    const [pending, reviews, goals] = await Promise.all([
-      this.prisma.performanceReview.findMany({
-        where: {
-          employeeId: ctx.employeeId,
-          status: 'DRAFT',
-          selfSubmittedAt: null,
-          cycle: { selfAssessmentEnabled: true, status: 'OPEN' },
-        },
-        select: { id: true, period: true, cycle: { select: { name: true, endDate: true } } },
-      }),
+    const [reviews, goals] = await Promise.all([
       this.prisma.performanceReview.findMany({
         where: {
           employeeId: ctx.employeeId,
@@ -835,7 +737,6 @@ export class ReviewSheetService {
 
     return {
       employeeId: ctx.employeeId,
-      pendingSelfAssessments: pending,
       reviews,
       goals,
     };

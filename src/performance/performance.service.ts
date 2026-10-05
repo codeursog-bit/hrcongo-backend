@@ -679,6 +679,34 @@ export class PerformanceService {
     return supervising ? goals : goals.map((g) => this.stripManagerFields(g));
   }
 
+  /**
+   * Supprime un objectif : RH ou responsable de l'employé (jamais l'employé lui-même).
+   * Refusé s'il a été évalué dans une évaluation déjà transmise : il fait partie de son historique.
+   */
+  async deleteGoal(goalId: string, userId: string) {
+    const ctx = await this.access.getCtx(userId);
+    this.access.assertCanManage(ctx);
+    const goal = await this.prisma.goal.findUnique({
+      where: { id: goalId },
+      select: { id: true, employeeId: true },
+    });
+    if (!goal) throw new NotFoundException('Objectif introuvable');
+    await this.access.assertCanManageEmployee(ctx, goal.employeeId);
+
+    const res = await this.prisma.goal.deleteMany({
+      where: {
+        id: goalId,
+        employeeId: goal.employeeId,
+        OR: [{ evaluatedInReviewId: null }, { evaluatedInReview: { status: ReviewStatus.DRAFT } }],
+      },
+    });
+    if (res.count !== 1)
+      throw new BadRequestException(
+        "Cet objectif a été évalué dans une évaluation transmise : il fait partie de son historique et ne peut pas être supprimé.",
+      );
+    return { success: true };
+  }
+
   private async loadGoalForUpdate(goalId: string, userId: string) {
     const ctx = await this.access.getCtx(userId);
     const goal = await this.prisma.goal.findUnique({

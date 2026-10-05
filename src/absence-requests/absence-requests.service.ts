@@ -223,8 +223,9 @@ private async getUserWithCompany(userId: string, overrideCompanyId?: string): Pr
       companyConvention = companyForConvention?.collectiveAgreement ?? null;
       motif = findMotifByKey(companyConvention, dto.motifKey);
       if (!motif) throw new BadRequestException("Motif introuvable pour la convention de votre entreprise");
-    } else if (!dto.type || !dto.subType || !dto.endDate || !dto.reason) {
-      throw new BadRequestException('type, subType, endDate et reason sont obligatoires hors catalogue de motifs');
+    } else if (!dto.type || !dto.subType || (!dto.returnDate && !dto.endDate) || !dto.reason) {
+      // 🆕 la date de reprise (returnDate) remplace endDate côté formulaire ; endDate reste accepté (compatibilité)
+      throw new BadRequestException('type, subType, date de reprise et reason sont obligatoires hors catalogue de motifs');
     }
 
     const type = motif ? 'EXCEPTIONNELLE' : dto.type!;

@@ -131,6 +131,17 @@ export class PerformanceController {
     return this.cycles.launchCycle(id, body ?? {}, req.user.userId, companyId);
   }
 
+  @Delete('cycles/:id')
+  @Roles(...PERF_HR_ROLES)
+  deleteCycle(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Query('withReviews') withReviews: string,
+    @Request() req,
+    @Query('companyId') companyId?: string,
+  ) {
+    return this.cycles.deleteCycle(id, withReviews === 'true', req.user.userId, companyId);
+  }
+
   @Patch('cycles/:id/close')
   @Roles(...PERF_HR_ROLES)
   closeCycle(
@@ -169,16 +180,6 @@ export class PerformanceController {
     return this.sheet.saveSheet(id, body ?? {}, req.user.userId, companyId);
   }
 
-  @Patch('reviews/:id/self-assessment')
-  saveSelfAssessment(
-    @Param('id', ParseUUIDPipe) id: string,
-    @Body() body: any,
-    @Request() req,
-    @Query('companyId') companyId?: string,
-  ) {
-    return this.sheet.saveSelfAssessment(id, body ?? {}, req.user.userId, companyId);
-  }
-
   // ── Reviews ───────────────────────────────────────────────────────────────
   @Post('reviews')
   @Roles(...PERF_MANAGE_ROLES)
@@ -215,6 +216,16 @@ export class PerformanceController {
     @Request() req,
   ) {
     return this.performanceService.updateReview(id, data, req.user.userId);
+  }
+
+  @Delete('reviews/:id')
+  @Roles(...PERF_MANAGE_ROLES)
+  deleteReview(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Request() req,
+    @Query('companyId') companyId?: string,
+  ) {
+    return this.sheet.deleteReview(id, req.user.userId, companyId);
   }
 
   @Patch('reviews/:id/submit')
@@ -256,6 +267,12 @@ export class PerformanceController {
       req.user.userId,
       companyId,
     );
+  }
+
+  @Delete('goals/:id')
+  @Roles(...PERF_MANAGE_ROLES)
+  deleteGoal(@Param('id', ParseUUIDPipe) id: string, @Request() req) {
+    return this.performanceService.deleteGoal(id, req.user.userId);
   }
 
   @Get('goals/:employeeId')
