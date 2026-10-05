@@ -4,6 +4,7 @@
 //    même calcul (lundi-samedi, jours fériés de l'entreprise exclus).
 // ============================================================================
 
+import { normalizeWorkDays } from './utils/work-days';
 import { PrismaService } from '../prisma/prisma.service';
 import { BadRequestException } from '@nestjs/common';
 
@@ -142,8 +143,7 @@ export async function getCompanyWorkDays(
     orderBy: { effectiveDate: 'desc' },
     select: { workDays: true },
   });
-  const days = (ps?.workDays as number[] | undefined) ?? [];
-  return days.length > 0 ? days : [1, 2, 3, 4, 5];
+  return normalizeWorkDays(ps?.workDays); // 🕐 dimanche = 0, repli Lun–Ven
 }
 
 // ============================================================================

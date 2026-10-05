@@ -129,7 +129,7 @@ async function bootstrap() {
 
         // Previews Vercel dynamiques (ex: konza-xyz-nathan-devs-projects.vercel.app)
         const isVercelPreview =
-          origin.endsWith('.vercel.app') &&
+          origin.endsWith('.onrender.com') &&
           origin.includes('nathan-devs-projects');
 
         // Previews Render dynamiques (back appelé depuis preview front)

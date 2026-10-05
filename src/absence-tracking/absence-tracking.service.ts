@@ -15,6 +15,7 @@
 //    naissance) et Non justifiée.
 // ============================================================================
 
+import { normalizeWorkDays } from '../common/utils/work-days';
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { calculateWorkingDays, loadCoveredDatesMap } from '../common/working-days.util';
@@ -201,7 +202,7 @@ export class AbsenceTrackingService {
     );
     const recordedDaySet = new Set(attendanceRows.map((a) => `${a.employeeId}_${a.date}`));
     const holidaySet = new Set(publicHolidays.map((h) => this.utils.formatDate(h.date)));
-    const workDays = ((payrollSettings?.workDays as number[] | undefined) ?? DEFAULT_WORK_DAYS);
+    const workDays = normalizeWorkDays(payrollSettings?.workDays ?? DEFAULT_WORK_DAYS);
 
     const entries: UnifiedEntry[] = [];
     // Jours couverts par un congé approuvé — utilisé pour exclure ces jours
