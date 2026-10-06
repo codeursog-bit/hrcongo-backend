@@ -10,6 +10,7 @@
 // hebdomadaire finale est faite par attendance-summary.service.ts.
 // ============================================================================
 
+import { normalizeWorkDays } from '../../common/utils/work-days';
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { EmployeeNotFoundException } from '../../exceptions/business.exceptions';
@@ -54,8 +55,7 @@ export class AttendanceCalculationService {
       orderBy: { effectiveDate: 'desc' },
       select: { workDays: true },
     });
-    const workDays = (payrollSettings?.workDays ||
-      DEFAULT_WORK_DAYS) as number[];
+    const workDays = normalizeWorkDays(payrollSettings?.workDays || DEFAULT_WORK_DAYS);
 
     const [attendances, leaves, publicHolidays, absenceRequests] =
       await Promise.all([
@@ -335,6 +335,12 @@ export class AttendanceCalculationService {
       overtime50: att ? Number(att.overtime50 || 0) : undefined,
       overtime100: att ? Number(att.overtime100 || 0) : undefined,
       isNightShift: att ? Boolean(att.isNightShift) : undefined,
+      // 🆕 Pointage réel un jour de repos / férié : le statut ne change pas (la paie en dépend),
+      // mais le jour est marqué « travaillé » pour que les écrans l'affichent et le comptent.
+      workedOnRest:
+        att?.checkIn && (status === DayStatusEnum.OFF_DAY || status === DayStatusEnum.HOLIDAY)
+          ? (status as 'OFF_DAY' | 'HOLIDAY')
+          : undefined,
     };
   }
 

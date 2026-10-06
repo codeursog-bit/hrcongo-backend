@@ -71,6 +71,8 @@ export interface DayStatus {
   overtime50?: number;
   overtime100?: number;
   isNightShift?: boolean;
+  /** Vrai pointage fait un jour de repos / férié : le statut reste OFF_DAY / HOLIDAY (paie inchangée) */
+  workedOnRest?: 'OFF_DAY' | 'HOLIDAY';
 }
 
 export interface MonthlyReportItem {
@@ -86,6 +88,12 @@ export interface MonthlyReportItem {
   daysOnLeave: number;
   daysHoliday: number;
   daysOffDay: number;
+  /** 🆕 Jours où l'employé a RÉELLEMENT pointé (affichage « jours travaillés ») */
+  daysWorked: number;
+  /** dont jours de repos / fériés travaillés (information, ne change pas la paie) */
+  daysWorkedOnRest: number;
+  /** dont jours pointés pendant un congé approuvé */
+  daysWorkedDuringLeave: number;
   daysAbsentUnpaid: number;
   daysAbsentPaid: number;
   normalHours: number;
@@ -111,6 +119,7 @@ export interface MonthlyReportItem {
     absenceType?: string;
     isPaid?: boolean;
     extra?: string;
+    note?: string;
   }>;
 }
 

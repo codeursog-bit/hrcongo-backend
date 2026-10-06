@@ -11,6 +11,7 @@
 //   - Multi-PME (cabinet) via overrideCompanyId — inchangé
 // ============================================================================
 
+import { normalizeWorkDays } from '../../common/utils/work-days';
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { resolveVerifiedCompanyId } from '../../common/resolve-verified-company.util';
@@ -54,8 +55,7 @@ export class AttendanceReportService {
       orderBy: { effectiveDate: 'desc' },
       select: { workDays: true },
     });
-    const workDays = (payrollSettings?.workDays ||
-      DEFAULT_WORK_DAYS) as number[];
+    const workDays = normalizeWorkDays(payrollSettings?.workDays || DEFAULT_WORK_DAYS);
 
     const [holidays, leaves, absenceRequests] = await Promise.all([
       this.prisma.publicHoliday.findMany({ where: { companyId, year } }),
@@ -327,6 +327,11 @@ export class AttendanceReportService {
       const daysHoliday = dayStatuses.filter(
         (d) => d.status === DayStatusEnum.HOLIDAY,
       ).length;
+      // 🆕 Jours réellement pointés (quel que soit le statut du calendrier)
+      const daysWorked = dayStatuses.filter((d) => !!d.checkIn).length;
+      const daysWorkedOnRest = dayStatuses.filter((d) => !!d.workedOnRest).length;
+      const daysWorkedDuringLeave = dayStatuses.filter((d) => !!d.checkIn && !!d.leaveType).length;
+
       const daysOffDay = dayStatuses.filter(
         (d) => d.status === DayStatusEnum.OFF_DAY,
       ).length;
@@ -381,6 +386,9 @@ export class AttendanceReportService {
         department: emp.department?.name || 'N/A',
 
         daysPresent,
+        daysWorked,
+        daysWorkedOnRest,
+        daysWorkedDuringLeave,
         daysLate,
         daysRemote,
         daysOnLeave,
@@ -433,6 +441,10 @@ export class AttendanceReportService {
           absenceType: (d as any).absenceType,
           isPaid: (d as any).isPaid,
           extra: extraDays.has(d.date) ? extraDays.get(d.date)!.toFixed(2) : undefined,
+          note: d.workedOnRest === 'HOLIDAY' ? 'Jour férié travaillé'
+              : d.workedOnRest === 'OFF_DAY' ? 'Jour de repos travaillé'
+              : d.checkIn && d.leaveType ? 'Pointé pendant son congé'
+              : undefined,
         })),
       });
     }
