@@ -9,11 +9,14 @@
 
 import { Controller, Get, Query, Param, Request, UseGuards, BadRequestException } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
+import { Roles } from '../auth/decorators/roles.decorator';
+import { RolesGuard } from '../auth/guards/roles.guard';
 import { AbsenceTrackingService } from './absence-tracking.service';
 import { AbsenceScope } from './absence-tracking.constants';
 
 @Controller('absence-tracking')
-@UseGuards(AuthGuard('jwt'))
+@UseGuards(AuthGuard('jwt'), RolesGuard)
+@Roles('ADMIN', 'HR_MANAGER', 'SUPER_ADMIN') // 🆕 un employé ne doit pas pouvoir lire les absences de toute l'entreprise
 export class AbsenceTrackingController {
   constructor(private readonly service: AbsenceTrackingService) {}
 
