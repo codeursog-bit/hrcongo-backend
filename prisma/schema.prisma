@@ -192,6 +192,9 @@ model Company {
   longitude     Decimal? @db.Decimal(11, 8)
   allowedRadius Int?     @default(100) @db.SmallInt
 
+  gpsToleranceMeters Int                @default(0) @db.SmallInt
+
+
   isActive Boolean @default(true)
 
   archivedAt       DateTime? @db.Timestamptz
@@ -282,6 +285,7 @@ model Company {
   displayScreens          DisplayScreen[]
   employeeSecrets         EmployeeSecret[]
   attendanceBreaks        AttendanceBreak[]
+  trustedIps         CompanyTrustedIp[]
 
   cabinetCompanies      CabinetCompany[]
   ownerLinks            UserCompany[]
@@ -4982,3 +4986,18 @@ model ApprovalPendingDecision {
   @@map("approval_pending_decisions")
 }
 
+
+model CompanyTrustedIp {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId String   @db.Uuid
+  company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  label     String   @db.VarChar(100)
+  ip        String   @db.VarChar(64)
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now()) @db.Timestamptz
+
+  @@unique([companyId, ip])
+  @@index([companyId])
+  @@map("company_trusted_ips")
+}

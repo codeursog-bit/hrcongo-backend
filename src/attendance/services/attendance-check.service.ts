@@ -137,6 +137,8 @@ export interface AttendanceActingOptions {
   method?: PunchMethodValue;
   /** Nom de l'écran / tablette utilisé (affiché à l'admin). */
   source?: string;
+  /** IP publique du client, lue par le contrôleur (jamais depuis le body). */
+  clientIp?: string;
 }
 
 @Injectable()
@@ -178,7 +180,7 @@ export class AttendanceCheckService {
     // l'auteur de l'action (RH/admin vs employé — voir assertActionAllowed).
     await this.subscriptionGuard.assertActionAllowed(user.companyId, user.role);
 
-    const { employeeId, notes, latitude, longitude } = dto;
+    const { employeeId, notes, latitude, longitude, accuracy } = dto;
     const confirmRestDay = (dto as any).confirmRestDay ?? false;
     const confirmWorkDuringLeave =
       (dto as any).confirmWorkDuringLeave ?? false;
@@ -298,6 +300,7 @@ export class AttendanceCheckService {
     let matchedSiteId: string | null = null;
     let matchedSiteName: string | null = null;
     let matchedDistance: number | null = null;
+    let zoneNote: string | null = null; // trace « GPS avec marge » / « IP de confiance »
 
     if (geofencingConfigured && !opts?.skipGeofence) {
       // Un site (ou la position principale) est configuré → la position est
@@ -313,6 +316,7 @@ export class AttendanceCheckService {
         longitude,
         (la1, lo1, la2, lo2) =>
           this.utils.getDistanceFromLatLonInMeters(la1, lo1, la2, lo2),
+        { accuracy, clientIp: opts?.clientIp },
       );
 
       if (!siteCheck.matched) {
@@ -325,6 +329,7 @@ export class AttendanceCheckService {
       matchedSiteId = siteCheck.siteId;
       matchedSiteName = siteCheck.siteName;
       matchedDistance = siteCheck.distance;
+      zoneNote = siteCheck.detail;
     }
     // Si rien n'est configuré pour l'entreprise, le pointage reste possible
     // sans position (comportement legacy) — rien à vérifier ici.
@@ -354,7 +359,7 @@ export class AttendanceCheckService {
     const attData = {
       checkIn: now,
       checkInMethod: punchMethod,
-      checkInSource: opts?.source?.slice(0, 100) ?? null,
+      checkInSource: opts?.source?.slice(0, 100) ?? zoneNote?.slice(0, 100) ?? null,
       checkInLat: latitude ?? null,
       checkInLon: longitude ?? null,
       checkInSiteId: matchedSiteId,
@@ -434,7 +439,7 @@ export class AttendanceCheckService {
     userId: string,
     opts?: AttendanceActingOptions,
   ) {
-    const { employeeId, latitude, longitude } = dto;
+    const { employeeId, latitude, longitude, accuracy } = dto;
     const today = this.utils.getTodayString();
     const now = new Date();
 
@@ -470,6 +475,7 @@ export class AttendanceCheckService {
     let checkOutSiteId: string | null = null;
     let checkOutSiteName: string | null = null;
     let checkOutDistance: number | null = null;
+    let checkOutZoneNote: string | null = null; // trace « GPS avec marge » / « IP de confiance »
 
     const geofencingConfiguredOut =
       await this.companySiteService.isGeofencingConfigured(user.companyId);
@@ -484,6 +490,7 @@ export class AttendanceCheckService {
         longitude,
         (la1, lo1, la2, lo2) =>
           this.utils.getDistanceFromLatLonInMeters(la1, lo1, la2, lo2),
+        { accuracy, clientIp: opts?.clientIp },
       );
       if (!siteCheckOut.matched) {
         throw new OutOfGeofenceException(
@@ -494,6 +501,7 @@ export class AttendanceCheckService {
       checkOutSiteId = siteCheckOut.siteId;
       checkOutSiteName = siteCheckOut.siteName;
       checkOutDistance = siteCheckOut.distance;
+      checkOutZoneNote = siteCheckOut.detail;
     }
 
     // ── Settings ───────────────────────────────────────────────────────────
@@ -628,7 +636,7 @@ export class AttendanceCheckService {
       data: {
         checkOut: now,
         checkOutMethod: opts?.method ?? (await this.defaultPunchMethod(employeeId, userId)),
-        checkOutSource: opts?.source?.slice(0, 100) ?? null,
+        checkOutSource: opts?.source?.slice(0, 100) ?? checkOutZoneNote?.slice(0, 100) ?? null,
         checkOutLat: latitude ?? null,
         checkOutLon: longitude ?? null,
         checkOutSiteId,

@@ -4,6 +4,8 @@ import {
   IsOptional,
   IsString,
   IsNumber,
+  Min,
+  Max,
 } from 'class-validator';
 
 export class CreateAttendanceDto {
@@ -23,4 +25,11 @@ export class CreateAttendanceDto {
   @IsOptional()
   @IsNumber()
   longitude?: number;
+
+  // Précision GPS annoncée par l'appareil (mètres) — sert à la marge de tolérance
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  @Max(100000)
+  accuracy?: number;
 }

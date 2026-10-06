@@ -32,6 +32,7 @@ import { ConventionsModule } from '../conventions/conventions.module';
 
 import { CompanySiteService } from './company-site.service';
 import { CompanySiteController } from './company-site.controller';
+import { CompanyTrustedIpController } from './company-trusted-ip.controller';
 
 @Module({
   imports: [
@@ -41,7 +42,7 @@ import { CompanySiteController } from './company-site.controller';
     AffiliateModule, // ✅ Requis pour injecter AffiliateService dans CompaniesService
     ConventionsModule, // ✅ Requis pour injecter ConventionsService dans CompaniesService
   ],
-  controllers: [CompaniesController, CompanySiteController],
+  controllers: [CompaniesController, CompanySiteController, CompanyTrustedIpController],
   providers: [CompaniesService, CompanySiteService],
   exports: [CompaniesService, CompanySiteService],
 })

@@ -27,8 +27,13 @@ export class AttendanceBreakController {
   // Reprise par GPS (la reprise par QR / code secret passe par le scan de l'écran)
   @Post('end')
   @HttpCode(200)
-  end(@Request() req, @Body() body: { latitude?: number; longitude?: number }) {
-    return this.breaks.endByGps(req.user.userId, body?.latitude, body?.longitude);
+  end(
+    @Request() req,
+    @Body() body: { latitude?: number; longitude?: number; accuracy?: number },
+  ) {
+    return this.breaks.endByGps(
+      req.user.userId, body?.latitude, body?.longitude, body?.accuracy, req.ip,
+    );
   }
 
   // Correction admin / RH, justification obligatoire

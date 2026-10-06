@@ -59,6 +59,7 @@ export class AttendanceController {
       return await this.attendanceService.checkIn(
         createAttendanceDto,
         req.user.userId,
+        { clientIp: req.ip }, // IP publique réelle (trust proxy) — secours du GPS
       );
     } catch (error: any) {
       throw new HttpException(
@@ -77,6 +78,7 @@ export class AttendanceController {
       return await this.attendanceService.checkOut(
         createAttendanceDto,
         req.user.userId,
+        { clientIp: req.ip },
       );
     } catch (error: any) {
       throw new HttpException(

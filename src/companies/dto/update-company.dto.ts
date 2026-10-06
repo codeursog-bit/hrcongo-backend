@@ -14,6 +14,13 @@ export class UpdateCompanyDto extends PartialType(CreateCompanyDto) {
   @IsString()
   logo?: string;
 
+  // 🆕 Marge GPS maximale (mètres) ajoutée au rayon selon la précision de l'appareil. 0 = stricte.
+  @IsNumber()
+  @IsOptional()
+  @Min(0)
+  @Max(200)
+  gpsToleranceMeters?: number;
+
   @IsOptional()
   @IsString()
   primaryColor?: string;

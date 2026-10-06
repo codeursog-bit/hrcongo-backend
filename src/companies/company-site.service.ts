@@ -1,6 +1,7 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { assertCompanyAccess } from '../common/resolve-verified-company.util';
+import { normalizeIp } from '../common/ip.util';
 import {
   CreateCompanySiteDto,
   UpdateCompanySiteDto,
@@ -95,11 +96,15 @@ export class CompanySiteService {
   }
 
   // ── Vérifier si une position GPS est dans l'un des sites actifs ───────────
-  // Retourne le site matché (avec distance) ou, si aucun match, le site le
-  // plus proche (pour un message d'erreur utile : "vous êtes à Xm de Y").
-  // Utilisé par attendance-check.service.ts — cette fonction est désormais
-  // la SEULE source de vérité pour la géolocalisation : le résultat doit
-  // être utilisé pour bloquer le pointage, pas seulement pour l'annoter.
+  // Ordre de décision (le serveur est la SEULE autorité) :
+  //   1) distance ≤ rayon                                   → RADIUS
+  //   2) distance − min(précision, marge entreprise) ≤ rayon → TOLERANCE
+  //      (le cercle d'incertitude du GPS touche la zone ; la marge est plafonnée
+  //       par Company.gpsToleranceMeters, 0 = désactivé)
+  //   3) IP publique du pointage ∈ IP de confiance          → TRUSTED_IP
+  //      (jamais en 4G : l'IP n'y correspond à aucune IP enregistrée)
+  //   4) sinon refus avec la distance au site le plus proche.
+  // `detail` : courte trace stockée dans checkInSource / checkOutSource.
   async checkPositionInAnySite(
     companyId: string,
     latitude: number,
@@ -110,23 +115,28 @@ export class CompanySiteService {
       lat2: number,
       lon2: number,
     ) => number,
+    extra?: { accuracy?: number | null; clientIp?: string | null },
   ): Promise<{
     matched: boolean;
     siteId: string | null;
     siteName: string | null;
     distance: number | null; // distance au site matché, ou au plus proche si non matché
     configured: boolean; // false = aucun site/position n'est configuré du tout pour cette entreprise
+    basis: 'RADIUS' | 'TOLERANCE' | 'TRUSTED_IP' | null;
+    detail: string | null;
   }> {
     // Sites multi-sites (table CompanySite)
     const sites = await this.findActive(companyId);
 
-    // ✅ Site "principal" configuré sur la fiche entreprise (Company.latitude/
-    // longitude/allowedRadius) — avant ce correctif il était totalement
-    // ignoré ici, ce qui rendait le géofencing inopérant pour toute
-    // entreprise n'ayant pas créé de site via la table CompanySite.
+    // Site "principal" de la fiche entreprise + marge GPS autorisée par l'admin
     const company = await this.prisma.company.findUnique({
       where: { id: companyId },
-      select: { latitude: true, longitude: true, allowedRadius: true },
+      select: {
+        latitude: true,
+        longitude: true,
+        allowedRadius: true,
+        gpsToleranceMeters: true,
+      },
     });
 
     const candidates: Array<{
@@ -161,39 +171,71 @@ export class CompanySiteService {
         siteName: null,
         distance: null,
         configured: false,
+        basis: null,
+        detail: null,
       };
     }
 
     // Distance à chaque candidat, calculée une seule fois
-    const withDistances = candidates.map((c) => ({
-      ...c,
-      distance: utilsGetDistance(latitude, longitude, c.latitude, c.longitude),
-    }));
-
-    // Sites dans leur rayon, on garde le plus proche en cas de multi-match
-    const matches = withDistances
-      .filter((c) => c.distance <= c.radius)
+    const withDistances = candidates
+      .map((c) => ({
+        ...c,
+        distance: utilsGetDistance(latitude, longitude, c.latitude, c.longitude),
+      }))
       .sort((a, b) => a.distance - b.distance);
+    const closest = withDistances[0];
 
-    if (matches.length > 0) {
-      const m = matches[0];
-      return {
-        matched: true,
-        siteId: m.id,
-        siteName: m.name,
-        distance: Math.round(m.distance),
-        configured: true,
-      };
+    const ok = (
+      m: (typeof withDistances)[number],
+      basis: 'RADIUS' | 'TOLERANCE' | 'TRUSTED_IP',
+      detail: string | null,
+    ) => ({
+      matched: true,
+      siteId: m.id,
+      siteName: m.name,
+      distance: Math.round(m.distance),
+      configured: true,
+      basis,
+      detail,
+    });
+
+    // 1) Dans le rayon (le plus proche en cas de multi-match)
+    const exact = withDistances.find((c) => c.distance <= c.radius);
+    if (exact) return ok(exact, 'RADIUS', null);
+
+    // 2) Marge selon la précision GPS annoncée par l'appareil
+    const cap = company?.gpsToleranceMeters ?? 0;
+    const acc = Number(extra?.accuracy);
+    const tolerance =
+      cap > 0 && Number.isFinite(acc) && acc > 0 ? Math.min(acc, cap) : 0;
+    if (tolerance > 0) {
+      const soft = withDistances.find((c) => c.distance - tolerance <= c.radius);
+      if (soft) {
+        return ok(soft, 'TOLERANCE', `GPS avec marge (précision ±${Math.round(acc)} m)`);
+      }
     }
 
-    // Aucun match : on retient le plus proche pour un message d'erreur utile
-    const closest = [...withDistances].sort((a, b) => a.distance - b.distance)[0];
+    // 3) IP publique d'une connexion de l'entreprise (wifi du site)
+    const ip = normalizeIp(extra?.clientIp);
+    if (ip) {
+      const trusted = await this.prisma.companyTrustedIp.findFirst({
+        where: { companyId, ip, isActive: true },
+        select: { label: true },
+      });
+      if (trusted) {
+        return ok(closest, 'TRUSTED_IP', `IP de confiance : ${trusted.label}`);
+      }
+    }
+
+    // 4) Refus : on retient le plus proche pour un message d'erreur utile
     return {
       matched: false,
       siteId: closest.id,
       siteName: closest.name,
       distance: Math.round(closest.distance),
       configured: true,
+      basis: null,
+      detail: null,
     };
   }
 }

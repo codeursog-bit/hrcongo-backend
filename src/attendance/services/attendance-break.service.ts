@@ -196,7 +196,13 @@ export class AttendanceBreakService {
   }
 
   // ── Reprise par GPS (le bouton de la page Ma pointeuse) ─────────────────
-  async endByGps(userId: string, latitude?: number, longitude?: number) {
+  async endByGps(
+    userId: string,
+    latitude?: number,
+    longitude?: number,
+    accuracy?: number,
+    clientIp?: string,
+  ) {
     const { employeeId, companyId } = await this.me(userId);
     const att = await this.todayAttendance(employeeId);
     const p = att?.pause;
@@ -208,6 +214,7 @@ export class AttendanceBreakService {
       const check = await this.sites.checkPositionInAnySite(
         companyId, latitude, longitude,
         (la1, lo1, la2, lo2) => this.utils.getDistanceFromLatLonInMeters(la1, lo1, la2, lo2),
+        { accuracy, clientIp },
       );
       if (!check.matched) throw new OutOfGeofenceException(check.distance ?? 0, check.siteName);
     }
