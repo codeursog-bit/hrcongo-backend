@@ -53,11 +53,13 @@ async function main() {
     });
 
     for (const sub of user.pushSubscriptions) {
+      const host = new URL(JSON.parse(sub.token).endpoint).host;
+      const who = `${sub.deviceLabel ?? 'sans libellé'} | ${host} | créé=${sub.createdAt?.toISOString?.() ?? '?'} | vu=${sub.lastUsedAt?.toISOString?.() ?? '?'}`;
       try {
         const res = await webpush.sendNotification(JSON.parse(sub.token), payload, options);
-        console.log(`✅ ${new URL(JSON.parse(sub.token).endpoint).host} → HTTP ${res.statusCode}`);
+        console.log(`✅ ${who} → HTTP ${res.statusCode}`);
       } catch (e) {
-        console.log(`❌ ${new URL(JSON.parse(sub.token).endpoint).host} → HTTP ${e.statusCode} ${e.body ?? e.message}`);
+        console.log(`❌ ${who} → HTTP ${e.statusCode} ${e.body ?? e.message}`);
       }
     }
     return;
