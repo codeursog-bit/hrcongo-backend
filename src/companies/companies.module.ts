@@ -33,6 +33,7 @@ import { ConventionsModule } from '../conventions/conventions.module';
 import { CompanySiteService } from './company-site.service';
 import { CompanySiteController } from './company-site.controller';
 import { CompanyTrustedIpController } from './company-trusted-ip.controller';
+import { IpSightingCleanupService } from './ip-sighting-cleanup.service';
 
 @Module({
   imports: [
@@ -43,7 +44,7 @@ import { CompanyTrustedIpController } from './company-trusted-ip.controller';
     ConventionsModule, // ✅ Requis pour injecter ConventionsService dans CompaniesService
   ],
   controllers: [CompaniesController, CompanySiteController, CompanyTrustedIpController],
-  providers: [CompaniesService, CompanySiteService],
+  providers: [CompaniesService, CompanySiteService, IpSightingCleanupService],
   exports: [CompaniesService, CompanySiteService],
 })
 export class CompaniesModule {}

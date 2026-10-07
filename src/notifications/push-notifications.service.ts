@@ -148,6 +148,11 @@ export class PushNotificationsService implements OnModuleInit {
       actions?: { action: string; title: string }[];
       // Pour les boutons "Oubli" / "Heures sup" dans la notif native
       actionUrls?: Record<string, string>;
+      // 🆕 Durée de vie côté service push (secondes) : passé ce délai, un appareil éteint/hors
+      // ligne ne reçoit plus rien. Un rappel « dans 20 min » n'a aucun sens après l'heure.
+      ttlSeconds?: number;
+      // 🆕 'high' = livraison immédiate même quand le téléphone est en veille (mode Doze Android).
+      urgency?: 'very-low' | 'low' | 'normal' | 'high';
     },
   ): Promise<void> {
     if (!this.vapidConfigured) {
@@ -197,8 +202,12 @@ export class PushNotificationsService implements OnModuleInit {
 
     // Chaque appareil est indépendant : un échec sur l'un ne doit jamais
     // empêcher l'envoi aux autres.
+    const sendOptions: webpush.RequestOptions = {};
+    if (payload.ttlSeconds != null) sendOptions.TTL = Math.max(0, Math.floor(payload.ttlSeconds));
+    if (payload.urgency) sendOptions.urgency = payload.urgency;
+
     const results = await Promise.all(
-      subscriptions.map((sub) => this.sendToOneSubscription(sub, pushPayload, userId, payload.title)),
+      subscriptions.map((sub) => this.sendToOneSubscription(sub, pushPayload, userId, payload.title, sendOptions)),
     );
 
     // 🆕 Trace de l'envoi (consultable dans le super admin). « SENT » = accepté par le service
@@ -316,6 +325,7 @@ export class PushNotificationsService implements OnModuleInit {
     pushPayload: string,
     userId: string,
     title: string,
+    options?: webpush.RequestOptions,
   ): Promise<{ ok: boolean; expired?: boolean; error?: string }> {
     let subscription: webpush.PushSubscription;
     try {
@@ -332,7 +342,7 @@ export class PushNotificationsService implements OnModuleInit {
     }
 
     try {
-      await webpush.sendNotification(subscription, pushPayload);
+      await webpush.sendNotification(subscription, pushPayload, options);
       this.logger.log(`✅ Push envoyé → userId: ${userId} | "${title}"`);
       return { ok: true };
     } catch (err: any) {

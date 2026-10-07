@@ -21,27 +21,12 @@ import {
   WEEKLY_NORMAL_HOURS,
   WEEKLY_OT10_CAP,
 } from '../services/attendance-utils.service';
+import { buildPreShiftMessage } from './pre-shift-messages';
 
 // ─── Messages : rappel AVANT le début du shift ───────────────────────────────
-// Rappel envoyé X min AVANT le début réel du shift (valeur fixe, pas de
-// config par entreprise — cf. décision produit du 05/09/2026)
-// Le délai est maintenant configurable via PlatformSettings (voir super admin)
-// au lieu d'être figé ici.
-
-const PRE_SHIFT_MESSAGES: Array<{ title: string; body: (mins: number) => string }> = [
-  {
-    title: '⏳ Votre shift approche',
-    body: (m) => `Votre shift commence dans ${m} min. Préparez-vous à pointer votre arrivée.`,
-  },
-  {
-    title: '🔔 Rappel de shift',
-    body: (m) => `Encore ${m} min avant le début de votre shift. À tout de suite sur Konza RH !`,
-  },
-  {
-    title: '📅 Bientôt l’heure',
-    body: (m) => `Votre shift débute dans ${m} min. N'oubliez pas de pointer à l'heure.`,
-  },
-];
+// Générés par ./pre-shift-messages.ts (prénom, entreprise, ton selon l'heure,
+// rotation quotidienne sans répétition). Le délai X reste configurable via
+// PlatformSettings.preShiftReminderMinutes (voir super admin).
 
 // ─── Messages : tous typés string (pas de fonction) ──────────────────────────
 
@@ -110,18 +95,38 @@ export class AttendanceCronService implements OnModuleDestroy {
   // ============================================================================
   // CRON 0 — Rappel AVANT l'heure officielle de début (tourne h24)
   // ----------------------------------------------------------------------------
-  // Version simplifiée (11/2026) : on met de côté les shifts individuels par
-  // employé pour l'instant — on se base uniquement sur l'heure officielle de
-  // l'entreprise (PayrollSettings.officialStartHour). Tous les employés d'une
-  // même entreprise sont donc prévenus au même moment.
-  // Tourne toutes les 5 min, 24h/24 (plus de fenêtres 0-10h/16-20h) : chaque
-  // entreprise a son propre officialStartHour, calculé dynamiquement plus bas
-  // (target = officialStartHour*60 - preShiftMinutes), donc une entreprise qui
-  // démarre à 13h ou 22h doit pouvoir être notifiée aussi, pas seulement celles
-  // qui démarrent le matin ou en fin d'après-midi.
+  // Base : PayrollSettings.officialStartHour de chaque entreprise (heure ronde).
+  // Le rappel part dans la fenêtre [début − X min, début[, avec X =
+  // PlatformSettings.preShiftReminderMinutes. Un tick par minute, MAIS :
+  //  • officialStartHour étant une heure ronde, une entreprise ne peut être
+  //    concernée que dans les X dernières minutes avant chaque heure pile : hors
+  //    de cette fenêtre le tick sort tout de suite (ni verrou, ni requête).
+  //    Ex. X = 20 → on travaille de H:40 à H:59, et seulement les entreprises
+  //    qui démarrent à H+1 ; les autres entreprises ne sont même pas regardées.
+  //  • le service peut tomber DEMAIN (entreprise qui démarre à 0h → rappel à
+  //    23:40) : jour ouvré, férié, pointage et congé sont évalués sur la date du
+  //    SERVICE, pas sur celle du tick.
+  //  • un employé reçoit au plus UN rappel par service (dédoublonnage), et rien
+  //    s'il a déjà pointé ou s'il est en congé approuvé.
+  //  • texte du message : cf. pre-shift-messages.ts
   // ============================================================================
   @Cron('* * * * *', { timeZone: 'Africa/Brazzaville' })
   async handlePreOfficialStartReminder(): Promise<void> {
+    const now = new Date();
+    const { dateStr: todayStr, minutesOfDay: nowMin, dayOfWeek: todayDow } = this.brazzavilleParts(now);
+
+    let preShiftMinutes: number;
+    try {
+      preShiftMinutes = (await this.platformSettings.get()).preShiftReminderMinutes;
+    } catch (err: any) {
+      this.logger.error('❌ Cron rappel pré-début : lecture des réglages impossible', err);
+      return;
+    }
+
+    // Sortie rapide : prochaine heure pile trop loin → aucune entreprise concernée.
+    const minutesToNextHour = 60 - (nowMin % 60); // 1 … 60
+    if (minutesToNextHour > preShiftMinutes) return;
+
     const LOCK = 'attendance-cron:pre-start';
     if (!(await this.cronLock.acquire(LOCK, 270))) {
       this.logger.debug(`⏭️ ${LOCK} déjà en cours ailleurs, ce tick est sauté`);
@@ -130,60 +135,63 @@ export class AttendanceCronService implements OnModuleDestroy {
     this.heldLocks.add(LOCK);
 
     const startedAt = Date.now();
-    const now = new Date();
-    const today = this.today();
-    const { minutesOfDay: nowMin, dayOfWeek } = this.brazzavilleParts(now);
+    const tomorrowStr = this.brazzavilleParts(new Date(now.getTime() + 24 * 60 * 60 * 1000)).dateStr;
 
     try {
-      const platformSettings = await this.platformSettings.get();
-      const preShiftMinutes = platformSettings.preShiftReminderMinutes;
-
       const holidays = await this.prisma.publicHoliday.findMany({
-        where: { date: today },
-        select: { companyId: true },
+        where: { date: { in: [todayStr, tomorrowStr] } },
+        select: { companyId: true, date: true },
       });
-      const holidayCompanyIds = new Set(holidays.map((h) => h.companyId));
+      const holidayKeys = new Set(holidays.map((h) => `${h.companyId}|${h.date}`));
 
       const companies = await this.prisma.company.findMany({
         where: { isActive: true },
-        include: {
-          payrollSettings: { orderBy: { effectiveDate: 'desc' }, take: 1 },
+        select: {
+          id: true,
+          legalName: true,
+          tradeName: true,
+          payrollSettings: {
+            orderBy: { effectiveDate: 'desc' },
+            take: 1,
+            select: { workDays: true, officialStartHour: true },
+          },
         },
       });
 
       for (const company of companies) {
         const settings = company.payrollSettings[0];
         if (!settings) continue;
-        if (holidayCompanyIds.has(company.id)) continue;
-
-        const workDays = (settings.workDays as number[]) || [1, 2, 3, 4, 5];
-        if (!workDays.includes(dayOfWeek)) continue;
 
         const officialStartHour = settings.officialStartHour ?? 8;
         const startMin = officialStartHour * 60;
-        const target = startMin - preShiftMinutes;
-        // Fenêtre resserrée à 2 min (au lieu de 5) maintenant que le cron
-        // tourne toutes les minutes : ça absorbe un tick raté (lock déjà pris
-        // par un run précédent trop lent) sans laisser traîner le rappel.
-        // 🆕 Fenêtre = de « début − X min » jusqu'à l'heure de début (avant : 2 min seulement).
-        // Si le serveur dormait, redémarrait ou ratait un tick, le rappel part au tick suivant
-        // au lieu d'être perdu. Dédoublonnage par employé et par jour : jamais en double.
-        const withinTick = nowMin >= target && nowMin < startMin;
-        if (!withinTick) continue;
-        const minutesLeft = Math.max(1, startMin - nowMin); // texte exact même en cas de retard
 
-        // Tous les employés actifs pas encore pointés aujourd'hui, prévenus
-        // en même temps — plus de logique de shift individuel.
+        // Minutes avant le début, passage de minuit compris (0h : à 23:40, il reste 20 min).
+        const minutesLeft = (((startMin - nowMin) % 1440) + 1440) % 1440;
+        if (minutesLeft < 1 || minutesLeft > preShiftMinutes) continue;
+
+        // Si le début « est déjà passé » dans la journée en cours, le service est demain.
+        const startsTomorrow = startMin < nowMin;
+        const shiftDate = startsTomorrow ? tomorrowStr : todayStr;
+        const shiftDow = startsTomorrow ? (todayDow + 1) % 7 : todayDow;
+
+        if (holidayKeys.has(`${company.id}|${shiftDate}`)) continue;
+
+        const workDays = (settings.workDays as number[]) || [1, 2, 3, 4, 5];
+        if (!workDays.includes(shiftDow)) continue;
+
+        const companyLabel = company.tradeName?.trim() || company.legalName;
+
+        // Tous les employés actifs pas encore pointés pour ce service, hors congé approuvé.
         const employees = await this.prisma.employee.findMany({
           where: {
             companyId: company.id,
             status: 'ACTIVE',
-            attendances: { none: { date: today } },
+            attendances: { none: { date: shiftDate } },
             leaves: {
               none: {
                 status: 'APPROVED',
-                startDate: { lte: new Date(today) },
-                endDate: { gte: new Date(today) },
+                startDate: { lte: new Date(shiftDate) },
+                endDate: { gte: new Date(shiftDate) },
               },
             },
           },
@@ -209,16 +217,24 @@ export class AttendanceCronService implements OnModuleDestroy {
             return;
           }
 
-          const dedupKey = `pre-start:${emp.id}:${today}`;
+          const dedupKey = `pre-start:${emp.id}:${shiftDate}`;
           const canNotify = await this.notificationsService.tryClaim(dedupKey);
           if (!canNotify) {
-            skipped.push({ employeeId: emp.id, name: empName, reason: 'Déjà notifié aujourd\'hui (dédoublonnage)' });
+            skipped.push({ employeeId: emp.id, name: empName, reason: 'Déjà notifié pour ce service (dédoublonnage)' });
             return;
           }
 
-          const msg = randomItem(PRE_SHIFT_MESSAGES);
-          const title = msg.title;
-          const body = msg.body(minutesLeft);
+          const { title, body } = buildPreShiftMessage({
+            firstName: emp.firstName,
+            companyName: companyLabel,
+            minutesLeft,
+            startHour: officialStartHour,
+            nowMinuteOfDay: nowMin,
+            dayOfWeek: shiftDow,
+            date: shiftDate,
+            employeeId: emp.id,
+            gender: emp.gender,
+          });
 
           await this.notif({
             userId: emp.user.id,
@@ -226,7 +242,7 @@ export class AttendanceCronService implements OnModuleDestroy {
             title,
             message: body,
             link: '/presences/pointage',
-            metadata: { employeeId: emp.id, companyId: company.id, date: today, preShiftMinutes },
+            metadata: { employeeId: emp.id, companyId: company.id, date: shiftDate, preShiftMinutes },
           });
 
           if (!emp.user.pushNotifEnabled) {
@@ -239,7 +255,13 @@ export class AttendanceCronService implements OnModuleDestroy {
             title,
             body,
             url: '/presences/pointage',
-            tag: 'pre-start-reminder',
+            // Tag PAR JOUR : avec un tag fixe, le rappel d'hier resté dans la barre de notifs
+            // serait remplacé EN SILENCE par celui d'aujourd'hui (pas de son, pas de vibration).
+            tag: `pre-start-reminder:${shiftDate}`,
+            // Inutile après l'heure de début : le service push le jette s'il n'a pas pu le livrer.
+            ttlSeconds: Math.max(60, minutesLeft * 60),
+            // Livraison immédiate même téléphone en veille.
+            urgency: 'high',
           });
 
           notifiedCount++;

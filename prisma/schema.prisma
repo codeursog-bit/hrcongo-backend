@@ -192,7 +192,7 @@ model Company {
   longitude     Decimal? @db.Decimal(11, 8)
   allowedRadius Int?     @default(100) @db.SmallInt
 
-  gpsToleranceMeters Int                @default(0) @db.SmallInt
+  gpsToleranceMeters Int                @default(30) @db.SmallInt
 
 
   isActive Boolean @default(true)
@@ -286,6 +286,7 @@ model Company {
   employeeSecrets         EmployeeSecret[]
   attendanceBreaks        AttendanceBreak[]
   trustedIps         CompanyTrustedIp[]
+  ipSightings        CompanyIpSighting[]
 
   cabinetCompanies      CabinetCompany[]
   ownerLinks            UserCompany[]
@@ -5000,4 +5001,21 @@ model CompanyTrustedIp {
   @@unique([companyId, ip])
   @@index([companyId])
   @@map("company_trusted_ips")
+}
+
+
+
+model CompanyIpSighting {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId  String   @db.Uuid
+  company    Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  userId     String   @db.Uuid
+  ip         String   @db.VarChar(64)
+  lastSeenAt DateTime @default(now()) @db.Timestamptz
+  blocked    Boolean  @default(false)
+ 
+  @@unique([companyId, ip, userId])
+  @@index([companyId, ip, lastSeenAt])
+  @@index([lastSeenAt])
+  @@map("company_ip_sightings")
 }

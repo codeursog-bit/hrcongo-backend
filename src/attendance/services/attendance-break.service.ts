@@ -214,7 +214,7 @@ export class AttendanceBreakService {
       const check = await this.sites.checkPositionInAnySite(
         companyId, latitude, longitude,
         (la1, lo1, la2, lo2) => this.utils.getDistanceFromLatLonInMeters(la1, lo1, la2, lo2),
-        { accuracy, clientIp },
+        { accuracy, clientIp, userId },
       );
       if (!check.matched) throw new OutOfGeofenceException(check.distance ?? 0, check.siteName);
     }

@@ -316,7 +316,13 @@ export class AttendanceCheckService {
         longitude,
         (la1, lo1, la2, lo2) =>
           this.utils.getDistanceFromLatLonInMeters(la1, lo1, la2, lo2),
-        { accuracy, clientIp: opts?.clientIp },
+        {
+          accuracy,
+          clientIp: opts?.clientIp,
+          // personne réellement connectée (sert à l'apprentissage de l'IP du site) ;
+          // pas d'apprentissage en mode borne (actingCompanyId)
+          userId: opts?.actingCompanyId ? null : userId,
+        },
       );
 
       if (!siteCheck.matched) {
@@ -490,7 +496,13 @@ export class AttendanceCheckService {
         longitude,
         (la1, lo1, la2, lo2) =>
           this.utils.getDistanceFromLatLonInMeters(la1, lo1, la2, lo2),
-        { accuracy, clientIp: opts?.clientIp },
+        {
+          accuracy,
+          clientIp: opts?.clientIp,
+          // personne réellement connectée (sert à l'apprentissage de l'IP du site) ;
+          // pas d'apprentissage en mode borne (actingCompanyId)
+          userId: opts?.actingCompanyId ? null : userId,
+        },
       );
       if (!siteCheckOut.matched) {
         throw new OutOfGeofenceException(

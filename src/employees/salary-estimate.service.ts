@@ -47,6 +47,13 @@ export interface SalaryDeductionLine {
   base?: number | null;
 }
 
+/** Une prime / indemnité du mois, listée individuellement. */
+export interface SalaryGainLine {
+  label: string;
+  amount: number;
+  category: 'TAXABLE_CNSS' | 'TAXABLE_NO_CNSS' | 'NON_TAXABLE';
+}
+
 export interface SalaryEstimateResult {
   /** Brut imposable (même définition que le bulletin : sans indemnités non imposables). */
   grossSalary: number;
@@ -58,6 +65,8 @@ export interface SalaryEstimateResult {
   netSalary: number;
   /** Détail de chaque retenue, dans l'ordre d'affichage. */
   deductions: SalaryDeductionLine[];
+  /** Chaque prime / indemnité mensuelle prise en compte (une ligne par prime). */
+  gains: SalaryGainLine[];
   breakdown: {
     baseSalary: number;
     monthlyTaxableBonuses: number;
@@ -75,6 +84,8 @@ export interface SalaryEstimateResult {
  * cette prime est ajoutée à son montant plein mois, jamais proratisée,
  * exactement comme les primes déjà enregistrées. */
 export interface PreviewBonusInput {
+  /** Libellé affiché pour la prime en cours de création. */
+  bonusType?: string;
   amount: number;
   isTaxable: boolean;
   isCnss: boolean;
@@ -144,7 +155,14 @@ export class SalaryEstimateService {
     let taxableNoCnssBonuses = 0; // → brut ITS seulement
     let nonTaxableBonuses = 0; // → ni ITS ni CNSS (indemnités)
 
-    const addBonus = (amount: number, type: ReturnType<typeof getTaxType>) => {
+    // Détail ligne par ligne (chaque prime / indemnité) pour l'affichage
+    const gains: SalaryGainLine[] = [];
+    const addBonus = (
+      amount: number,
+      type: ReturnType<typeof getTaxType>,
+      label = 'Prime',
+    ) => {
+      gains.push({ label, amount, category: type as SalaryGainLine['category'] });
       if (type === 'NON_TAXABLE') nonTaxableBonuses += amount;
       else if (type === 'TAXABLE_NO_CNSS') taxableNoCnssBonuses += amount;
       else taxableCnssBonuses += amount;
@@ -163,7 +181,7 @@ export class SalaryEstimateService {
       }
       if (amount <= 0) continue;
 
-      addBonus(amount, getTaxType(b as any));
+      addBonus(amount, getTaxType(b as any), (b as any).bonusType || 'Prime');
     }
 
     // ── Prime en cours de création (pas encore enregistrée) ────────────────
@@ -177,6 +195,7 @@ export class SalaryEstimateService {
           isTaxable: previewBonus.isTaxable,
           isCnss: previewBonus.isCnss,
         }),
+        previewBonus.bonusType || 'Prime (aperçu)',
       );
     }
 
@@ -311,6 +330,7 @@ export class SalaryEstimateService {
       totalDeductions,
       netSalary,
       deductions,
+      gains,
       breakdown: {
         baseSalary,
         monthlyTaxableBonuses,

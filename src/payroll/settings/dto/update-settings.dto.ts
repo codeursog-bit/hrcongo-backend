@@ -17,8 +17,8 @@ import { Type } from 'class-transformer';
 export class UpdatePayrollSettingsDto {
   @IsOptional()
   @IsNumber()
-  @Min(6)
-  @Max(20)
+  @Min(0)
+  @Max(23)
   officialStartHour?: number;
 
   @IsOptional()

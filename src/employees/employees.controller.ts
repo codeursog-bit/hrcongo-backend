@@ -444,6 +444,7 @@ export class EmployeesController {
     @Query('previewTaxable') previewTaxable?: string,
     @Query('previewCnss') previewCnss?: string,
     @Query('previewFiscalType') previewFiscalType?: string,
+    @Query('previewLabel') previewLabel?: string,
   ) {
     try {
       const employee = await this.employeesService.findOne(id, req.user.userId);
@@ -454,6 +455,7 @@ export class EmployeesController {
               isTaxable: previewTaxable !== 'false',
               isCnss: previewCnss !== 'false',
               fiscalType: previewFiscalType || null,
+              bonusType: previewLabel || undefined,
             }
           : undefined;
       return await this.salaryEstimateService.estimate(employee as any, preview);

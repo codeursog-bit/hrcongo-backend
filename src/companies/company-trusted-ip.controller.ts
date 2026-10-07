@@ -21,6 +21,20 @@ import { CompanySiteService } from './company-site.service';
 import { SubscriptionGuard } from '../subscriptions/guards/subscription.guard';
 import { isPrivateOrLocalIp, normalizeIp } from '../common/ip.util';
 
+class LearnedIpActionDto {
+  // IP déjà normalisée, telle que renvoyée par GET /trusted-ips/learned
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(64)
+  ip: string;
+
+  // Libellé (obligatoire pour « valider en permanent »)
+  @IsOptional()
+  @IsString()
+  @MaxLength(100)
+  label?: string;
+}
+
 class AddTrustedIpDto {
   @IsString()
   @IsNotEmpty()
@@ -60,7 +74,60 @@ export class CompanyTrustedIpController {
   async myIp(@Param('companyId') companyId: string, @Request() req) {
     await this.companySiteService.assertAccess(req.user.userId, companyId, false);
     const ip = normalizeIp(req.ip);
-    return { ip, usable: !!ip && !isPrivateOrLocalIp(ip) };
+    const usable = !!ip && !isPrivateOrLocalIp(ip);
+    // « Cette connexion est-elle déjà reconnue comme wifi de l'entreprise ? » (saisie ou apprise)
+    const rec = usable
+      ? await this.companySiteService.isIpRecognized(companyId, ip)
+      : { recognized: false, via: null };
+    return { ip, usable, recognized: rec.recognized, via: rec.via };
+  }
+
+  // GET /companies/:companyId/trusted-ips/learned — IP apprises automatiquement (< 24 h)
+  // (déclarée AVANT « :id » pour ne pas être confondue avec un identifiant)
+  @Get('learned')
+  async learned(@Param('companyId') companyId: string, @Request() req) {
+    await this.companySiteService.assertAccess(req.user.userId, companyId, false);
+    return this.companySiteService.listLearnedIps(companyId);
+  }
+
+  // POST /companies/:companyId/trusted-ips/learned/promote — valider une IP apprise en permanent
+  @Post('learned/promote')
+  async promoteLearned(
+    @Param('companyId') companyId: string,
+    @Body() dto: LearnedIpActionDto,
+    @Request() req,
+  ) {
+    await this.companySiteService.assertAccess(req.user.userId, companyId, true);
+    await this.subscriptionGuard.checkFeatureAccess(companyId, 'hasAttendanceGPS');
+
+    const ip = dto.ip.trim();
+    // On ne promeut qu'une IP réellement observée (pas une valeur arbitraire)
+    if (isPrivateOrLocalIp(ip) || !(await this.companySiteService.hasRecentSighting(companyId, ip))) {
+      throw new BadRequestException("Cette IP n'a pas été observée récemment.");
+    }
+    const label = dto.label?.trim();
+    if (!label) throw new BadRequestException('Libellé requis.');
+
+    const count = await this.prisma.companyTrustedIp.count({ where: { companyId } });
+    if (count >= MAX_TRUSTED_IPS) {
+      throw new BadRequestException(`Maximum ${MAX_TRUSTED_IPS} IP de confiance par entreprise.`);
+    }
+    return this.prisma.companyTrustedIp.upsert({
+      where: { companyId_ip: { companyId, ip } },
+      create: { companyId, ip, label },
+      update: { label, isActive: true },
+    });
+  }
+
+  // POST /companies/:companyId/trusted-ips/learned/revoke — écarter une IP apprise
+  @Post('learned/revoke')
+  async revokeLearned(
+    @Param('companyId') companyId: string,
+    @Body() dto: LearnedIpActionDto,
+    @Request() req,
+  ) {
+    await this.companySiteService.assertAccess(req.user.userId, companyId, true);
+    return this.companySiteService.blockLearnedIp(companyId, dto.ip.trim());
   }
 
   // POST /companies/:companyId/trusted-ips

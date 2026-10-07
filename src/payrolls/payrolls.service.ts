@@ -1182,7 +1182,10 @@ export interface SimulatePayrollOverrides {
     amount: number;
     isTaxable?: boolean;
     isCnss?: boolean;
+    fiscalType?: string | null;
   }>;
+  // 🆕 Retenues libres saisies à la main (paie manuelle) — déduites du net
+  manualDeductions?: Array<{ label?: string; amount: number }>;
 }
 
 @Injectable()
@@ -3068,6 +3071,14 @@ export class PayrollsService {
       0,
     );
 
+    const simManualDeductions = (overrides?.manualDeductions ?? [])
+      .filter((d) => Number(d?.amount) > 0)
+      .map((d) => ({ label: d.label || 'Retenue', amount: Number(d.amount) }));
+    const simManualDeductionTotal = simManualDeductions.reduce(
+      (s, d) => s + d.amount,
+      0,
+    );
+
     return {
       employee: {
         id: employee.id,
@@ -3126,8 +3137,11 @@ export class PayrollsService {
       })),
       totalLoanDeduction,
       totalAdvanceDeduction,
-      totalDeductions: calc.totalDeductions,
-      netSalary: calc.netSalary,
+      // 🆕 Retenues libres (paie manuelle) : comptées dans le total et le net
+      manualDeductions: simManualDeductions,
+      manualDeductionTotal: simManualDeductionTotal,
+      totalDeductions: calc.totalDeductions + simManualDeductionTotal,
+      netSalary: calc.netSalary - simManualDeductionTotal,
       totalEmployerCost: calc.totalEmployerCost,
       settings: {
         cnssSalarialRate: settings.cnssSalarialRate,
