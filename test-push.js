@@ -55,9 +55,9 @@ async function main() {
     for (const sub of user.pushSubscriptions) {
       try {
         const res = await webpush.sendNotification(JSON.parse(sub.token), payload, options);
-        console.log(`✅ ${sub.deviceLabel ?? sub.id} → HTTP ${res.statusCode}`);
+        console.log(`✅ ${new URL(JSON.parse(sub.token).endpoint).host} → HTTP ${res.statusCode}`);
       } catch (e) {
-        console.log(`❌ ${sub.deviceLabel ?? sub.id} → HTTP ${e.statusCode} ${e.body ?? e.message}`);
+        console.log(`❌ ${new URL(JSON.parse(sub.token).endpoint).host} → HTTP ${e.statusCode} ${e.body ?? e.message}`);
       }
     }
     return;

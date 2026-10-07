@@ -82,6 +82,15 @@ export class NotificationsController {
   }
 
   // ========================================
+  // 🔎 Le serveur connaît-il encore cet appareil ? (utilisé par le front pour réparer
+  // un abonnement mort : si false, le front en recrée un neuf)
+  // ========================================
+  @Get('push/status')
+  async pushStatus(@Query('endpoint') endpoint: string, @Request() req) {
+    return { registered: await this.pushService.hasEndpoint(req.user.userId, endpoint) };
+  }
+
+  // ========================================
   // 🔕 Désabonner l'appareil courant (les autres appareils restent actifs)
   // ========================================
   @Delete('push/unsubscribe')

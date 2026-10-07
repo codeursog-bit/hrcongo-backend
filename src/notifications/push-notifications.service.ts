@@ -97,6 +97,19 @@ export class PushNotificationsService implements OnModuleInit {
   }
 
   // ============================================================================
+  // 🔎 Cet appareil (endpoint) est-il encore enregistré pour cet utilisateur ?
+  // Si non → il a été supprimé (410 = abonnement mort) ou jamais reçu : le front
+  // doit recréer un abonnement NEUF au lieu de renvoyer le même endpoint.
+  // ============================================================================
+  async hasEndpoint(userId: string, endpoint?: string): Promise<boolean> {
+    if (!endpoint) return false;
+    const n = await this.prisma.pushSubscription.count({
+      where: { userId, token: { contains: endpoint } },
+    });
+    return n > 0;
+  }
+
+  // ============================================================================
   // 🔕 Supprimer l'abonnement d'UN appareil (pas les autres)
   // `endpoint` permet de cibler l'appareil courant précisément. Sans
   // `endpoint` (vieux client, compat), on retire tous les appareils de
