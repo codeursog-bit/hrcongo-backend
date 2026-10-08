@@ -44,7 +44,7 @@ import { ApprovalFunctionsService } from './approval-functions.service';
 import { ApprovalCircuitsService } from './core/approval-circuits.service';
 import { ApprovalDecisionsService } from './approval-decisions.service';
 import { ApprovalOpinionsService } from './approval-opinions.service';
-import { SetUserFunctionsDto } from './dto/set-user-functions.dto';
+import { SetUserFunctionsDto, SetExternalFunctionsDto } from './dto/set-user-functions.dto';
 import { SaveCircuitDto } from './dto/save-circuit.dto';
 import { GiveOpinionDto } from './dto/give-opinion.dto';
 import { DecisionRequestDto } from './dto/decision-request.dto';
@@ -114,6 +114,24 @@ export class ApprovalsController {
     return this.functions.setUserFunctions(adminId, targetUserId, dto.functions, companyId);
   }
 
+  // ✅ Avis inter-entreprises (admin multi-entreprises uniquement)
+  @Get('functions/external/:userId')
+  listExternalFunctions(
+    @Param('userId', new ParseUUIDPipe()) targetUserId: string,
+    @GetUser('id') adminId: string,
+  ) {
+    return this.functions.listExternalFunctions(adminId, targetUserId);
+  }
+
+  @Put('functions/external/:userId')
+  setExternalFunctions(
+    @Param('userId', new ParseUUIDPipe()) targetUserId: string,
+    @Body() dto: SetExternalFunctionsDto,
+    @GetUser('id') adminId: string,
+  ) {
+    return this.functions.setExternalFunctions(adminId, targetUserId, dto.companyId, dto.functions);
+  }
+
   @Get('me')
   getMe(@GetUser('id') userId: string) {
     return this.functions.getMyContext(userId);
@@ -153,6 +171,12 @@ export class ApprovalsController {
     @Query('companyId') companyId?: string,
   ) {
     return this.circuits.saveCircuit(adminId, type, dto, companyId);
+  }
+
+  // ── Avis à donner, toutes entreprises confondues (la sienne + celles où l'admin lui a donné une fonction) ──
+  @Get('inbox/all')
+  getInboxAll(@GetUser('id') userId: string) {
+    return this.decisions.getInboxAll(userId);
   }
 
   // ── LOT B : avis à donner ─────────────────────────────────────────────────

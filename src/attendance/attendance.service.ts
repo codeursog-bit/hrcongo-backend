@@ -379,6 +379,7 @@ export class AttendanceService {
       select: {
         workDays: true,
         officialStartHour: true,
+        officialStartMinute: true,
         lateToleranceMinutes: true,
       },
     });
@@ -482,6 +483,7 @@ export class AttendanceService {
       settings: {
         workDays,
         officialStartHour: payrollSettings?.officialStartHour || 8,
+        officialStartMinute: payrollSettings?.officialStartMinute ?? 0,
         lateToleranceMinutes: payrollSettings?.lateToleranceMinutes || 0,
       },
     };
@@ -570,6 +572,7 @@ export class AttendanceService {
         select: {
           workHoursPerDay: true,
           officialStartHour: true,
+          officialStartMinute: true,
           officialEndHour: true,
           overtimeEnabled: true,
           workDays: true,
@@ -578,6 +581,7 @@ export class AttendanceService {
 
       const workHoursPerDay = Number(ps?.workHoursPerDay ?? 8);
       const officialStartHour = Number((ps as any)?.officialStartHour ?? 8);
+      const officialStartMinute = Number((ps as any)?.officialStartMinute ?? 0);
       const overtimeEnabled = (ps as any)?.overtimeEnabled ?? true;
       const workDays = ((ps as any)?.workDays ?? DEFAULT_WORK_DAYS) as number[];
       const officialEndHour = Number(
@@ -628,7 +632,7 @@ export class AttendanceService {
 
       // ✅ Bridage arrivée anticipée
       const startH = shift?.startHour ?? officialStartHour;
-      const startMin = shift?.startMinute ?? 0;
+      const startMin = shift ? (shift.startMinute ?? 0) : officialStartMinute;
       const shiftStartThreshold = atCongoTime(checkInDate, startH, startMin);
       const effectiveCheckIn =
         checkInDate < shiftStartThreshold && !shift?.crossesMidnight

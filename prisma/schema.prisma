@@ -808,6 +808,8 @@ model PayrollSettings {
 
   // Pointage
   officialStartHour    Int? @default(8) @db.SmallInt
+  // 🆕 Minute de début officielle (8h30 → officialStartHour = 8 + officialStartMinute = 30)
+  officialStartMinute  Int  @default(0) @db.SmallInt
   lateToleranceMinutes Int? @default(60) @db.SmallInt
   workDays             Json @default("[1,2,3,4,5]") // ✅ JSON natif PostgreSQL
 
@@ -1157,6 +1159,10 @@ model Attendance {
   checkOutMethod PunchMethod?
   checkInSource  String?      @db.VarChar(100)
   checkOutSource String?      @db.VarChar(100)
+
+    // 🆕 Trace de la décision de zone au pointage (distance, marge, wifi) — lecture admin
+  checkInGeo  Json?
+  checkOutGeo Json?
 
   // ✅ HEURES RÉELLES
   totalHours   Decimal? @db.Decimal(6, 2)
@@ -2663,6 +2669,13 @@ model Loan {
 
   repaymentLogs LoanRepaymentLog[]
 
+    // Traçabilité des modifications RH/Admin
+  requestedAmount           Decimal?  @db.Decimal(15, 2)
+  requestedMonthlyRepayment Decimal?  @db.Decimal(15, 2)
+  amountModifiedBy          String?   @db.Uuid
+  amountModifiedAt          DateTime? @db.Timestamptz
+  amendments                DebtAmendment[]
+
   @@index([employeeId])
   @@index([status])
   @@map("loans")
@@ -2806,6 +2819,12 @@ model Advance {
   createdAt DateTime @default(now()) @db.Timestamptz
   updatedAt DateTime @updatedAt @db.Timestamptz
 
+    // Traçabilité des modifications RH/Admin
+  requestedAmount  Decimal?        @db.Decimal(15, 2)
+  amountModifiedBy String?         @db.Uuid
+  amountModifiedAt DateTime?       @db.Timestamptz
+  amendments       DebtAmendment[]
+
   @@index([employeeId])
   @@index([status])
   @@index([deductMonth, deductYear])
@@ -2822,6 +2841,38 @@ enum AdvanceStatus {
 
   @@map("advance_status")
 }
+
+/// Historique des modifications d'un prêt ou d'une avance par RH/Admin
+model DebtAmendment {
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+
+  loanId    String?  @db.Uuid
+  loan      Loan?    @relation(fields: [loanId], references: [id], onDelete: Cascade)
+  advanceId String?  @db.Uuid
+  advance   Advance? @relation(fields: [advanceId], references: [id], onDelete: Cascade)
+
+  oldAmount Decimal? @db.Decimal(15, 2)
+  newAmount Decimal? @db.Decimal(15, 2)
+
+  oldMonthlyRepayment Decimal? @db.Decimal(15, 2)
+  newMonthlyRepayment Decimal? @db.Decimal(15, 2)
+
+  oldDeductMonth Int? @db.SmallInt
+  newDeductMonth Int? @db.SmallInt
+  oldDeductYear  Int? @db.SmallInt
+  newDeductYear  Int? @db.SmallInt
+
+  modifiedBy     String? @db.Uuid
+  modifiedByName String? @db.VarChar(200)
+  modifiedByRole String? @db.VarChar(30)
+
+  createdAt DateTime @default(now()) @db.Timestamptz
+
+  @@index([loanId])
+  @@index([advanceId])
+  @@map("debt_amendments")
+}
+
 
 model CompanyDeduction {
   id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid

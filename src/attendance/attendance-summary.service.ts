@@ -56,12 +56,35 @@ export interface MonthlySummary {
   generatedAt: Date;
 }
 
+export interface GenerateAllSummariesResult {
+  success: boolean;
+  count: number;
+  created: number;
+  updated: number;
+  summaries: MonthlySummary[];
+  message: string;
+  cached?: boolean;
+}
+
 @Injectable()
 export class AttendanceSummaryService {
   constructor(
     private prisma: PrismaService,
     private utils: AttendanceUtilsService,
   ) {}
+
+  // ⚡ ANTI-SURCHARGE — plusieurs appelants (simulations, paie manuelle, suivi des impayés, paie en
+  // masse…) demandent la régénération des résumés d'une même entreprise/mois, parfois en rafale ou en
+  // même temps. Sans garde-fou, chaque demande recalcule TOUS les employés (coût × N).
+  //   • inflightGenerations : si une génération est déjà en cours pour (entreprise, mois), on attend
+  //     la même au lieu d'en lancer une seconde.
+  //   • lastGeneratedAt     : un appelant qui accepte des résumés récents (opts.maxAgeMs) les réutilise.
+  //     Sans maxAge, le comportement reste « toujours frais » (paie en masse, contrôleur…).
+  private readonly inflightGenerations = new Map<
+    string,
+    Promise<GenerateAllSummariesResult>
+  >();
+  private readonly lastGeneratedAt = new Map<string, number>();
 
   // ============================================================================
   // ✅ RÉSUMÉ MENSUEL
@@ -87,6 +110,7 @@ export class AttendanceSummaryService {
           orderBy: { effectiveDate: 'desc' },
           select: {
             officialStartHour: true,
+            officialStartMinute: true,
             workHoursPerDay: true,
             workDays: true,
             overtimeEnabled: true,
@@ -100,7 +124,13 @@ export class AttendanceSummaryService {
     );
     const workDays = ((ps as any)?.workDays ?? DEFAULT_WORK_DAYS) as number[];
     const overtimeEnabled = (ps as any)?.overtimeEnabled ?? true;
-    const officialEndH = officialStartH + workHoursPerDay;
+    // 🆕 minute de début (8h30) : la fin par défaut = début + durée, minutes comprises
+    const officialStartM = Number((ps as any)?.officialStartMinute ?? 0);
+    const officialEndTotalMin = Math.round(
+      (officialStartH * 60 + officialStartM + workHoursPerDay * 60),
+    );
+    const officialEndH = Math.floor(officialEndTotalMin / 60);
+    const officialEndM = officialEndTotalMin % 60;
 
     // ── Records du mois ────────────────────────────────────────────────────────
     const records = await this.prisma.attendance.findMany({
@@ -264,9 +294,9 @@ export class AttendanceSummaryService {
       if (record.checkIn && record.checkOut) {
         // ── Recalcul depuis les timestamps (source de vérité) ────────────────
         const shiftStartH = shift?.startHour ?? officialStartH;
-        const shiftStartMin = shift?.startMinute ?? 0;
+        const shiftStartMin = shift ? (shift.startMinute ?? 0) : officialStartM;
         const shiftEndH = shift?.endHour ?? officialEndH;
-        const shiftEndMin = shift?.endMinute ?? 0;
+        const shiftEndMin = shift ? (shift.endMinute ?? 0) : officialEndM;
         const crossesMid = shift?.crossesMidnight ?? false;
 
         const checkIn = new Date(record.checkIn);
@@ -401,7 +431,54 @@ export class AttendanceSummaryService {
     companyId: string,
     month: number,
     year: number,
-  ) {
+    opts?: { maxAgeMs?: number },
+  ): Promise<GenerateAllSummariesResult> {
+    const key = `${companyId}:${month}-${year}`;
+
+    // Résumés générés très récemment et l'appelant l'accepte → aucun recalcul
+    if (opts?.maxAgeMs && opts.maxAgeMs > 0) {
+      const last = this.lastGeneratedAt.get(key);
+      if (last && Date.now() - last < opts.maxAgeMs) {
+        return {
+          success: true,
+          count: 0,
+          created: 0,
+          updated: 0,
+          summaries: [],
+          cached: true,
+          message: 'Résumés récents réutilisés (aucun recalcul)',
+        };
+      }
+    }
+
+    // Une génération identique est déjà en cours → on attend la même
+    const running = this.inflightGenerations.get(key);
+    if (running) return running;
+
+    const job = this.runGenerateAndStoreAll(companyId, month, year)
+      .then((result) => {
+        this.lastGeneratedAt.set(key, Date.now());
+        if (this.lastGeneratedAt.size > 2000) {
+          const limit = Date.now() - 60 * 60 * 1000;
+          for (const [k, t] of this.lastGeneratedAt) {
+            if (t < limit) this.lastGeneratedAt.delete(k);
+          }
+        }
+        return result;
+      })
+      .finally(() => {
+        this.inflightGenerations.delete(key);
+      });
+    this.inflightGenerations.set(key, job);
+    return job;
+  }
+
+  // Corps d'origine (inchangé) : calcule et enregistre les résumés de tous les employés actifs
+  private async runGenerateAndStoreAll(
+    companyId: string,
+    month: number,
+    year: number,
+  ): Promise<GenerateAllSummariesResult> {
     const employees = await this.prisma.employee.findMany({
       where: { companyId, status: 'ACTIVE' },
       select: { id: true },

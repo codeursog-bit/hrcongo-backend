@@ -421,4 +421,60 @@ export class PermissionTicketsService {
       data: { status: 'CANCELLED' },
     });
   }
+
+  // ============================================================================
+  // 🗑️ SUPPRIMER (ADMIN / RH) — tous statuts, avec trace d'audit
+  // ============================================================================
+
+  async remove(id: string, userId: string) {
+    const user = await this.getUserWithCompany(userId);
+    // 🔒 Défense en profondeur : le @Roles du contrôleur fait déjà le tri
+    if (!HR_ROLES.includes(user.role)) {
+      throw new ForbiddenException(
+        'Seuls les administrateurs et les RH peuvent supprimer un ticket.',
+      );
+    }
+
+    const ticket = await this.prisma.permissionTicket.findUnique({
+      where: { id },
+      include: {
+        employee: {
+          select: { firstName: true, lastName: true, employeeNumber: true },
+        },
+      },
+    });
+    if (!ticket) throw new NotFoundException('Ticket introuvable');
+    if (ticket.companyId !== user.companyId)
+      throw new ForbiddenException('Accès refusé');
+
+    // 🧾 Trace AVANT suppression : une fois le ticket parti, plus rien ne permet de savoir ce qu'il contenait
+    await this.prisma.activityLog
+      .create({
+        data: {
+          userId,
+          action: 'PERMISSION_TICKET_DELETE',
+          entity: 'PERMISSION_TICKET',
+          entityId: ticket.id,
+          description: `Suppression du ticket de permission de ${ticket.employee?.firstName ?? ''} ${ticket.employee?.lastName ?? ''} (${ticket.employee?.employeeNumber ?? '—'})`,
+          metadata: {
+            status: ticket.status,
+            type: ticket.type,
+            missionType: ticket.missionType,
+            reason: ticket.reason,
+            destination: ticket.destination,
+            departureTime: ticket.departureTime,
+            expectedReturnTime: ticket.expectedReturnTime,
+            actualReturnTime: ticket.actualReturnTime,
+            employeeId: ticket.employeeId,
+            createdAt: ticket.createdAt,
+          },
+        },
+      })
+      .catch((e) =>
+        this.logger.warn(`Audit suppression ticket ${id} : ${e?.message}`),
+      );
+
+    await this.prisma.permissionTicket.delete({ where: { id } });
+    return { success: true, message: 'Ticket supprimé' };
+  }
 }

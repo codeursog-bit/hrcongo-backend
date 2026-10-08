@@ -123,6 +123,7 @@ export class LoansRequestsService {
         // restait toujours vide côté client, donc le total tombait à 0 peu
         // importe les vrais remboursements en base.
         repaymentLogs: { orderBy: [{ year: 'desc' }, { month: 'desc' }] },
+        amendments: { orderBy: { createdAt: 'desc' } },
       },
       orderBy: { createdAt: 'desc' },
     });
@@ -135,7 +136,10 @@ export class LoansRequestsService {
 
     return this.prisma.loan.findMany({
       where: { employeeId: employee.id },
-      include: { repaymentLogs: { orderBy: [{ year: 'desc' }, { month: 'desc' }] } },
+      include: {
+        repaymentLogs: { orderBy: [{ year: 'desc' }, { month: 'desc' }] },
+        amendments: { orderBy: { createdAt: 'desc' } },
+      },
       orderBy: { createdAt: 'desc' },
     });
   }
@@ -148,6 +152,7 @@ export class LoansRequestsService {
       include: {
         employee: { select: { ...this.common.employeeSelect, hireDate: true } },
         repaymentLogs: { orderBy: [{ year: 'desc' }, { month: 'desc' }] },
+        amendments: { orderBy: { createdAt: 'desc' } },
       },
     });
     if (!loan) throw new NotFoundException('Prêt introuvable');
@@ -177,19 +182,27 @@ export class LoansRequestsService {
     this.common.requireFinanceAccess(user.role);
     const loan = await this.common.getOwnedLoanOrThrow(id, user.companyId);
 
-    if (!FULL_ADMIN_ROLES.includes(user.role) && loan.status !== 'PENDING') {
-      throw new BadRequestException('Ce prêt ne peut plus être modifié (une décision a déjà été prise). Seul un administrateur peut modifier un prêt à ce stade.');
+    // Règle de protection (employé ET RH) : une demande n'est modifiable que
+    // tant qu'elle est en attente — dès qu'une décision est prise, le montant
+    // et les conditions sont figés, pour TOUS les rôles, admin compris.
+    if (!['PENDING', 'PENDING_DG'].includes(loan.status)) {
+      throw new BadRequestException('Ce prêt a déjà été traité : il ne peut plus être modifié. Seule une demande en attente peut l\u2019être.');
     }
 
+    const oldAmount = Number(loan.amount);
+    const oldMonthly = Number(loan.monthlyRepayment);
+    const amountChanged = dto.amount !== undefined && dto.amount !== oldAmount;
+    const monthlyChanged = dto.monthlyRepayment !== undefined && dto.monthlyRepayment !== oldMonthly;
+
     // ⚠️ Ne jamais écraser remainingBalance par le nouveau montant brut : ça
-    // effacerait les remboursements déjà enregistrés (ex: prêt à 400 000,
-    // 100 000 déjà remboursés → correction du montant à 200 000 doit laisser
-    // 100 000 restant, pas remettre 200 000). On ajuste par le delta.
+    // effacerait les remboursements déjà enregistrés. On repart de ce qui a
+    // RÉELLEMENT été remboursé (somme des logs, ou écart amount - solde si
+    // plus grand) et on recalcule le solde : nouveau montant - déjà remboursé.
     let remainingBalance: number | undefined = undefined;
     let newStatus: 'ACTIVE' | 'PAID' | undefined = undefined;
-    if (dto.amount !== undefined && dto.amount !== Number(loan.amount)) {
-      const alreadyRepaid = Number(loan.amount) - Number(loan.remainingBalance);
-      remainingBalance = Math.max(0, dto.amount - alreadyRepaid);
+    if (amountChanged) {
+      const alreadyRepaid = await this.getAlreadyRepaid('loan', loan.id, loan.status, oldAmount, Number(loan.remainingBalance));
+      remainingBalance = Math.max(0, dto.amount! - alreadyRepaid);
       // Ne recalculer le statut que si le prêt a déjà été décaissé (ACTIVE/PAID) —
       // ne jamais faire passer un prêt encore PENDING/REJECTED à ACTIVE via une simple édition de montant.
       if (['ACTIVE', 'PAID'].includes(loan.status)) {
@@ -197,11 +210,19 @@ export class LoansRequestsService {
       }
     }
 
-    return this.prisma.loan.update({
+    // La mensualité ne peut jamais dépasser le montant retenu.
+    const effectiveAmount = dto.amount ?? oldAmount;
+    const monthlyRepayment = dto.monthlyRepayment !== undefined
+      ? Math.min(dto.monthlyRepayment, effectiveAmount)
+      : (amountChanged && oldMonthly > effectiveAmount ? effectiveAmount : undefined);
+
+    const traceChanged = amountChanged || monthlyChanged || (monthlyRepayment !== undefined && monthlyRepayment !== oldMonthly);
+
+    await this.prisma.loan.update({
       where: { id },
       data: {
         amount: dto.amount,
-        monthlyRepayment: dto.monthlyRepayment,
+        monthlyRepayment,
         remainingBalance,
         status: newStatus,
         startDate: dto.startDate ? new Date(dto.startDate) : undefined,
@@ -209,8 +230,80 @@ export class LoansRequestsService {
         reason: dto.reason,
         nature: dto.nature,
         attachmentUrl: dto.attachmentUrl,
+        // Valeur d'origine conservée UNE seule fois (1ʳᵉ modification).
+        ...(traceChanged
+          ? {
+              requestedAmount: loan.requestedAmount ?? loan.amount,
+              requestedMonthlyRepayment: loan.requestedMonthlyRepayment ?? loan.monthlyRepayment,
+              amountModifiedBy: userId,
+              amountModifiedAt: new Date(),
+            }
+          : {}),
       },
     });
+
+    if (traceChanged) {
+      await this.recordAmendment(user, {
+        loanId: id,
+        oldAmount, newAmount: dto.amount ?? oldAmount,
+        oldMonthlyRepayment: oldMonthly, newMonthlyRepayment: monthlyRepayment ?? oldMonthly,
+      });
+      await this.notifyRequesterOfChange(user, loan.requestedByUserId, 'prêt', oldAmount, dto.amount ?? oldAmount);
+    }
+
+    return this.prisma.loan.findUnique({ where: { id }, include: { amendments: { orderBy: { createdAt: 'desc' } } } });
+  }
+
+  // ── Traçabilité des modifications ─────────────────────────────────────────
+
+  /** Montant déjà remboursé — source de vérité : logs de remboursement (paie + espèces). */
+  private async getAlreadyRepaid(kind: 'loan' | 'advance', id: string, status: string, amount: number, storedRemaining: number): Promise<number> {
+    if (status === 'PENDING' || status === 'PENDING_DG') return 0;
+    const agg = kind === 'loan'
+      ? await this.prisma.loanRepaymentLog.aggregate({ where: { loanId: id }, _sum: { amount: true } })
+      : await this.prisma.advanceRepaymentLog.aggregate({ where: { advanceId: id }, _sum: { amount: true } });
+    const fromLogs = Number(agg._sum.amount ?? 0);
+    // Un solde stocké à 0 sur une avance APPROVED est une ancienne ligne (colonne ajoutée avec défaut 0) : on ne s'y fie pas.
+    const fromBalance = storedRemaining > 0 || ['PAID', 'DEDUCTED'].includes(status) ? Math.max(0, amount - storedRemaining) : 0;
+    return Math.min(amount, Math.max(fromLogs, fromBalance));
+  }
+
+  private async recordAmendment(
+    user: { id: string; role: string },
+    d: {
+      loanId?: string; advanceId?: string;
+      oldAmount?: number; newAmount?: number;
+      oldMonthlyRepayment?: number; newMonthlyRepayment?: number;
+      oldDeductMonth?: number; newDeductMonth?: number;
+      oldDeductYear?: number; newDeductYear?: number;
+    },
+  ) {
+    const u = await this.prisma.user.findUnique({ where: { id: user.id }, select: { firstName: true, lastName: true } });
+    await this.prisma.debtAmendment.create({
+      data: {
+        ...d,
+        modifiedBy: user.id,
+        modifiedByName: u ? `${u.firstName} ${u.lastName}`.trim() : null,
+        modifiedByRole: user.role,
+      },
+    });
+  }
+
+  /** Prévient le demandeur quand RH/Admin change le montant de SA demande. */
+  private async notifyRequesterOfChange(user: { id: string }, requesterUserId: string | null, label: string, oldAmount: number, newAmount: number) {
+    if (!requesterUserId || requesterUserId === user.id || oldAmount === newAmount) return;
+    try {
+      await this.notificationsService.create({
+        userId: requesterUserId,
+        type: 'LOAN_REQUEST' as NotificationType,
+        title: `✏️ Montant de votre ${label} modifié`,
+        message: `Le montant de votre ${label} a été ajusté par les RH : ${oldAmount.toLocaleString('fr-FR')} → ${newAmount.toLocaleString('fr-FR')} FCFA.`,
+        link: '/loans/mon-espace',
+        metadata: { oldAmount, newAmount },
+      });
+    } catch (e) {
+      this.logger.warn(`Notification de modification non envoyée : ${(e as Error).message}`);
+    }
   }
 
   /**
@@ -347,6 +440,7 @@ export class LoansRequestsService {
       include: {
         employee: { select: this.common.employeeSelect },
         repaymentLogs: { orderBy: [{ year: 'desc' }, { month: 'desc' }] },
+        amendments: { orderBy: { createdAt: 'desc' } },
       },
       orderBy: { createdAt: 'desc' },
     });
@@ -356,7 +450,7 @@ export class LoansRequestsService {
     const user = await this.common.getVerifiedUser(userId);
     const employee = await this.prisma.employee.findFirst({ where: { email: user.email ?? undefined, companyId: user.companyId } });
     if (!employee) throw new NotFoundException("Aucun dossier employé associé à ce compte.");
-    return this.prisma.advance.findMany({ where: { employeeId: employee.id }, orderBy: { createdAt: 'desc' } });
+    return this.prisma.advance.findMany({ where: { employeeId: employee.id }, include: { amendments: { orderBy: { createdAt: 'desc' } } }, orderBy: { createdAt: 'desc' } });
   }
 
   async findOneAdvance(id: string, userId: string, overrideCompanyId?: string) {
@@ -364,7 +458,10 @@ export class LoansRequestsService {
     this.common.applyCompanyOverride(user, overrideCompanyId);
     const advance = await this.prisma.advance.findUnique({
       where: { id },
-      include: { employee: { select: { ...this.common.employeeSelect, hireDate: true } } },
+      include: {
+        employee: { select: { ...this.common.employeeSelect, hireDate: true } },
+        amendments: { orderBy: { createdAt: 'desc' } },
+      },
     });
     if (!advance) throw new NotFoundException('Avance introuvable');
 
@@ -390,24 +487,34 @@ export class LoansRequestsService {
     this.common.requireFinanceAccess(user.role);
     const advance = await this.common.getOwnedAdvanceOrThrow(id, user.companyId);
 
-    if (!FULL_ADMIN_ROLES.includes(user.role) && advance.status !== 'PENDING') {
-      throw new BadRequestException('Cette avance ne peut plus être modifiée (demandez à un administrateur).');
+    // Même règle de protection que pour les prêts : modifiable uniquement en attente, pour tous les rôles.
+    if (advance.status !== 'PENDING') {
+      throw new BadRequestException('Cette avance a déjà été traitée : elle ne peut plus être modifiée. Seule une demande en attente peut l\u2019être.');
     }
 
-    // Même principe que pour les prêts : ajuster remainingBalance par delta,
-    // jamais l'écraser, pour préserver les remboursements déjà enregistrés.
+    const oldAmount = Number(advance.amount);
+    const amountChanged = dto.amount !== undefined && dto.amount !== oldAmount;
+    const scheduleChanged =
+      (dto.deductMonth !== undefined && dto.deductMonth !== advance.deductMonth) ||
+      (dto.deductYear !== undefined && dto.deductYear !== advance.deductYear);
+
+    // Même principe que pour les prêts : on repart du montant réellement
+    // remboursé (logs), jamais de `remainingBalance` seul — il vaut 0 sur les
+    // anciennes avances, ce qui faisait passer l'avance à « soldée » dès
+    // qu'on baissait son montant.
     let remainingBalance: number | undefined = undefined;
     let newStatus: 'APPROVED' | 'PAID' | undefined = undefined;
-    if (dto.amount !== undefined && dto.amount !== Number(advance.amount)) {
-      const currentRemaining = Number(advance.remainingBalance ?? advance.amount);
-      const alreadyRepaid = Number(advance.amount) - currentRemaining;
-      remainingBalance = Math.max(0, dto.amount - alreadyRepaid);
+    if (amountChanged) {
+      const alreadyRepaid = await this.getAlreadyRepaid('advance', advance.id, advance.status, oldAmount, Number(advance.remainingBalance ?? 0));
+      remainingBalance = Math.max(0, dto.amount! - alreadyRepaid);
       if (['APPROVED', 'PAID'].includes(advance.status)) {
         newStatus = remainingBalance === 0 ? 'PAID' : 'APPROVED';
       }
     }
 
-    return this.prisma.advance.update({
+    const traceChanged = amountChanged || scheduleChanged;
+
+    await this.prisma.advance.update({
       where: { id },
       data: {
         amount: dto.amount,
@@ -416,7 +523,29 @@ export class LoansRequestsService {
         reason: dto.reason,
         remainingBalance,
         status: newStatus,
+        ...(traceChanged
+          ? {
+              requestedAmount: advance.requestedAmount ?? advance.amount,
+              amountModifiedBy: userId,
+              amountModifiedAt: new Date(),
+            }
+          : {}),
       },
+    });
+
+    if (traceChanged) {
+      await this.recordAmendment(user, {
+        advanceId: id,
+        oldAmount, newAmount: dto.amount ?? oldAmount,
+        oldDeductMonth: advance.deductMonth, newDeductMonth: dto.deductMonth ?? advance.deductMonth,
+        oldDeductYear: advance.deductYear, newDeductYear: dto.deductYear ?? advance.deductYear,
+      });
+      await this.notifyRequesterOfChange(user, advance.requestedByUserId, 'avance', oldAmount, dto.amount ?? oldAmount);
+    }
+
+    return this.prisma.advance.findUnique({
+      where: { id },
+      include: { amendments: { orderBy: { createdAt: 'desc' } } },
     });
   }
 

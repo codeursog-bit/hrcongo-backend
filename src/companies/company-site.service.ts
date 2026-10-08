@@ -32,6 +32,22 @@ const IP_SIGHTING_WRITE_THROTTLE_MS = 30 * 60 * 1000;
 // super admin, rattachés à des dizaines de clients sans lien entre eux, ne doivent PAS les fusionner.
 const IP_GROUP_OWNER_ROLES: UserRole[] = ['ADMIN'];
 
+// 🆕 Trace de la décision de zone, enregistrée avec le pointage (Attendance.checkInGeo / checkOutGeo)
+// et affichée à l'admin dans le détail du pointage : sur quoi l'entrée/sortie a été autorisée.
+export interface GeoTrace {
+  v: 1;
+  basis: 'RADIUS' | 'TOLERANCE' | 'TRUSTED_IP';
+  distance: number; // m, entre la position GPS et le site retenu
+  radius: number; // m, rayon du site retenu
+  accuracy: number | null; // ± m annoncés par l'appareil (null = inconnue)
+  tolerance: number | null; // m, marge réellement appliquée (basis TOLERANCE)
+  site: string; // nom du site retenu
+  ip: string | null; // IP publique normalisée vue au pointage
+  ipKind?: 'ADMIN' | 'LEARNED'; // basis TRUSTED_IP : IP saisie par l'admin ou apprise
+  ipLabel?: string; // libellé admin de l'IP de confiance
+  ipPeople?: number; // IP apprise : nombre de personnes différentes
+}
+
 @Injectable()
 export class CompanySiteService {
   constructor(private readonly prisma: PrismaService) {}
@@ -162,6 +178,7 @@ export class CompanySiteService {
     configured: boolean; // false = aucun site/position n'est configuré du tout pour cette entreprise
     basis: 'RADIUS' | 'TOLERANCE' | 'TRUSTED_IP' | null;
     detail: string | null;
+    trace: GeoTrace | null; // 🆕 pour l'affichage admin (null = rien à tracer)
   }> {
     // Sites multi-sites (table CompanySite)
     const sites = await this.findActive(companyId);
@@ -211,6 +228,7 @@ export class CompanySiteService {
         configured: false,
         basis: null,
         detail: null,
+        trace: null,
       };
     }
 
@@ -227,6 +245,7 @@ export class CompanySiteService {
       m: (typeof withDistances)[number],
       basis: 'RADIUS' | 'TOLERANCE' | 'TRUSTED_IP',
       detail: string | null,
+      info?: Partial<Pick<GeoTrace, 'tolerance' | 'ipKind' | 'ipLabel' | 'ipPeople'>>,
     ) => ({
       matched: true,
       siteId: m.id,
@@ -235,6 +254,20 @@ export class CompanySiteService {
       configured: true,
       basis,
       detail,
+      // 🆕 Trace lisible par l'admin (acc et clientIp sont définis juste en dessous, avant tout appel)
+      trace: {
+        v: 1,
+        basis,
+        distance: Math.round(m.distance),
+        radius: Math.round(m.radius),
+        accuracy: Number.isFinite(acc) && acc > 0 ? Math.round(acc) : null,
+        tolerance: info?.tolerance ?? null,
+        site: m.name,
+        ip: clientIp,
+        ...(info?.ipKind ? { ipKind: info.ipKind } : {}),
+        ...(info?.ipLabel ? { ipLabel: info.ipLabel } : {}),
+        ...(info?.ipPeople ? { ipPeople: info.ipPeople } : {}),
+      } as GeoTrace,
     });
 
     // Précision annoncée : exploitable seulement si connue et pas absurde
@@ -266,7 +299,9 @@ export class CompanySiteService {
       if (soft) {
         // Un pointage accepté avec marge compte aussi pour l'apprentissage de l'IP (si GPS bon)
         if (accuracyGoodForLearning) this.learnIpFromValidPunch(companyId, clientIp, extra?.userId);
-        return ok(soft, 'TOLERANCE', `GPS avec marge (précision ±${Math.round(acc)} m)`);
+        return ok(soft, 'TOLERANCE', `GPS avec marge (précision ±${Math.round(acc)} m)`, {
+          tolerance: Math.round(tolerance),
+        });
       }
     }
 
@@ -279,7 +314,10 @@ export class CompanySiteService {
         select: { label: true },
       });
       if (trusted) {
-        return ok(closest, 'TRUSTED_IP', `IP de confiance : ${trusted.label}`);
+        return ok(closest, 'TRUSTED_IP', `IP de confiance : ${trusted.label}`, {
+          ipKind: 'ADMIN',
+          ipLabel: trusted.label,
+        });
       }
       // 3b) IP apprise automatiquement (quorum de personnes différentes, < 24 h)
       if (!isPrivateOrLocalIp(ip)) {
@@ -289,6 +327,7 @@ export class CompanySiteService {
             closest,
             'TRUSTED_IP',
             `IP de confiance apprise (${people} pointages GPS valides < ${IP_LEARN_WINDOW_HOURS} h)`,
+            { ipKind: 'LEARNED', ipPeople: people },
           );
         }
       }
@@ -303,6 +342,7 @@ export class CompanySiteService {
       configured: true,
       basis: null,
       detail: null,
+      trace: null,
     };
   }
 

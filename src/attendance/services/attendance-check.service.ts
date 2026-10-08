@@ -4,7 +4,7 @@
 // ============================================================================
 
 import { atCongoTime, congoDayOfWeek } from '../../common/utils/congo-time';
-import { Injectable } from '@nestjs/common';
+import { ForbiddenException, Injectable } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AppGateway } from '../../app.gateway';
 import { AttendanceStatus, NotificationType } from '@prisma/client';
@@ -38,27 +38,27 @@ import {
 
 const EARLY_MESSAGES: Array<{
   title: string;
-  body: (n: string, h: number) => string;
+  body: (n: string, h: string) => string;
 }> = [
   {
     title: '☀️ Quelle motivation !',
     body: (n, h) =>
-      `Bonjour ${n} ! Présence enregistrée 🚀 Votre compteur démarrera à ${h}h00, l'heure de votre shift.`,
+      `Bonjour ${n} ! Présence enregistrée 🚀 Votre compteur démarrera à ${h}, l'heure de votre shift.`,
   },
   {
     title: '🌅 Vous êtes déjà là !',
     body: (n, h) =>
-      `Bonjour ${n} ! Merci pour votre engagement ! Compteur démarre à ${h}h00 selon votre planning.`,
+      `Bonjour ${n} ! Merci pour votre engagement ! Compteur démarre à ${h} selon votre planning.`,
   },
   {
     title: '💪 Arrivée anticipée notée !',
     body: (n, h) =>
-      `Bonjour ${n} ! Temps effectif comptabilisé dès ${h}h00. Belle journée !`,
+      `Bonjour ${n} ! Temps effectif comptabilisé dès ${h}. Belle journée !`,
   },
   {
     title: '⭐ Lève-tôt du jour !',
     body: (n, h) =>
-      `Bonjour ${n} ! Le compteur démarre à ${h}h00 selon votre shift. Belle journée 😊`,
+      `Bonjour ${n} ! Le compteur démarre à ${h} selon votre shift. Belle journée 😊`,
   },
 ];
 
@@ -158,6 +158,58 @@ export class AttendanceCheckService {
     return (await resolveUserEmployeeId(this.prisma, userId)) === employeeId ? 'GPS' : 'MANUAL';
   }
 
+  /**
+   * 🔒 Qui a le droit de pointer POUR cet employé ?
+   * Avant : n'importe quel utilisateur connecté pouvait pointer pour n'importe quel employeeId (UUID),
+   * y compris d'une autre entreprise. Désormais :
+   *  - borne / QR / code secret (actingCompanyId, code serveur) : l'employé doit être de l'entreprise annoncée ;
+   *  - pour SOI-MÊME (fiche liée au compte, même dans une autre entreprise du portefeuille) : OK ;
+   *  - pour un AUTRE : même entreprise active ET (ADMIN/RH/SUPER_ADMIN, ou permission « secrétaire »,
+   *    ou MANAGER pour son département).
+   */
+  private async assertCanPunchFor(
+    employeeId: string,
+    userId: string,
+    opts?: AttendanceActingOptions,
+  ): Promise<void> {
+    const employee = await this.prisma.employee.findUnique({
+      where: { id: employeeId },
+      select: { companyId: true, departmentId: true },
+    });
+    if (!employee) throw new EmployeeNotFoundException(employeeId);
+
+    if (opts?.actingCompanyId) {
+      if (employee.companyId !== opts.actingCompanyId) {
+        throw new ForbiddenException("Cet employé n'appartient pas à cette entreprise.");
+      }
+      return;
+    }
+    if (!userId) throw new ForbiddenException('Action non autorisée.');
+
+    // 1) Pour soi-même
+    if ((await resolveUserEmployeeId(this.prisma, userId)) === employeeId) return;
+
+    // 2) Pour un autre
+    const actor = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { id: true, role: true, companyId: true, canRecordAttendanceForAll: true },
+    });
+    if (!actor?.companyId || employee.companyId !== actor.companyId) {
+      throw new ForbiddenException("Cet employé n'appartient pas à votre entreprise.");
+    }
+    if (['ADMIN', 'HR_MANAGER', 'SUPER_ADMIN'].includes(actor.role as string)) return;
+    if (actor.canRecordAttendanceForAll) return;
+    if (actor.role === 'MANAGER') {
+      const dept = await this.prisma.department.findFirst({
+        where: { managerId: actor.id, companyId: actor.companyId },
+        select: { id: true },
+      });
+      if (dept && employee.departmentId === dept.id) return;
+      throw new ForbiddenException("Vous n'avez accès qu'aux pointages de votre département.");
+    }
+    throw new ForbiddenException('Vous ne pouvez pointer que pour vous-même.');
+  }
+
   // ============================================================================
   // ✅ CHECK-IN
   // ============================================================================
@@ -174,6 +226,9 @@ export class AttendanceCheckService {
             select: { companyId: true, role: true },
           });
     if (!user?.companyId) throw new CompanyNotFoundException();
+
+    // 🔒 L'appelant a-t-il le droit de pointer pour CET employé ?
+    await this.assertCanPunchFor(dto.employeeId, userId, opts);
 
     // 🚧 Abonnement/essai expiré (ou quota FREE dépassé) → on bloque le
     // pointage avant toute autre vérification, avec un message adapté à
@@ -241,12 +296,15 @@ export class AttendanceCheckService {
       select: {
         workDays: true,
         officialStartHour: true,
+        officialStartMinute: true,
         lateToleranceMinutes: true,
       },
     });
 
     const workDays = (settings?.workDays ?? DEFAULT_WORK_DAYS) as number[];
     const officialStartHour = settings?.officialStartHour ?? DEFAULT_START_HOUR;
+    // 🆕 minute de début officielle (8h30)
+    const officialStartMinute = Number(settings?.officialStartMinute ?? 0);
     const lateToleranceMinutes =
       settings?.lateToleranceMinutes ?? DEFAULT_TOLERANCE_MINUTES;
 
@@ -284,7 +342,8 @@ export class AttendanceCheckService {
 
     // ── Heure de début effective ───────────────────────────────────────────
     const startHour = shift?.startHour ?? officialStartHour;
-    const startMinute = shift?.startMinute ?? 0;
+    // 🆕 sans shift : minute officielle de l'entreprise (avant : toujours 0)
+    const startMinute = shift ? (shift.startMinute ?? 0) : officialStartMinute;
 
     // ── GPS multi-sites ────────────────────────────────────────────────────
     // ✅ Le backend est désormais la SEULE autorité : si la géolocalisation
@@ -301,6 +360,7 @@ export class AttendanceCheckService {
     let matchedSiteName: string | null = null;
     let matchedDistance: number | null = null;
     let zoneNote: string | null = null; // trace « GPS avec marge » / « IP de confiance »
+    let zoneTrace: any = null; // 🆕 trace structurée (distance, marge, wifi) pour l'écran admin
 
     if (geofencingConfigured && !opts?.skipGeofence) {
       // Un site (ou la position principale) est configuré → la position est
@@ -336,6 +396,7 @@ export class AttendanceCheckService {
       matchedSiteName = siteCheck.siteName;
       matchedDistance = siteCheck.distance;
       zoneNote = siteCheck.detail;
+      zoneTrace = siteCheck.trace;
     }
     // Si rien n'est configuré pour l'entreprise, le pointage reste possible
     // sans position (comportement legacy) — rien à vérifier ici.
@@ -366,6 +427,7 @@ export class AttendanceCheckService {
       checkIn: now,
       checkInMethod: punchMethod,
       checkInSource: opts?.source?.slice(0, 100) ?? zoneNote?.slice(0, 100) ?? null,
+      checkInGeo: zoneTrace ?? undefined, // 🆕
       checkInLat: latitude ?? null,
       checkInLon: longitude ?? null,
       checkInSiteId: matchedSiteId,
@@ -411,8 +473,12 @@ export class AttendanceCheckService {
         ...attendance,
         earlyArrival: true,
         earlyArrivalTitle: msg.title,
-        earlyArrivalMessage: msg.body(employee.firstName, startHour),
+        earlyArrivalMessage: msg.body(
+          employee.firstName,
+          `${startHour}h${String(startMinute).padStart(2, '0')}`,
+        ),
         shiftStartHour: startHour,
+        shiftStartMinute: startMinute,
       };
     }
 
@@ -449,6 +515,9 @@ export class AttendanceCheckService {
     const today = this.utils.getTodayString();
     const now = new Date();
 
+    // 🔒 L'appelant a-t-il le droit de pointer pour CET employé ?
+    await this.assertCanPunchFor(employeeId, userId, opts);
+
     const record = await this.prisma.attendance.findFirst({
       where: { employeeId, date: today },
     });
@@ -482,6 +551,7 @@ export class AttendanceCheckService {
     let checkOutSiteName: string | null = null;
     let checkOutDistance: number | null = null;
     let checkOutZoneNote: string | null = null; // trace « GPS avec marge » / « IP de confiance »
+    let checkOutZoneTrace: any = null; // 🆕 trace structurée pour l'écran admin
 
     const geofencingConfiguredOut =
       await this.companySiteService.isGeofencingConfigured(user.companyId);
@@ -514,6 +584,7 @@ export class AttendanceCheckService {
       checkOutSiteName = siteCheckOut.siteName;
       checkOutDistance = siteCheckOut.distance;
       checkOutZoneNote = siteCheckOut.detail;
+      checkOutZoneTrace = siteCheckOut.trace;
     }
 
     // ── Settings ───────────────────────────────────────────────────────────
@@ -523,6 +594,7 @@ export class AttendanceCheckService {
       select: {
         workHoursPerDay: true,
         officialStartHour: true,
+        officialStartMinute: true,
         officialEndHour: true,
         overtimeEnabled: true,
         workDays: true,
@@ -535,6 +607,7 @@ export class AttendanceCheckService {
     const officialStartHour = Number(
       (ps as any)?.officialStartHour ?? DEFAULT_START_HOUR,
     );
+    const officialStartMinute = Number((ps as any)?.officialStartMinute ?? 0);
     const overtimeEnabled = (ps as any)?.overtimeEnabled ?? true;
     const workDays = ((ps as any)?.workDays ?? DEFAULT_WORK_DAYS) as number[];
     // 🆕 Fin de journée = officialEndHour (source de vérité) ; repli sur début + durée si absent
@@ -566,7 +639,7 @@ export class AttendanceCheckService {
 
     // ── Bridage arrivée anticipée ──────────────────────────────────────────
     const startH = shift?.startHour ?? officialStartHour;
-    const startMin = shift?.startMinute ?? 0;
+    const startMin = shift ? (shift.startMinute ?? 0) : officialStartMinute;
     const realCheckIn = new Date(record.checkIn);
     const shiftStartThreshold = atCongoTime(realCheckIn, startH, startMin);
     const effectiveCheckIn =
@@ -649,6 +722,7 @@ export class AttendanceCheckService {
         checkOut: now,
         checkOutMethod: opts?.method ?? (await this.defaultPunchMethod(employeeId, userId)),
         checkOutSource: opts?.source?.slice(0, 100) ?? checkOutZoneNote?.slice(0, 100) ?? null,
+        checkOutGeo: checkOutZoneTrace ?? undefined, // 🆕
         checkOutLat: latitude ?? null,
         checkOutLon: longitude ?? null,
         checkOutSiteId,

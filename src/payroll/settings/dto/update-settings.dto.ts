@@ -21,6 +21,13 @@ export class UpdatePayrollSettingsDto {
   @Max(23)
   officialStartHour?: number;
 
+  // 🆕 Minute de début officielle (8h30 → officialStartHour 8 + officialStartMinute 30)
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  @Max(59)
+  officialStartMinute?: number;
+
   @IsOptional()
   @IsNumber()
   @Min(0)

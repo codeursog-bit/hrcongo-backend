@@ -765,4 +765,50 @@ export class ApprovalDecisionsService {
     );
     return { items };
   }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // 6bis) BOÎTE D'AVIS TOUTES ENTREPRISES
+  // Sa propre entreprise + chaque entreprise où l'admin lui a donné une fonction d'avis.
+  // Chaque élément porte companyId / companyName / external pour que l'écran sache
+  // sur quelle entreprise donner l'avis (paramètre ?companyId=).
+  // ══════════════════════════════════════════════════════════════════════════
+  async getInboxAll(userId: string) {
+    const me = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { companyId: true, isActive: true },
+    });
+    if (!me || !me.isActive) throw new ForbiddenException('Utilisateur inactif ou introuvable');
+
+    const extRows = await this.prisma.userApprovalFunction.findMany({
+      where: me.companyId ? { userId, companyId: { not: me.companyId } } : { userId },
+      select: { companyId: true, company: { select: { legalName: true, tradeName: true } } },
+    });
+    const externals = new Map<string, string>();
+    for (const r of extRows) externals.set(r.companyId, r.company.tradeName || r.company.legalName);
+
+    const out: any[] = [];
+
+    if (me.companyId) {
+      const own = await this.prisma.company.findUnique({
+        where: { id: me.companyId },
+        select: { legalName: true, tradeName: true },
+      });
+      const { items } = await this.getInbox(userId);
+      for (const it of items) {
+        out.push({ ...it, companyId: me.companyId, companyName: own ? own.tradeName || own.legalName : '', external: false });
+      }
+    }
+
+    for (const [companyId, companyName] of externals) {
+      try {
+        const { items } = await this.getInbox(userId, companyId);
+        for (const it of items) out.push({ ...it, companyId, companyName, external: true });
+      } catch {
+        // Une entreprise inaccessible ne doit jamais masquer les autres.
+      }
+    }
+
+    out.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    return { items: out };
+  }
 }

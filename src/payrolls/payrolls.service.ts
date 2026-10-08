@@ -2807,6 +2807,9 @@ export class PayrollsService {
     year: number,
     userId: string,
     overrides?: SimulatePayrollOverrides,
+    // ⚡ Option facultative (appelants en rafale, ex. suivi des impayés) : accepte des résumés de
+    // présence générés il y a moins de `summariesMaxAgeMs` au lieu de tout recalculer. Absent = comportement d'origine.
+    simOpts?: { summariesMaxAgeMs?: number },
   ) {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
@@ -2877,6 +2880,9 @@ export class PayrollsService {
           user.companyId,
           monthNum,
           year,
+          simOpts?.summariesMaxAgeMs
+            ? { maxAgeMs: simOpts.summariesMaxAgeMs }
+            : undefined,
         );
         const summaries = await this.attendanceSummary.getStoredSummaries(
           user.companyId,
@@ -3175,7 +3181,12 @@ export class PayrollsService {
     month: number,
     year: number,
     userId: string,
-    opts?: { workDays?: number; daysOverrides?: Record<string, number> },
+    opts?: {
+      workDays?: number;
+      daysOverrides?: Record<string, number>;
+      // ⚡ réutiliser des résumés de présence récents (voir simulatePayroll)
+      summariesMaxAgeMs?: number;
+    },
   ) {
     const simulations = await Promise.allSettled(
       employeeIds.map((id) => {
@@ -3191,6 +3202,9 @@ export class PayrollsService {
           year,
           userId,
           Object.keys(overrides).length ? overrides : undefined,
+          opts?.summariesMaxAgeMs
+            ? { summariesMaxAgeMs: opts.summariesMaxAgeMs }
+            : undefined,
         );
       }),
     );

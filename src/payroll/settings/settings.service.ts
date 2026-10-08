@@ -109,6 +109,7 @@ export class PayrollSettingsService {
       where: { companyId },
       select: {
         officialStartHour: true,
+        officialStartMinute: true,
         lateToleranceMinutes: true,
         workDaysPerMonth: true,
         workHoursPerDay: true,
@@ -119,6 +120,7 @@ export class PayrollSettingsService {
     if (!settings) {
       return {
         officialStartHour: CONST.DEFAULT_START_HOUR,
+        officialStartMinute: 0,
         lateToleranceMinutes: CONST.DEFAULT_TOLERANCE_MINUTES,
         workDaysPerMonth: CONST.DEFAULT_WORK_DAYS_PER_MONTH,
         workHoursPerDay: CONST.DEFAULT_WORK_HOURS_PER_DAY,
@@ -241,6 +243,9 @@ export class PayrollSettingsService {
     // Champs existants
     if (dto.officialStartHour !== undefined)
       data.officialStartHour = dto.officialStartHour;
+    // 🆕 minute de début (8h30)
+    if (dto.officialStartMinute !== undefined)
+      data.officialStartMinute = dto.officialStartMinute;
     if (dto.lateToleranceMinutes !== undefined)
       data.lateToleranceMinutes = dto.lateToleranceMinutes;
     // 🆕 fin officielle + pause

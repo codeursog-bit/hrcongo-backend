@@ -4,6 +4,7 @@ import {
   Param,
   UseGuards,
   Request,
+  Query,
   ForbiddenException,
 } from '@nestjs/common';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard'; // Ton guard JWT
@@ -19,8 +20,9 @@ export class UnpaidSalaryController {
   // Résumé global pour le dashboard de l'entreprise
   @Get('dashboard')
   @Roles('ADMIN', 'HR_MANAGER') // Seuls les chefs voient ça
-  async getDashboard(@Request() req: any) {
-    return this.service.getDashboard(req.user.id);
+  async getDashboard(@Request() req: any, @Query('refresh') refresh?: string) {
+    // ?refresh=1 (bouton « actualiser ») : recalcule les estimations au lieu de lire le cache
+    return this.service.getDashboard(req.user.id, refresh === '1' || refresh === 'true');
   }
 
   // Stats rapides (pour une badge de notification par exemple)

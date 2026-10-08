@@ -5,6 +5,7 @@ import {
   IsBoolean,
   IsIn,
   IsString,
+  IsUUID,
   ValidateNested,
 } from 'class-validator';
 import { APPROVAL_FUNCTION_CODES } from '../approvals.constants';
@@ -22,6 +23,20 @@ export class UserFunctionItemDto {
 export class SetUserFunctionsDto {
   // Liste COMPLÈTE des fonctions de l'utilisateur (remplace l'existant).
   // Tableau vide = on retire toutes les fonctions.
+  @IsArray()
+  @ArrayMaxSize(10)
+  @ValidateNested({ each: true })
+  @Type(() => UserFunctionItemDto)
+  functions: UserFunctionItemDto[];
+}
+
+
+// ✅ Avis inter-entreprises : fonctions données à un utilisateur POUR UNE AUTRE entreprise
+// du portefeuille de l'admin (remplace la liste de cette entreprise-là uniquement).
+export class SetExternalFunctionsDto {
+  @IsUUID()
+  companyId: string;
+
   @IsArray()
   @ArrayMaxSize(10)
   @ValidateNested({ each: true })

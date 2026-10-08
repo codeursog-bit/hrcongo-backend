@@ -924,6 +924,26 @@ export class EmployeesService {
         normalizeNationality(createEmployeeDto.nationality) ?? undefined;
     }
 
+    // 🔒 E-mail : une seule fiche NON TERMINÉE par e-mail et par entreprise. Un doublon empêchait de
+    //    relier le compte à sa fiche (pointage « manuel », pause invisible…). Une fiche TERMINATED
+    //    (ancien contrat) ne bloque pas la recréation.
+    {
+      const emailNorm = String(createEmployeeDto.email).trim();
+      const emailTaken = await this.prisma.employee.findFirst({
+        where: {
+          companyId: user.companyId,
+          email: { equals: emailNorm, mode: 'insensitive' },
+          status: { not: 'TERMINATED' },
+        },
+        select: { firstName: true, lastName: true, employeeNumber: true },
+      });
+      if (emailTaken) {
+        throw new ConflictException(
+          `L'e-mail "${emailNorm}" est déjà utilisé par ${emailTaken.firstName} ${emailTaken.lastName} (${emailTaken.employeeNumber}). Utilisez un autre e-mail ou clôturez l'ancienne fiche.`,
+        );
+      }
+    }
+
     const dept = await this.prisma.department.findUnique({
       where: { id: createEmployeeDto.departmentId },
       select: { companyId: true },

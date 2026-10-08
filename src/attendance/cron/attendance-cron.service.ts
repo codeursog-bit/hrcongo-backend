@@ -95,14 +95,14 @@ export class AttendanceCronService implements OnModuleDestroy {
   // ============================================================================
   // CRON 0 — Rappel AVANT l'heure officielle de début (tourne h24)
   // ----------------------------------------------------------------------------
-  // Base : PayrollSettings.officialStartHour de chaque entreprise (heure ronde).
+  // Base : PayrollSettings.officialStartHour + officialStartMinute de chaque entreprise
+  // (8h30, 7h45… : une entreprise peut démarrer à n'importe quelle minute).
   // Le rappel part dans la fenêtre [début − X min, début[, avec X =
   // PlatformSettings.preShiftReminderMinutes. Un tick par minute, MAIS :
-  //  • officialStartHour étant une heure ronde, une entreprise ne peut être
-  //    concernée que dans les X dernières minutes avant chaque heure pile : hors
-  //    de cette fenêtre le tick sort tout de suite (ni verrou, ni requête).
-  //    Ex. X = 20 → on travaille de H:40 à H:59, et seulement les entreprises
-  //    qui démarrent à H+1 ; les autres entreprises ne sont même pas regardées.
+  //  • sortie rapide : une seule petite requête (heures de début distinctes) ;
+  //    si aucune entreprise ne démarre dans les X prochaines minutes, le tick
+  //    sort tout de suite (ni verrou, ni jours fériés, ni liste d'entreprises).
+  //    Ex. X = 10 → à 8h20, une entreprise qui démarre à 8h30 est concernée.
   //  • le service peut tomber DEMAIN (entreprise qui démarre à 0h → rappel à
   //    23:40) : jour ouvré, férié, pointage et congé sont évalués sur la date du
   //    SERVICE, pas sur celle du tick.
@@ -123,9 +123,24 @@ export class AttendanceCronService implements OnModuleDestroy {
       return;
     }
 
-    // Sortie rapide : prochaine heure pile trop loin → aucune entreprise concernée.
-    const minutesToNextHour = 60 - (nowMin % 60); // 1 … 60
-    if (minutesToNextHour > preShiftMinutes) return;
+    // Sortie rapide : aucune entreprise ne démarre dans les X prochaines minutes.
+    // (Les anciennes lignes de réglages font au pire un faux positif : le filtre
+    // précis par entreprise plus bas reste la référence.)
+    try {
+      const startSlots = await this.prisma.payrollSettings.findMany({
+        distinct: ['officialStartHour', 'officialStartMinute'],
+        select: { officialStartHour: true, officialStartMinute: true },
+      });
+      const anyStartingSoon = startSlots.some((s) => {
+        const slotMin = (s.officialStartHour ?? 8) * 60 + (s.officialStartMinute ?? 0);
+        const left = (((slotMin - nowMin) % 1440) + 1440) % 1440;
+        return left >= 1 && left <= preShiftMinutes;
+      });
+      if (!anyStartingSoon) return;
+    } catch (err: any) {
+      this.logger.error('❌ Cron rappel pré-début : lecture des heures de début impossible', err);
+      return;
+    }
 
     const LOCK = 'attendance-cron:pre-start';
     if (!(await this.cronLock.acquire(LOCK, 270))) {
@@ -153,7 +168,7 @@ export class AttendanceCronService implements OnModuleDestroy {
           payrollSettings: {
             orderBy: { effectiveDate: 'desc' },
             take: 1,
-            select: { workDays: true, officialStartHour: true },
+            select: { workDays: true, officialStartHour: true, officialStartMinute: true },
           },
         },
       });
@@ -163,7 +178,8 @@ export class AttendanceCronService implements OnModuleDestroy {
         if (!settings) continue;
 
         const officialStartHour = settings.officialStartHour ?? 8;
-        const startMin = officialStartHour * 60;
+        const officialStartMinute = settings.officialStartMinute ?? 0;
+        const startMin = officialStartHour * 60 + officialStartMinute;
 
         // Minutes avant le début, passage de minuit compris (0h : à 23:40, il reste 20 min).
         const minutesLeft = (((startMin - nowMin) % 1440) + 1440) % 1440;
@@ -229,6 +245,7 @@ export class AttendanceCronService implements OnModuleDestroy {
             companyName: companyLabel,
             minutesLeft,
             startHour: officialStartHour,
+            startMinute: officialStartMinute,
             nowMinuteOfDay: nowMin,
             dayOfWeek: shiftDow,
             date: shiftDate,
@@ -268,7 +285,7 @@ export class AttendanceCronService implements OnModuleDestroy {
         }));
 
         this.logger.log(
-          `📲 Rappel pré-début → ${company.legalName} (${officialStartHour}h, -${preShiftMinutes}min) : ${notifiedCount}/${employees.length} notifiés`,
+          `📲 Rappel pré-début → ${company.legalName} (${officialStartHour}h${String(officialStartMinute).padStart(2, '0')}, -${preShiftMinutes}min) : ${notifiedCount}/${employees.length} notifiés`,
         );
 
         await this.systemLogs.log({

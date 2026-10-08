@@ -173,6 +173,114 @@ export class ApprovalFunctionsService {
     };
   }
 
+  // ══════════════════════════════════════════════════════════════════════════
+  // ✅ AVIS INTER-ENTREPRISES
+  // Un admin multi-entreprises peut donner à un utilisateur d'UNE de ses entreprises
+  // (ex. le comptable de A) une fonction d'avis dans d'AUTRES de ses entreprises (B, C…).
+  // Cette personne ne se connecte pas à B / C : elle reçoit et donne seulement des avis
+  // sur les demandes de ces entreprises (voir ApprovalContextService, rôle EXTERNAL_ADVISOR).
+  // La ligne UserApprovalFunction(userId, companyId = B) EST l'autorisation.
+  // ══════════════════════════════════════════════════════════════════════════
+
+  /** Entreprises que l'admin gère réellement (lien userCompany) — source de vérité. */
+  private async getManagedCompanies(adminId: string) {
+    const admin = await this.prisma.user.findUnique({
+      where: { id: adminId },
+      select: { role: true, isActive: true, manageMultipleCompanies: true, companyId: true },
+    });
+    if (!admin || !admin.isActive) throw new ForbiddenException('Utilisateur inactif ou introuvable');
+    if (!FUNCTION_ADMIN_ROLES.includes(admin.role as string) || !admin.manageMultipleCompanies) {
+      throw new ForbiddenException(
+        "Seul un administrateur multi-entreprises peut donner des avis sur d'autres entreprises.",
+      );
+    }
+    const links = await this.prisma.userCompany.findMany({
+      where: { userId: adminId },
+      select: { company: { select: { id: true, legalName: true, tradeName: true } } },
+    });
+    const map = new Map<string, { id: string; name: string }>();
+    for (const l of links) map.set(l.company.id, { id: l.company.id, name: l.company.tradeName || l.company.legalName });
+    return map;
+  }
+
+  /** Cibles autorisées : un utilisateur d'une entreprise gérée par l'admin. */
+  private async getAssignableTarget(targetUserId: string, managed: Map<string, { id: string; name: string }>) {
+    const target = await this.prisma.user.findUnique({
+      where: { id: targetUserId },
+      select: { id: true, companyId: true, role: true, isActive: true },
+    });
+    if (!target || !target.isActive) throw new NotFoundException('Utilisateur introuvable.');
+    if (!target.companyId || !managed.has(target.companyId)) {
+      throw new ForbiddenException("Cet utilisateur n'appartient pas à l'une de vos entreprises.");
+    }
+    if (NON_ASSIGNABLE_ROLES.includes(target.role as string)) {
+      throw new BadRequestException('Une fonction ne peut pas être attribuée à ce type de compte.');
+    }
+    return target as { id: string; companyId: string; role: string; isActive: boolean };
+  }
+
+  /** Pour l'écran admin : les AUTRES entreprises de l'admin + fonctions déjà données à cet utilisateur là-bas. */
+  async listExternalFunctions(adminId: string, targetUserId: string) {
+    const managed = await this.getManagedCompanies(adminId);
+    const target = await this.getAssignableTarget(targetUserId, managed);
+
+    const rows = await this.prisma.userApprovalFunction.findMany({
+      where: { userId: targetUserId, companyId: { in: Array.from(managed.keys()) } },
+      select: { companyId: true, code: true, canSign: true },
+    });
+    const byCompany = new Map<string, { code: string; canSign: boolean }[]>();
+    for (const r of rows) {
+      if (r.companyId === target.companyId) continue; // sa propre entreprise : gérée par l'écran habituel
+      (byCompany.get(r.companyId) ?? byCompany.set(r.companyId, []).get(r.companyId)!).push({ code: r.code, canSign: r.canSign });
+    }
+
+    return {
+      catalog: APPROVAL_FUNCTIONS,
+      companies: Array.from(managed.values())
+        .filter((c) => c.id !== target.companyId)
+        .map((c) => ({ id: c.id, name: c.name, functions: byCompany.get(c.id) ?? [] })),
+    };
+  }
+
+  /** Remplace les fonctions de cet utilisateur POUR l'entreprise indiquée (liste vide = retrait). */
+  async setExternalFunctions(
+    adminId: string,
+    targetUserId: string,
+    companyId: string,
+    items: UserFunctionItemDto[],
+  ) {
+    const managed = await this.getManagedCompanies(adminId);
+    const target = await this.getAssignableTarget(targetUserId, managed);
+    if (!managed.has(companyId)) {
+      throw new ForbiddenException("Vous ne gérez pas cette entreprise.");
+    }
+    if (companyId === target.companyId) {
+      throw new BadRequestException("C'est l'entreprise de cet utilisateur : utilisez l'attribution habituelle.");
+    }
+
+    const byCode = new Map<string, boolean>();
+    for (const it of items) byCode.set(it.code, it.canSign);
+    const codes = Array.from(byCode.keys());
+
+    await this.prisma.$transaction([
+      this.prisma.userApprovalFunction.deleteMany({
+        where: { userId: targetUserId, companyId, code: { notIn: codes } },
+      }),
+      ...codes.map((code) =>
+        this.prisma.userApprovalFunction.upsert({
+          where: { userId_companyId_code: { userId: targetUserId, companyId, code } },
+          create: { userId: targetUserId, companyId, code, canSign: byCode.get(code) ?? false, createdBy: adminId },
+          update: { canSign: byCode.get(code) ?? false },
+        }),
+      ),
+    ]);
+
+    this.logger.log(
+      `🌐 Avis externes : ${targetUserId} → entreprise ${companyId} [${codes.join(', ') || 'retiré'}] par ${adminId}`,
+    );
+    return { userId: targetUserId, companyId, functions: codes.map((code) => ({ code, canSign: byCode.get(code) ?? false })) };
+  }
+
   // ── Mon contexte (fonctions, droit de signer, signature) ─────────────────
   async getMyContext(userId: string) {
     const user = await this.prisma.user.findUnique({
@@ -181,11 +289,27 @@ export class ApprovalFunctionsService {
     });
     if (!user) throw new NotFoundException('Utilisateur introuvable.');
 
+    // Fonctions d'avis détenues dans D'AUTRES entreprises (donné par l'admin multi-entreprises)
+    const externalRows = await this.prisma.userApprovalFunction.findMany({
+      where: user.companyId ? { userId, companyId: { not: user.companyId } } : { userId },
+      select: { code: true, canSign: true, company: { select: { id: true, legalName: true, tradeName: true } } },
+      orderBy: { createdAt: 'asc' },
+    });
+    const ext = new Map<string, { companyId: string; companyName: string; functions: { code: string; label: string; canSign: boolean }[] }>();
+    for (const r of externalRows) {
+      const e = ext.get(r.company.id) ?? { companyId: r.company.id, companyName: r.company.tradeName || r.company.legalName, functions: [] };
+      e.functions.push({ code: r.code, label: approvalFunctionLabel(r.code), canSign: r.canSign });
+      ext.set(r.company.id, e);
+    }
+    const externalCompanies = Array.from(ext.values());
+    const externalCanSign = externalRows.some((r) => r.canSign);
+
     if (!user.companyId) {
       return {
         functions: [],
-        canSign: false,
+        canSign: externalCanSign,
         signatureUrl: user.signatureUrl ?? null,
+        externalCompanies,
       };
     }
 
@@ -201,8 +325,9 @@ export class ApprovalFunctionsService {
         label: approvalFunctionLabel(r.code),
         canSign: r.canSign,
       })),
-      canSign: rows.some((r) => r.canSign),
+      canSign: rows.some((r) => r.canSign) || externalCanSign,
       signatureUrl: user.signatureUrl ?? null,
+      externalCompanies,
     };
   }
 
@@ -231,8 +356,9 @@ export class ApprovalFunctionsService {
       throw new ForbiddenException('Utilisateur inactif ou sans entreprise.');
     }
 
+    // Droit de signer : dans son entreprise OU dans une entreprise où l'admin lui a donné une fonction d'avis.
     const canSign = await this.prisma.userApprovalFunction.count({
-      where: { userId, companyId: user.companyId, canSign: true },
+      where: { userId, canSign: true },
     });
     if (canSign === 0) {
       throw new ForbiddenException(

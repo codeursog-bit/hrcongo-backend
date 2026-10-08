@@ -30,6 +30,8 @@ export interface PreShiftMessageInput {
   minutesLeft: number;
   /** Heure officielle de début de l'entreprise (0-23). */
   startHour: number;
+  /** Minute officielle de début (0-59) — 8h30 → startHour 8 + startMinute 30. Défaut : 0. */
+  startMinute?: number;
   /** Minute du jour (heure du Congo) au moment de l'envoi, 0-1439. */
   nowMinuteOfDay: number;
   /** Jour de la semaine du service concerné : 0 = dimanche … 6 = samedi. */
@@ -234,7 +236,7 @@ export function buildPreShiftMessage(input: PreShiftMessageInput): { title: stri
     name: titleCaseName(input.firstName) || 'vous',
     company: input.companyName.trim() || 'votre entreprise',
     mins,
-    start: `${input.startHour}h00`,
+    start: `${input.startHour}h${String(input.startMinute ?? 0).padStart(2, '0')}`,
     ready: g === 'FEMALE' ? 'prête' : g === 'MALE' ? 'prêt' : null,
   };
 
