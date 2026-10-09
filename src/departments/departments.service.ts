@@ -2,9 +2,11 @@ import {
   Injectable,
   NotFoundException,
   ForbiddenException,
+  ConflictException,
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateDepartmentDto } from './dto/create-department.dto';
+import { UpdateDepartmentDto } from './dto/update-department.dto';
 import { SubscriptionGuard } from '../subscriptions/guards/subscription.guard'; // 🆕
 
 @Injectable()
@@ -150,6 +152,61 @@ export class DepartmentsService {
     }
 
     return department;
+  }
+
+  /**
+   * ✅ MODIFIER UN DÉPARTEMENT (nom, code, description)
+   */
+  async update(id: string, dto: UpdateDepartmentDto, userId: string) {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { companyId: true },
+    });
+
+    if (!user || !user.companyId) {
+      throw new ForbiddenException('Accès non autorisé');
+    }
+
+    const department = await this.prisma.department.findUnique({
+      where: { id },
+      select: { id: true, companyId: true, name: true },
+    });
+
+    if (!department) {
+      throw new NotFoundException('Département non trouvé');
+    }
+
+    if (department.companyId !== user.companyId) {
+      throw new ForbiddenException("Vous n'avez pas accès à ce département");
+    }
+
+    const data: { name?: string; code?: string; description?: string } = {};
+
+    if (dto.name !== undefined) {
+      const name = dto.name.trim();
+      if (!name) {
+        throw new ConflictException('Le nom du département est requis');
+      }
+      // Pas de doublon de nom dans la même entreprise
+      const duplicate = await this.prisma.department.findFirst({
+        where: {
+          companyId: user.companyId,
+          id: { not: id },
+          name: { equals: name, mode: 'insensitive' },
+        },
+        select: { id: true },
+      });
+      if (duplicate) {
+        throw new ConflictException(
+          `Un département nommé "${name}" existe déjà.`,
+        );
+      }
+      data.name = name;
+    }
+    if (dto.code !== undefined) data.code = dto.code.trim();
+    if (dto.description !== undefined) data.description = dto.description;
+
+    return this.prisma.department.update({ where: { id }, data });
   }
 
   /**
