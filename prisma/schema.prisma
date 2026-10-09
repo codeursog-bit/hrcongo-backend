@@ -4921,6 +4921,7 @@ model UserCompany {
   @@map("user_companies")
 }
 
+
 model PushSubscription {
   id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   userId      String   @db.Uuid
@@ -4930,10 +4931,59 @@ model PushSubscription {
   createdAt   DateTime @default(now()) @db.Timestamptz
   lastUsedAt  DateTime @default(now()) @db.Timestamptz
 
+  // 🆕 Identité stable de l'appareil (générée par l'app, survit aux ré-abonnements)
+  deviceId      String?   @db.VarChar(64)
+  userAgent     String?   @db.VarChar(300)
+  // ACTIVE | DISABLED (désactivé par l'utilisateur) | EXPIRED (le service push a répondu 404/410)
+  status        String    @default("ACTIVE") @db.VarChar(12)
+  enabledAt     DateTime  @default(now()) @db.Timestamptz
+  disabledAt    DateTime? @db.Timestamptz
+  lastSuccessAt DateTime? @db.Timestamptz
+  lastFailureAt DateTime? @db.Timestamptz
+  lastError     String?   @db.VarChar(300)
+
+  @@unique([userId, deviceId])
   @@index([userId])
+  @@index([status])
   @@map("push_subscriptions")
 }
 
+
+// 🆕 Historique : ENABLED (nouvel appareil) | REACTIVATED | DISABLED | EXPIRED | MOVED
+model PushDeviceEvent {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId      String   @db.Uuid
+  deviceId    String?  @db.VarChar(64)
+  deviceLabel String?  @db.VarChar(150)
+  type        String   @db.VarChar(20)
+  createdAt   DateTime @default(now()) @db.Timestamptz
+
+  @@index([userId, createdAt])
+  @@index([createdAt])
+  @@map("push_device_events")
+}
+
+// 🆕 Envois groupés (rappel de pointage) lancés par le super admin
+model PushBroadcast {
+  id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  createdBy      String    @db.Uuid
+  companyId      String?   @db.Uuid
+  onlyNotPunched Boolean   @default(false)
+  title          String    @db.VarChar(120)
+  body           String    @db.VarChar(300)
+  status         String    @default("RUNNING") @db.VarChar(12) // RUNNING | DONE | FAILED
+  total          Int       @default(0)
+  processed      Int       @default(0)
+  sent           Int       @default(0)
+  failed         Int       @default(0)
+  noDevice       Int       @default(0)
+  error          String?   @db.VarChar(300)
+  createdAt      DateTime  @default(now()) @db.Timestamptz
+  finishedAt     DateTime? @db.Timestamptz
+
+  @@index([createdAt])
+  @@map("push_broadcasts")
+}
 
 
 

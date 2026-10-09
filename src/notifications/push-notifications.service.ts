@@ -3,10 +3,15 @@
 // ============================================================================
 // 🔥 KONZA SUITE — Web Push Service (vraies notifications téléphone)
 //
-// Multi-appareil : un utilisateur peut avoir plusieurs abonnements actifs
-// (téléphone perso + tablette bureau, par ex.) — chacun est une ligne
-// PushSubscription séparée. S'abonner sur un nouvel appareil n'écrase plus
-// les autres.
+// Multi-appareil : un utilisateur peut avoir plusieurs appareils (téléphone perso
+// + tablette bureau, par ex.) — chacun est UNE ligne PushSubscription.
+//
+// 🆕 IDENTITÉ D'APPAREIL : l'app génère un `deviceId` stable (gardé dans le
+// navigateur) et l'envoie à chaque activation. Réactiver sur le même téléphone
+// met à jour la MÊME ligne (même si le navigateur a donné une nouvelle adresse
+// push) au lieu d'en créer une de plus. Désactiver ne supprime plus la ligne :
+// elle passe en DISABLED (avec la date) et un historique est conservé pour le
+// super admin. Un abonnement mort (404/410) passe en EXPIRED.
 //
 // Prérequis :
 //   npm install web-push
@@ -22,6 +27,50 @@ import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import * as webpush from 'web-push';
 import { SystemLogsService } from '../system-logs/system-logs.service';
+
+export interface PushDeviceMeta {
+  deviceId?: string;
+  deviceLabel?: string;
+  userAgent?: string;
+}
+
+export type PushSendStatus =
+  | 'SENT' | 'PARTIAL' | 'FAILED' | 'EXPIRED' | 'NO_DEVICE' | 'DISABLED' | 'NO_VAPID';
+
+export interface PushSendResult {
+  status: PushSendStatus;
+  devicesTotal: number;
+  devicesOk: number;
+}
+
+type DeviceEventType = 'ENABLED' | 'REACTIVATED' | 'DISABLED' | 'EXPIRED' | 'MOVED';
+interface PendingEvent {
+  userId: string;
+  deviceId: string | null;
+  deviceLabel: string | null;
+  type: DeviceEventType;
+}
+
+
+export interface PushPayload {
+  title: string;
+  body: string;
+  url?: string;
+  tag?: string;
+  requireInteraction?: boolean;
+  actions?: { action: string; title: string }[];
+  // Pour les boutons "Oubli" / "Heures sup" dans la notif native
+  actionUrls?: Record<string, string>;
+  // Durée de vie côté service push (secondes) : passé ce délai, un appareil éteint/hors
+  // ligne ne reçoit plus rien. Un rappel « dans 20 min » n'a aucun sens après l'heure.
+  ttlSeconds?: number;
+  // 'high' = livraison immédiate même quand le téléphone est en veille (mode Doze Android).
+  urgency?: 'very-low' | 'low' | 'normal' | 'high';
+}
+
+const EVENT_RETENTION_DAYS = 180;
+// On ne réécrit « dernier envoi réussi » qu'au plus toutes les 5 min par appareil (évite 1 écriture par message de chat)
+const SUCCESS_TOUCH_MS = 5 * 60 * 1000;
 
 @Injectable()
 export class PushNotificationsService implements OnModuleInit {
@@ -65,114 +114,222 @@ export class PushNotificationsService implements OnModuleInit {
   }
 
   // ============================================================================
-  // 📱 Enregistrer le token push d'un appareil
-  // Appelé depuis le controller quand l'employé clique "Activer". Un nouvel
-  // appareil s'AJOUTE aux abonnements existants — il ne les remplace pas.
+  // 🧰 Utilitaires appareil
   // ============================================================================
-  async registerToken(
-    userId: string,
-    subscription: {
-      endpoint: string;
-      keys: { p256dh: string; auth: string };
-    },
-    deviceLabel?: string,
-  ): Promise<void> {
-    const token = JSON.stringify(subscription);
+  private cleanDeviceId(raw?: string): string | null {
+    if (!raw || typeof raw !== 'string') return null;
+    const v = raw.trim();
+    return /^[A-Za-z0-9_-]{8,64}$/.test(v) ? v : null;
+  }
 
-    // upsert par token : si ce même appareil se réabonne (token identique),
-    // on met juste à jour lastUsedAt au lieu de créer un doublon.
-    await this.prisma.pushSubscription.upsert({
-      where: { token },
-      create: { userId, token, deviceLabel },
-      // userId aussi : si un autre compte se connecte sur le même appareil, le token lui est rattaché
-      update: { userId, lastUsedAt: new Date(), deviceLabel },
-    });
+  /** Historique : best-effort, ne doit jamais faire échouer une opération. */
+  private async writeEvents(events: PendingEvent[]): Promise<void> {
+    if (events.length === 0) return;
+    try {
+      await this.prisma.pushDeviceEvent.createMany({
+        data: events.map((e) => ({
+          userId: e.userId,
+          deviceId: e.deviceId,
+          deviceLabel: e.deviceLabel,
+          type: e.type,
+        })),
+      });
+    } catch (err: any) {
+      this.logger.warn(`Historique appareil non écrit : ${err?.message}`);
+    }
+  }
 
-    await this.prisma.user.update({
-      where: { id: userId },
-      data: { pushNotifEnabled: true },
-    });
-
-    this.logger.log(`📲 Appareil push enregistré pour userId: ${userId}`);
+  /** `pushNotifEnabled` = au moins un appareil ACTIF. Recalculé après chaque changement. */
+  private async refreshUserFlag(userId: string): Promise<void> {
+    try {
+      const active = await this.prisma.pushSubscription.count({ where: { userId, status: 'ACTIVE' } });
+      await this.prisma.user.update({
+        where: { id: userId },
+        data: { pushNotifEnabled: active > 0 },
+      });
+    } catch {
+      /* l'utilisateur a pu être supprimé entre-temps */
+    }
   }
 
   // ============================================================================
-  // 🔎 Cet appareil (endpoint) est-il encore enregistré pour cet utilisateur ?
-  // Si non → il a été supprimé (410 = abonnement mort) ou jamais reçu : le front
-  // doit recréer un abonnement NEUF au lieu de renvoyer le même endpoint.
+  // 📱 Enregistrer / réactiver un appareil
+  // Appelé quand l'employé active les notifications (clic ou activation auto).
+  //  • avec deviceId : 1 ligne par (compte, appareil) — le jeton est simplement mis à jour
+  //  • sans deviceId (ancienne version de l'app) : comportement historique, 1 ligne par jeton
+  // ============================================================================
+  async registerToken(
+    userId: string,
+    subscription: { endpoint: string; keys: { p256dh: string; auth: string } },
+    meta: PushDeviceMeta = {},
+  ): Promise<void> {
+    const token = JSON.stringify(subscription);
+    const deviceId = this.cleanDeviceId(meta.deviceId);
+    const label = meta.deviceLabel?.slice(0, 150) ?? null;
+    const userAgent = meta.userAgent?.slice(0, 300) ?? null;
+    const now = new Date();
+    const events: PendingEvent[] = [];
+    const movedFrom: string[] = [];
+
+    const run = async () => {
+      if (!deviceId) {
+        await this.prisma.pushSubscription.upsert({
+          where: { token },
+          create: { userId, token, deviceLabel: label, userAgent },
+          update: {
+            userId, lastUsedAt: now, deviceLabel: label, userAgent,
+            status: 'ACTIVE', disabledAt: null, lastError: null,
+          },
+        });
+        return;
+      }
+
+      await this.prisma.$transaction(async (tx) => {
+        const byToken = await tx.pushSubscription.findUnique({ where: { token } });
+        const byDevice = await tx.pushSubscription.findUnique({
+          where: { userId_deviceId: { userId, deviceId } },
+        });
+
+        if (byDevice) {
+          // Même appareil connu. Si son nouveau jeton appartient déjà à une AUTRE ligne
+          // (vieil enregistrement du même téléphone, ou autre compte), on retire celle-là.
+          if (byToken && byToken.id !== byDevice.id) {
+            if (byToken.userId !== userId) {
+              movedFrom.push(byToken.userId);
+              events.push({ userId: byToken.userId, deviceId: byToken.deviceId, deviceLabel: byToken.deviceLabel, type: 'MOVED' });
+            }
+            await tx.pushSubscription.delete({ where: { id: byToken.id } });
+          }
+          const wasInactive = byDevice.status !== 'ACTIVE';
+          await tx.pushSubscription.update({
+            where: { id: byDevice.id },
+            data: {
+              token, userAgent, deviceLabel: label ?? byDevice.deviceLabel,
+              status: 'ACTIVE', disabledAt: null, lastError: null, lastUsedAt: now,
+              ...(wasInactive ? { enabledAt: now } : {}),
+            },
+          });
+          if (wasInactive) events.push({ userId, deviceId, deviceLabel: label ?? byDevice.deviceLabel, type: 'REACTIVATED' });
+        } else if (byToken) {
+          // Jeton déjà connu mais sans identifiant (ancienne ligne) ou rattaché à un autre compte : on l'adopte.
+          const moved = byToken.userId !== userId;
+          const wasInactive = byToken.status !== 'ACTIVE';
+          if (moved) {
+            movedFrom.push(byToken.userId);
+            events.push({ userId: byToken.userId, deviceId: byToken.deviceId, deviceLabel: byToken.deviceLabel, type: 'MOVED' });
+          }
+          await tx.pushSubscription.update({
+            where: { id: byToken.id },
+            data: {
+              userId, deviceId, userAgent, deviceLabel: label ?? byToken.deviceLabel,
+              status: 'ACTIVE', disabledAt: null, lastError: null, lastUsedAt: now,
+              ...(moved || wasInactive ? { enabledAt: now } : {}),
+            },
+          });
+          if (moved) events.push({ userId, deviceId, deviceLabel: label, type: 'ENABLED' });
+          else if (wasInactive) events.push({ userId, deviceId, deviceLabel: label, type: 'REACTIVATED' });
+        } else {
+          await tx.pushSubscription.create({
+            data: { userId, token, deviceId, deviceLabel: label, userAgent, enabledAt: now },
+          });
+          events.push({ userId, deviceId, deviceLabel: label, type: 'ENABLED' });
+        }
+      });
+    };
+
+    try {
+      await run();
+    } catch (err: any) {
+      // Deux onglets du même appareil qui s'enregistrent en même temps : l'un des deux perd la course (P2002).
+      if (err?.code === 'P2002') {
+        events.length = 0;
+        movedFrom.length = 0;
+        await run();
+      } else {
+        throw err;
+      }
+    }
+
+    await this.writeEvents(events);
+    await this.refreshUserFlag(userId);
+    for (const uid of new Set(movedFrom)) await this.refreshUserFlag(uid);
+
+    // Ménage de l'historique de CE compte (rare : seulement à l'enregistrement d'un appareil)
+    const cutoff = new Date(Date.now() - EVENT_RETENTION_DAYS * 86_400_000);
+    this.prisma.pushDeviceEvent
+      .deleteMany({ where: { userId, createdAt: { lt: cutoff } } })
+      .catch(() => {});
+
+    this.logger.log(`📲 Appareil push enregistré pour userId: ${userId}${deviceId ? ` (device ${deviceId.slice(0, 8)})` : ''}`);
+  }
+
+  // ============================================================================
+  // 🔎 Cet appareil (endpoint) est-il encore ACTIF pour cet utilisateur ?
+  // Si non → le front doit recréer un abonnement NEUF au lieu de renvoyer le même endpoint.
   // ============================================================================
   async hasEndpoint(userId: string, endpoint?: string): Promise<boolean> {
     if (!endpoint) return false;
     const n = await this.prisma.pushSubscription.count({
-      where: { userId, token: { contains: endpoint } },
+      where: { userId, status: 'ACTIVE', token: { contains: endpoint } },
     });
     return n > 0;
   }
 
   // ============================================================================
-  // 🔕 Supprimer l'abonnement d'UN appareil (pas les autres)
-  // `endpoint` permet de cibler l'appareil courant précisément. Sans
-  // `endpoint` (vieux client, compat), on retire tous les appareils de
-  // l'utilisateur — comportement de l'ancienne version à champ unique.
+  // 🔕 Désactiver UN appareil (jamais les autres)
+  // La ligne est CONSERVÉE (état DISABLED + date) : le super admin voit qui a désactivé quoi.
+  // Sans deviceId ni endpoint → on ne touche à rien (l'ancien « tout supprimer » effaçait
+  // aussi les autres téléphones du compte).
   // ============================================================================
-  async unregisterToken(userId: string, endpoint?: string): Promise<void> {
-    if (endpoint) {
-      const subs = await this.prisma.pushSubscription.findMany({
-        where: { userId },
-        select: { id: true, token: true },
-      });
-      const match = subs.find((s) => {
-        try {
-          return JSON.parse(s.token).endpoint === endpoint;
-        } catch {
-          return false;
-        }
-      });
-      if (match) {
-        await this.prisma.pushSubscription.delete({ where: { id: match.id } });
-      }
-    } else {
-      await this.prisma.pushSubscription.deleteMany({ where: { userId } });
-    }
+  async unregisterToken(userId: string, target: { deviceId?: string; endpoint?: string } = {}): Promise<void> {
+    const deviceId = this.cleanDeviceId(target.deviceId);
+    let sub: { id: string; deviceId: string | null; deviceLabel: string | null; status: string } | null = null;
 
-    const remaining = await this.prisma.pushSubscription.count({ where: { userId } });
-    if (remaining === 0) {
-      await this.prisma.user.update({
-        where: { id: userId },
-        data: { pushNotifEnabled: false },
+    if (deviceId) {
+      sub = await this.prisma.pushSubscription.findUnique({
+        where: { userId_deviceId: { userId, deviceId } },
+        select: { id: true, deviceId: true, deviceLabel: true, status: true },
       });
     }
+    if (!sub && target.endpoint) {
+      const candidates = await this.prisma.pushSubscription.findMany({
+        where: { userId, token: { contains: target.endpoint } },
+        select: { id: true, deviceId: true, deviceLabel: true, status: true, token: true },
+      });
+      sub = candidates.find((c) => {
+        try { return JSON.parse(c.token).endpoint === target.endpoint; } catch { return false; }
+      }) ?? null;
+    }
 
-    this.logger.log(`🔕 Abonnement push retiré pour userId: ${userId} (${remaining} appareil(s) restant(s))`);
+    if (!sub) {
+      this.logger.warn(`🔕 Désactivation push ignorée (appareil introuvable) pour userId: ${userId}`);
+      return;
+    }
+
+    if (sub.status !== 'DISABLED') {
+      await this.prisma.pushSubscription.update({
+        where: { id: sub.id },
+        data: { status: 'DISABLED', disabledAt: new Date() },
+      });
+      await this.writeEvents([{ userId, deviceId: sub.deviceId, deviceLabel: sub.deviceLabel, type: 'DISABLED' }]);
+    }
+    await this.refreshUserFlag(userId);
+    this.logger.log(`🔕 Appareil push désactivé pour userId: ${userId}`);
   }
 
   // ============================================================================
-  // 🚀 Envoyer une notification push à un utilisateur — sur TOUS ses appareils
-  // C'est LA méthode centrale — appelée depuis AttendanceCronService
+  // 🚀 Envoyer une notification push à un utilisateur — sur TOUS ses appareils ACTIFS
+  // C'est LA méthode centrale. Ne renvoie rien (comportement historique).
   // ============================================================================
-  async sendPushToUser(
-    userId: string,
-    payload: {
-      title: string;
-      body: string;
-      url?: string;
-      tag?: string;
-      requireInteraction?: boolean;
-      actions?: { action: string; title: string }[];
-      // Pour les boutons "Oubli" / "Heures sup" dans la notif native
-      actionUrls?: Record<string, string>;
-      // 🆕 Durée de vie côté service push (secondes) : passé ce délai, un appareil éteint/hors
-      // ligne ne reçoit plus rien. Un rappel « dans 20 min » n'a aucun sens après l'heure.
-      ttlSeconds?: number;
-      // 🆕 'high' = livraison immédiate même quand le téléphone est en veille (mode Doze Android).
-      urgency?: 'very-low' | 'low' | 'normal' | 'high';
-    },
-  ): Promise<void> {
+  async sendPushToUser(userId: string, payload: PushPayload): Promise<void> {
+    await this.sendPushToUserDetailed(userId, payload);
+  }
+
+  /** Même envoi, mais renvoie le résultat (utilisé par l'envoi groupé du super admin). */
+  async sendPushToUserDetailed(userId: string, payload: PushPayload): Promise<PushSendResult> {
     if (!this.vapidConfigured) {
-      // Déjà loggé en ALERT au démarrage — pas la peine de spammer les logs
-      // à chaque tentative d'envoi, juste sortir proprement.
       await this.recordDelivery(userId, payload, 'NO_VAPID');
-      return;
+      return { status: 'NO_VAPID', devicesTotal: 0, devicesOk: 0 };
     }
 
     const user = await this.prisma.user.findUnique({
@@ -181,18 +338,18 @@ export class PushNotificationsService implements OnModuleInit {
     });
     if (!user?.pushNotifEnabled) {
       await this.recordDelivery(userId, payload, 'DISABLED');
-      return;
+      return { status: 'DISABLED', devicesTotal: 0, devicesOk: 0 };
     }
 
     const subscriptions = await this.prisma.pushSubscription.findMany({
-      where: { userId },
+      where: { userId, status: 'ACTIVE' },
     });
     if (subscriptions.length === 0) {
       await this.recordDelivery(userId, payload, 'NO_DEVICE');
-      return;
+      return { status: 'NO_DEVICE', devicesTotal: 0, devicesOk: 0 };
     }
 
-    // 🆕 On crée la trace AVANT l'envoi pour glisser son id dans la notification : le service
+    // On crée la trace AVANT l'envoi pour glisser son id dans la notification : le service
     // worker de l'appareil s'en servira pour confirmer que la notification s'est bien affichée.
     const deliveryId = await this.createPendingDelivery(userId, payload, subscriptions.length);
     const apiPublicUrl = (process.env.API_PUBLIC_URL || '').replace(/\/+$/, '');
@@ -223,10 +380,10 @@ export class PushNotificationsService implements OnModuleInit {
       subscriptions.map((sub) => this.sendToOneSubscription(sub, pushPayload, userId, payload.title, sendOptions)),
     );
 
-    // 🆕 Trace de l'envoi (consultable dans le super admin). « SENT » = accepté par le service
+    // Trace de l'envoi (consultable dans le super admin). « SENT » = accepté par le service
     // push du navigateur/téléphone (FCM, Mozilla, Apple) : c'est la preuve la plus fiable côté serveur.
     const ok = results.filter((r) => r.ok).length;
-    const status =
+    const status: PushSendStatus =
       ok === results.length ? 'SENT'
       : ok > 0 ? 'PARTIAL'
       : results.every((r) => r.expired) ? 'EXPIRED'
@@ -235,11 +392,12 @@ export class PushNotificationsService implements OnModuleInit {
       deliveryId,
       userId,
       payload,
-      status,
+      status as 'SENT' | 'PARTIAL' | 'FAILED' | 'EXPIRED',
       results.length,
       ok,
       results.find((r) => !r.ok)?.error,
     );
+    return { status, devicesTotal: results.length, devicesOk: ok };
   }
 
   /** Crée la ligne de suivi « PENDING » avant l'envoi (renvoie son id, ou null si la base refuse). */
@@ -334,7 +492,10 @@ export class PushNotificationsService implements OnModuleInit {
   }
 
   private async sendToOneSubscription(
-    sub: { id: string; token: string },
+    sub: {
+      id: string; token: string; deviceId: string | null; deviceLabel: string | null;
+      lastSuccessAt: Date | null;
+    },
     pushPayload: string,
     userId: string,
     title: string,
@@ -357,13 +518,34 @@ export class PushNotificationsService implements OnModuleInit {
     try {
       await webpush.sendNotification(subscription, pushPayload, options);
       this.logger.log(`✅ Push envoyé → userId: ${userId} | "${title}"`);
+      // Dernier envoi réussi (au plus toutes les 5 min par appareil)
+      if (!sub.lastSuccessAt || Date.now() - sub.lastSuccessAt.getTime() > SUCCESS_TOUCH_MS) {
+        this.prisma.pushSubscription
+          .update({ where: { id: sub.id }, data: { lastSuccessAt: new Date(), lastError: null } })
+          .catch(() => {});
+      }
       return { ok: true };
     } catch (err: any) {
       if (err.statusCode === 410 || err.statusCode === 404) {
-        this.logger.warn(`🗑️  Abonnement push expiré (id: ${sub.id}) pour userId: ${userId} — suppression`);
-        await this.prisma.pushSubscription.delete({ where: { id: sub.id } }).catch(() => {});
+        this.logger.warn(`🗑️  Abonnement push expiré (id: ${sub.id}) pour userId: ${userId}`);
+        if (sub.deviceId) {
+          // Appareil identifié : on GARDE la ligne (état EXPIRED) pour que le super admin le voie.
+          await this.prisma.pushSubscription
+            .update({
+              where: { id: sub.id },
+              data: {
+                status: 'EXPIRED', disabledAt: new Date(),
+                lastFailureAt: new Date(), lastError: `HTTP ${err.statusCode}`,
+              },
+            })
+            .catch(() => {});
+          await this.writeEvents([{ userId, deviceId: sub.deviceId, deviceLabel: sub.deviceLabel, type: 'EXPIRED' }]);
+        } else {
+          // Ancienne ligne sans identifiant : impossible de la ré-associer, on la supprime comme avant.
+          await this.prisma.pushSubscription.delete({ where: { id: sub.id } }).catch(() => {});
+        }
 
-        const remaining = await this.prisma.pushSubscription.count({ where: { userId } });
+        const remaining = await this.prisma.pushSubscription.count({ where: { userId, status: 'ACTIVE' } });
         if (remaining === 0) {
           await this.prisma.user.update({
             where: { id: userId },
@@ -374,12 +556,18 @@ export class PushNotificationsService implements OnModuleInit {
         await this.systemLogs.log({
           source: 'push-notifications:send',
           level: 'WARNING',
-          message: `Abonnement push expiré (${err.statusCode}) pour userId ${userId} — un appareil retiré, ${remaining} restant(s)`,
+          message: `Abonnement push expiré (${err.statusCode}) pour userId ${userId} — un appareil retiré, ${remaining} actif(s) restant(s)`,
           details: { evaluated: 1, skipped: [{ employeeId: userId, reason: `Abonnement expiré (HTTP ${err.statusCode})` }] },
         });
         return { ok: false, expired: true, error: `HTTP ${err.statusCode}` };
       } else {
         this.logger.error(`❌ Erreur push pour userId: ${userId}:`, err.message);
+        this.prisma.pushSubscription
+          .update({
+            where: { id: sub.id },
+            data: { lastFailureAt: new Date(), lastError: String(err?.message ?? err).slice(0, 300) },
+          })
+          .catch(() => {});
         await this.systemLogs.log({
           source: 'push-notifications:send',
           level: 'ERROR',

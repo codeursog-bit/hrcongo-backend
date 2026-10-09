@@ -312,14 +312,25 @@ export class NotificationsService {
   //     "leave-return:overdue:<leaveId>:2026-08-14"
   async tryClaim(key: string): Promise<boolean> {
     try {
-      await this.prisma.notificationDedupKey.create({ data: { key } });
-      return true; // clé inédite → l'appelant peut notifier
+      // INSERT ... ON CONFLICT DO NOTHING (via skipDuplicates) : si la clé existe
+      // déjà, Postgres l'ignore SANS lever d'erreur. Avant, on laissait la base
+      // rejeter l'insertion (P2002) puis on attrapait l'exception : ça marchait,
+      // mais Prisma écrivait « Unique constraint failed on the fields: (`key`) »
+      // dans la console à chaque tentative (cron qui repasse chaque minute).
+      // L'unicité reste garantie par l'index unique : une seule instance gagne
+      // la course (count = 1), les autres reçoivent count = 0.
+      const { count } = await this.prisma.notificationDedupKey.createMany({
+        data: [{ key }],
+        skipDuplicates: true,
+      });
+      return count === 1; // 1 = clé inédite → l'appelant peut notifier ; 0 = déjà notifié
     } catch (error) {
+      // Filet de sécurité : ne devrait plus arriver, mais on garde le comportement historique.
       if (
         error instanceof Prisma.PrismaClientKnownRequestError &&
         error.code === 'P2002'
       ) {
-        return false; // déjà notifié — on ne recrée rien
+        return false;
       }
       this.logger.error(`Erreur tryClaim("${key}"):`, error);
       throw error;

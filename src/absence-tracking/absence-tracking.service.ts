@@ -201,7 +201,7 @@ export class AbsenceTrackingService {
         .map((a) => `${a.employeeId}_${a.date}`),
     );
     const recordedDaySet = new Set(attendanceRows.map((a) => `${a.employeeId}_${a.date}`));
-    const holidaySet = new Set(publicHolidays.map((h) => this.utils.formatDate(h.date)));
+    const holidaySet = new Set(publicHolidays.map((h) => h.date));
     const workDays = normalizeWorkDays(payrollSettings?.workDays ?? DEFAULT_WORK_DAYS);
 
     const entries: UnifiedEntry[] = [];

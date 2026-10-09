@@ -155,7 +155,7 @@ export class AdminUserActivityService {
         role: true,
         pushNotifEnabled: true,
         company: { select: { legalName: true, tradeName: true } },
-        _count: { select: { pushSubscriptions: true } },
+        _count: { select: { pushSubscriptions: { where: { status: 'ACTIVE' } } } },
       },
     });
 
@@ -204,7 +204,11 @@ export class AdminUserActivityService {
         lastActiveAt: true,
         company: { select: { legalName: true, tradeName: true } },
         pushSubscriptions: {
-          select: { id: true, deviceLabel: true, createdAt: true, lastUsedAt: true },
+          select: {
+            id: true, deviceLabel: true, deviceId: true, status: true,
+            createdAt: true, lastUsedAt: true, enabledAt: true, disabledAt: true,
+            lastSuccessAt: true, lastFailureAt: true, lastError: true,
+          },
           orderBy: { lastUsedAt: 'desc' },
         },
       },
@@ -212,9 +216,12 @@ export class AdminUserActivityService {
     });
 
     const rows = users.map((u) => {
-      const deviceCount = u.pushSubscriptions.length;
+      // 🆕 Seuls les appareils ACTIFS comptent : les désactivés / expirés restent visibles
+      // (traçabilité) mais ne font plus « actif » un utilisateur.
+      const activeCount = u.pushSubscriptions.filter((d) => d.status === 'ACTIVE').length;
+      const deviceCount = activeCount;
       const status: 'active' | 'enabled_no_device' | 'disabled' =
-        !u.pushNotifEnabled ? 'disabled' : deviceCount > 0 ? 'active' : 'enabled_no_device';
+        activeCount > 0 ? 'active' : u.pushNotifEnabled ? 'enabled_no_device' : 'disabled';
 
       return {
         id: u.id,
@@ -225,11 +232,21 @@ export class AdminUserActivityService {
         pushNotifEnabled: u.pushNotifEnabled,
         lastActiveAt: u.lastActiveAt,
         deviceCount,
+        totalDevices: u.pushSubscriptions.length,
         devices: u.pushSubscriptions.map((s) => ({
           id: s.id,
           label: s.deviceLabel,
+          // 8 premiers caractères suffisent pour distinguer deux appareils à l'écran
+          deviceRef: s.deviceId ? s.deviceId.slice(0, 8) : null,
+          identified: !!s.deviceId,
+          state: s.status as 'ACTIVE' | 'DISABLED' | 'EXPIRED',
           createdAt: s.createdAt,
           lastUsedAt: s.lastUsedAt,
+          enabledAt: s.enabledAt,
+          disabledAt: s.disabledAt,
+          lastSuccessAt: s.lastSuccessAt,
+          lastFailureAt: s.lastFailureAt,
+          lastError: s.lastError,
         })),
         status,
       };
@@ -243,6 +260,25 @@ export class AdminUserActivityService {
       disabledCount: rows.filter((r) => r.status === 'disabled').length,
       users: rows,
     };
+  }
+
+  /**
+   * 🆕 Historique des activations / désactivations d'appareils d'UN utilisateur
+   * (ENABLED = nouvel appareil, REACTIVATED = appareil connu réactivé, DISABLED, EXPIRED, MOVED).
+   */
+  async getDeviceEvents(userId: string, limit = 50) {
+    const events = await this.prisma.pushDeviceEvent.findMany({
+      where: { userId },
+      orderBy: { createdAt: 'desc' },
+      take: Math.min(Math.max(limit, 1), 200),
+    });
+    return events.map((e) => ({
+      id: e.id,
+      type: e.type,
+      label: e.deviceLabel,
+      deviceRef: e.deviceId ? e.deviceId.slice(0, 8) : null,
+      createdAt: e.createdAt,
+    }));
   }
 
   /**

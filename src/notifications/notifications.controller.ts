@@ -70,11 +70,19 @@ export class NotificationsController {
       endpoint: string;
       keys: { p256dh: string; auth: string };
       deviceLabel?: string;
+      // 🆕 identifiant stable de l'appareil (généré par l'app) — absent sur les anciennes versions
+      deviceId?: string;
     },
     @Request() req,
   ) {
-    const { deviceLabel, ...subscription } = body;
-    await this.pushService.registerToken(req.user.userId, subscription, deviceLabel);
+    const { deviceLabel, deviceId, ...subscription } = body;
+    // On ne retient que les champs d'un abonnement Web Push (le front envoie aussi expirationTime, etc.)
+    const clean = { endpoint: subscription.endpoint, keys: subscription.keys };
+    await this.pushService.registerToken(req.user.userId, clean, {
+      deviceId,
+      deviceLabel,
+      userAgent: req.headers?.['user-agent'],
+    });
     return {
       success: true,
       message: 'Notifications activées sur cet appareil.',
@@ -94,8 +102,16 @@ export class NotificationsController {
   // 🔕 Désabonner l'appareil courant (les autres appareils restent actifs)
   // ========================================
   @Delete('push/unsubscribe')
-  async unsubscribePush(@Body() body: { endpoint?: string }, @Request() req) {
-    await this.pushService.unregisterToken(req.user.userId, body?.endpoint);
+  async unsubscribePush(
+    @Body() body: { endpoint?: string; deviceId?: string; data?: { endpoint?: string; deviceId?: string } },
+    @Request() req,
+  ) {
+    // `body.data` : les anciennes versions de l'app enveloppaient le corps dans { data: … }
+    // (c'était la cause du bug « désactiver sur un appareil les retire tous »).
+    await this.pushService.unregisterToken(req.user.userId, {
+      deviceId: body?.deviceId ?? body?.data?.deviceId,
+      endpoint: body?.endpoint ?? body?.data?.endpoint,
+    });
     return { success: true, message: 'Notifications désactivées sur cet appareil.' };
   }
 }

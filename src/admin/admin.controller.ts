@@ -27,6 +27,7 @@ import { ErrorTrackingService } from './services/error-tracking.service';
 import { CleanupService } from '../cleanup/cleanup.service';
 import { SettingsService } from './services/settings.service';
 import { AdminUserActivityService } from './services/user-activity.service';
+import { PushBroadcastService } from '../notifications/push-broadcast.service';
 import {
   UpdateCompanyStatusDto,
   ArchiveCompanyDto,
@@ -52,6 +53,7 @@ export class AdminController {
     private readonly cleanupService: CleanupService,
     private readonly settingsService: SettingsService,
     private readonly userActivityService: AdminUserActivityService,
+    private readonly pushBroadcastService: PushBroadcastService,
   ) {}
 
   // ==========================================================================
@@ -96,6 +98,50 @@ export class AdminController {
   @Post('push/test')
   async sendTestPush(@Request() req: any) {
     return this.userActivityService.sendTestPush(req.user.userId);
+  }
+
+  // 🆕 Historique d'activation / désactivation des appareils d'un utilisateur
+  @Get('push/devices/:userId/events')
+  async getPushDeviceEvents(@Param('userId') userId: string) {
+    return this.userActivityService.getDeviceEvents(userId);
+  }
+
+  // 🆕 Envoi groupé du rappel de pointage (immédiat, sans passer par le cron)
+  @Get('push/broadcast/preview')
+  async previewPushBroadcast(
+    @Query('companyId') companyId?: string,
+    @Query('onlyNotPunched') onlyNotPunched?: string,
+  ) {
+    return this.pushBroadcastService.preview({
+      companyId: companyId || undefined,
+      onlyNotPunched: onlyNotPunched === 'true',
+    });
+  }
+
+  @Post('push/broadcast')
+  async startPushBroadcast(
+    @Request() req: any,
+    @Body() body: { companyId?: string; onlyNotPunched?: boolean; title?: string; body?: string },
+  ) {
+    return this.pushBroadcastService.start(
+      {
+        companyId: body?.companyId || undefined,
+        onlyNotPunched: !!body?.onlyNotPunched,
+        title: body?.title,
+        body: body?.body,
+      },
+      req.user.userId,
+    );
+  }
+
+  @Get('push/broadcasts')
+  async listPushBroadcasts() {
+    return this.pushBroadcastService.list();
+  }
+
+  @Get('push/broadcast/:id')
+  async getPushBroadcast(@Param('id') id: string) {
+    return this.pushBroadcastService.get(id);
   }
 
   // 🆕 Réceptions : qui a reçu chaque notification dans l'app et hors app (push)
