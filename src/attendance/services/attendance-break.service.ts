@@ -22,6 +22,7 @@ import { CompanySiteService } from '../../companies/company-site.service';
 import {
   LocationRequiredException,
   OutOfGeofenceException,
+  GpsAccuracyTooLowException,
 } from '../../exceptions/business.exceptions';
 
 const BRAZZAVILLE_OFFSET_MIN = 60; // UTC+1, pas d'heure d'été
@@ -216,7 +217,10 @@ export class AttendanceBreakService {
         (la1, lo1, la2, lo2) => this.utils.getDistanceFromLatLonInMeters(la1, lo1, la2, lo2),
         { accuracy, clientIp, userId },
       );
-      if (!check.matched) throw new OutOfGeofenceException(check.distance ?? 0, check.siteName);
+      if (!check.matched) {
+        if (check.lowAccuracy) throw new GpsAccuracyTooLowException(check.accuracy ?? 0);
+        throw new OutOfGeofenceException(check.distance ?? 0, check.siteName, check.accuracy);
+      }
     }
     const r = await this.finalize(att, p, new Date(), 'GPS', null, latitude, longitude);
     return { success: true, ...r };

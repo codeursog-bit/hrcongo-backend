@@ -114,7 +114,9 @@ model User {
   ownedCompanies          UserCompany[]
   ownedDisplayScreens     DisplayScreen[]      @relation("DisplayScreenOwner")
   approvedDisplayScreens  DisplayScreen[]      @relation("DisplayScreenApprover") 
- approvalFunctions UserApprovalFunction[]
+  approvalFunctions UserApprovalFunction[]
+  chatParticipations ChatParticipant[]
+  chatMessagesSent   ChatMessage[]     @relation("ChatMessageSender")
 
   @@index([email])
   @@index([companyId])
@@ -253,6 +255,7 @@ model Company {
 
   users                    User[]
   approvalFunctions        UserApprovalFunction[]
+  chatConversations        ChatConversation[]
   approvalCircuits         ApprovalCircuit[]
   employees                Employee[]
   departments              Department[]
@@ -5069,4 +5072,63 @@ model CompanyIpSighting {
   @@index([companyId, ip, lastSeenAt])
   @@index([lastSeenAt])
   @@map("company_ip_sightings")
+}
+
+
+
+
+model ChatConversation {
+  id        String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId String  @db.Uuid
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  directKey String @unique @db.VarChar(80)
+
+  lastMessageAt  DateTime? @db.Timestamptz
+  lastPreviewEnc String?   @db.Text
+  lastSenderId   String?   @db.Uuid
+
+  createdAt DateTime @default(now()) @db.Timestamptz
+
+  participants ChatParticipant[]
+  messages     ChatMessage[]
+
+  @@index([companyId, lastMessageAt])
+  @@map("chat_conversations")
+}
+
+model ChatParticipant {
+  id             String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  conversationId String           @db.Uuid
+  conversation   ChatConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  userId         String           @db.Uuid
+  user           User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  unreadCount Int       @default(0)
+  lastReadAt  DateTime? @db.Timestamptz
+  createdAt   DateTime  @default(now()) @db.Timestamptz
+
+  @@unique([conversationId, userId])
+  @@index([userId])
+  @@map("chat_participants")
+}
+
+model ChatMessage {
+  id             String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  seq            BigInt           @unique @default(autoincrement())
+  conversationId String           @db.Uuid
+  conversation   ChatConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  senderId       String           @db.Uuid
+  sender         User             @relation("ChatMessageSender", fields: [senderId], references: [id], onDelete: Cascade)
+
+  bodyEnc  String  @map("body_enc") @db.Text
+  // Idempotence : un renvoi réseau avec le même clientId ne crée pas de doublon
+  clientId String? @db.Uuid
+
+  createdAt DateTime @default(now()) @db.Timestamptz
+
+  @@unique([senderId, clientId])
+  @@index([conversationId, seq])
+  @@index([createdAt])
+  @@map("chat_messages")
 }

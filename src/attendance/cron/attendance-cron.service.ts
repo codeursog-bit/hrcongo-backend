@@ -218,14 +218,26 @@ export class AttendanceCronService implements OnModuleDestroy {
 
         if (employees.length === 0) continue;
 
+        // Le cron repasse chaque minute de la fenêtre : on écarte d'emblée, en UNE
+        // requête, les employés déjà notifiés (au lieu de tenter ~20 insertions
+        // qui échouent par employé et par jour, et d'écrire un journal à chaque tick).
+        const claimedRows = await this.prisma.notificationDedupKey.findMany({
+          where: { key: { in: employees.map((e) => `pre-start:${e.id}:${shiftDate}`) } },
+          select: { key: true },
+        });
+        const alreadyNotified = new Set(claimedRows.map((r) => r.key));
+        const toNotify = employees.filter((e) => !alreadyNotified.has(`pre-start:${e.id}:${shiftDate}`));
+        if (toNotify.length === 0) continue;
+
         let notifiedCount = 0;
         const skipped: SystemLogSkip[] = [];
 
-        // En parallèle plutôt qu'un `for` séquentiel : sur une entreprise à
-        // beaucoup d'employés, l'envoi un par un pouvait prendre assez de
-        // temps pour que les derniers reçoivent leur rappel plusieurs
-        // dizaines de secondes, voire minutes, après les premiers.
-        await Promise.all(employees.map(async (emp) => {
+        // Par lots de 10 en parallèle : assez rapide pour que tout le monde reçoive son
+        // rappel en même temps, sans saturer le pool de connexions Prisma (P2024)
+        // sur une grosse entreprise ou plusieurs entreprises qui démarrent ensemble.
+        const PRE_SHIFT_BATCH = 10;
+        for (let i = 0; i < toNotify.length; i += PRE_SHIFT_BATCH) {
+        await Promise.all(toNotify.slice(i, i + PRE_SHIFT_BATCH).map(async (emp) => {
           const empName = `${emp.firstName} ${emp.lastName}`;
 
           if (!emp.user?.id) {
@@ -283,16 +295,17 @@ export class AttendanceCronService implements OnModuleDestroy {
 
           notifiedCount++;
         }));
+        }
 
         this.logger.log(
-          `📲 Rappel pré-début → ${company.legalName} (${officialStartHour}h${String(officialStartMinute).padStart(2, '0')}, -${preShiftMinutes}min) : ${notifiedCount}/${employees.length} notifiés`,
+          `📲 Rappel pré-début → ${company.legalName} (${officialStartHour}h${String(officialStartMinute).padStart(2, '0')}, -${preShiftMinutes}min) : ${notifiedCount}/${toNotify.length} notifiés`,
         );
 
         await this.systemLogs.log({
           source: 'attendance-cron:pre-start',
           level: skipped.length > 0 ? 'WARNING' : 'INFO',
-          message: `${company.legalName} — ${employees.length} employé(s), ${notifiedCount} notifié(s), ${skipped.length} sans push effectif`,
-          details: { evaluated: employees.length, notified: notifiedCount, skipped },
+          message: `${company.legalName} — ${toNotify.length} employé(s), ${notifiedCount} notifié(s), ${skipped.length} sans push effectif`,
+          details: { evaluated: toNotify.length, notified: notifiedCount, skipped },
           companyId: company.id,
         });
       }

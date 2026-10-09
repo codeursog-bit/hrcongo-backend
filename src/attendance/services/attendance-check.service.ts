@@ -20,6 +20,7 @@ import {
   AttendanceCheckOutMissingException,
   AttendanceAlreadyCheckedOutException,
   OutOfGeofenceException,
+  GpsAccuracyTooLowException,
   LocationRequiredException,
 } from '../../exceptions/business.exceptions';
 import {
@@ -386,9 +387,14 @@ export class AttendanceCheckService {
       );
 
       if (!siteCheck.matched) {
+        // 🆕 GPS trop flou → message dédié (au lieu d'un trompeur « vous êtes à 800 m »)
+        if (siteCheck.lowAccuracy) {
+          throw new GpsAccuracyTooLowException(siteCheck.accuracy ?? 0);
+        }
         throw new OutOfGeofenceException(
           siteCheck.distance ?? 0,
           siteCheck.siteName,
+          siteCheck.accuracy,
         );
       }
 
@@ -575,9 +581,13 @@ export class AttendanceCheckService {
         },
       );
       if (!siteCheckOut.matched) {
+        if (siteCheckOut.lowAccuracy) {
+          throw new GpsAccuracyTooLowException(siteCheckOut.accuracy ?? 0);
+        }
         throw new OutOfGeofenceException(
           siteCheckOut.distance ?? 0,
           siteCheckOut.siteName,
+          siteCheckOut.accuracy,
         );
       }
       checkOutSiteId = siteCheckOut.siteId;

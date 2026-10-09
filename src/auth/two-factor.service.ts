@@ -8,6 +8,7 @@ import {
   Logger,
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { CryptoService } from '../crypto/crypto.service';
 import { JwtService } from '@nestjs/jwt';
 import { COOKIE_CONFIG } from './auth.service';
 import { clearLegacyCookies } from '../common/utils/cookie.util';
@@ -26,6 +27,7 @@ export class TwoFactorService {
   constructor(
     private prisma: PrismaService,
     private jwtService: JwtService,
+    private cryptoService: CryptoService, // 🔐 secret 2FA chiffré en base (AES-256-GCM)
   ) {}
 
   async setup(userId: string): Promise<{
@@ -55,7 +57,7 @@ export class TwoFactorService {
 
     await this.prisma.user.update({
       where: { id: userId },
-      data: { twoFactorSecret: secret },
+      data: { twoFactorSecret: this.cryptoService.encrypt(secret) },
     });
 
     return { secret, qrCodeUrl, manualKey: secret };
@@ -79,7 +81,8 @@ export class TwoFactorService {
     }
 
     const valid = speakeasy.totp.verify({
-      secret: user.twoFactorSecret,
+      // decrypt() renvoie tel quel les anciens secrets encore en clair
+      secret: this.cryptoService.decrypt(user.twoFactorSecret) as string,
       encoding: 'base32',
       token: code,
       window: 1, // ±30s de tolérance
@@ -144,8 +147,9 @@ export class TwoFactorService {
     });
     if (!user) throw new UnauthorizedException('Utilisateur introuvable');
 
-    const secret = (user as any).twoFactorSecret as string;
-    if (!secret) throw new BadRequestException('2FA non configuré');
+    const storedSecret = (user as any).twoFactorSecret as string;
+    if (!storedSecret) throw new BadRequestException('2FA non configuré');
+    const secret = this.cryptoService.decrypt(storedSecret) as string;
 
     const valid = speakeasy.totp.verify({
       secret,

@@ -215,7 +215,7 @@ export class UsersService {
       );
       this.logger.log(`📧 Email envoyé à ${newUser.email}`);
     } catch (e) {
-      this.logger.warn(`⚠️ Échec envoi email : ${e.message}`);
+      this.logger.warn(`⚠️ Échec envoi email : ${e instanceof Error ? e.message : String(e)}`);
     }
 
     // ✅ On renvoie le téléphone dans la réponse (pas en DB) pour que le front
@@ -261,8 +261,13 @@ export class UsersService {
 
     if (!user || !user.companyId) return [];
 
-    return this.prisma.user.findMany({
-      where: { companyId: user.companyId },
+    const companyId = user.companyId;
+
+    // ✅ Photo de l'employé lié au compte, SANS requête lourde : le lien direct est lu dans la
+    // même requête (relation), et seuls les comptes sans lien direct déclenchent une 2ᵉ
+    // requête ciblée (par e-mail, seulement pour ceux-là) — jamais tous les employés.
+    const users = await this.prisma.user.findMany({
+      where: { companyId },
       select: {
         id: true,
         firstName: true,
@@ -274,9 +279,37 @@ export class UsersService {
         lastLoginAt: true,
         createdAt: true,
         employeeId: true, // ✅ Inclure pour debug
+        employee: { select: { photoUrl: true } },
       },
       orderBy: { createdAt: 'desc' },
     });
+
+    const unlinkedEmails: string[] = users
+      .filter((u) => !u.employee?.photoUrl)
+      .map((u) => (u.email ?? '').toLowerCase())
+      .filter((email) => email.length > 0);
+
+    const photoByEmail = new Map<string, string>();
+    if (unlinkedEmails.length > 0) {
+      const candidates = await this.prisma.employee.findMany({
+        where: {
+          companyId,
+          photoUrl: { not: null },
+          email: { in: unlinkedEmails, mode: 'insensitive' },
+        },
+        select: { email: true, photoUrl: true },
+      });
+      for (const candidate of candidates) {
+        if (candidate.email && candidate.photoUrl) {
+          photoByEmail.set(candidate.email.toLowerCase(), candidate.photoUrl);
+        }
+      }
+    }
+
+    return users.map(({ employee, ...rest }) => ({
+      ...rest,
+      avatar: employee?.photoUrl ?? photoByEmail.get((rest.email ?? '').toLowerCase()) ?? null,
+    }));
   }
 
   async update(

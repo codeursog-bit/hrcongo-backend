@@ -550,15 +550,41 @@ export class AttendanceAlreadyCheckedOutException extends ConflictException {
 // accepte quand même" — désormais le backend est la seule autorité, il
 // bloque réellement le pointage.
 export class OutOfGeofenceException extends BadRequestException {
-  constructor(distance: number, nearestSiteName: string | null) {
+  constructor(
+    distance: number,
+    nearestSiteName: string | null,
+    accuracy?: number | null, // 🆕 précision GPS annoncée (±m) : permet de distinguer « trop loin » d'un GPS flou
+  ) {
+    const accTxt =
+      accuracy != null && Number.isFinite(accuracy) && accuracy > 0
+        ? ` (précision GPS ±${Math.round(accuracy)} m)`
+        : '';
     super({
       statusCode: 400,
       message: nearestSiteName
-        ? `Vous êtes à ${distance}m de "${nearestSiteName}", hors de la zone autorisée. Rapprochez-vous ou utilisez le pointage manuel.`
-        : `Vous êtes à ${distance}m du lieu autorisé. Rapprochez-vous ou utilisez le pointage manuel.`,
+        ? `Vous êtes à ${distance}m de "${nearestSiteName}"${accTxt}, hors de la zone autorisée. Rapprochez-vous, connectez-vous au wifi de l'entreprise si vous y êtes, ou utilisez le pointage manuel.`
+        : `Vous êtes à ${distance}m du lieu autorisé${accTxt}. Rapprochez-vous, connectez-vous au wifi de l'entreprise si vous y êtes, ou utilisez le pointage manuel.`,
       error: 'OUT_OF_GEOFENCE',
       distance,
       nearestSiteName,
+      accuracy: accuracy ?? null,
+    });
+  }
+}
+
+// 🆕 Le GPS de l'appareil est trop flou pour trancher : le cercle d'incertitude touche la zone, mais la
+// lecture est trop imprécise pour la valider. Ce n'est PAS « vous êtes trop loin » (message trompeur).
+export class GpsAccuracyTooLowException extends BadRequestException {
+  constructor(accuracy: number) {
+    super({
+      statusCode: 400,
+      message:
+        `Votre position GPS est trop imprécise (±${Math.round(accuracy)} m) pour confirmer que vous êtes dans la zone. ` +
+        `Si vous êtes dans les locaux, connectez-vous au wifi de l'entreprise puis réessayez. ` +
+        `Sinon, activez la localisation « précise », sortez à découvert ou approchez-vous d'une fenêtre, ` +
+        `patientez quelques secondes puis réessayez.`,
+      error: 'GPS_ACCURACY_TOO_LOW',
+      accuracy: Math.round(accuracy),
     });
   }
 }

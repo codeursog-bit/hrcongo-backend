@@ -68,6 +68,7 @@ import { PermissionTicketsModule } from './permission-tickets/permission-tickets
 import { CompanyDeductionsModule } from './company-deductions/company-deductions.module';
 import { AbsenceTrackingModule } from './absence-tracking/absence-tracking.module';
 import { PortfolioModule } from './portfolio/portfolio.module';
+import { ChatModule } from './chat/chat.module';
 
 @Module({
   imports: [
@@ -158,6 +159,7 @@ import { PortfolioModule } from './portfolio/portfolio.module';
     CheckinDevicesModule,
     DisplayScreensModule, // 🆕 pointage par scan QR dynamique + code secret
     ApprovalsModule,
+    ChatModule,
   ],
   controllers: [AppController],
   providers: [

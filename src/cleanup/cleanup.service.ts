@@ -8,6 +8,8 @@
 //   03h00 chaque nuit  → nettoyage sessions expirées / révoquées
 //   04h00 chaque nuit  → purge logs d'audit anciens (>1 an)
 //   Dimanche 01h00     → rapport hebdo console
+//   04h30 / 04h40 / 04h50 / 05h00 → push, notifications, clés anti-doublon,
+//                                   system_logs, activité quotidienne
 // ============================================================================
 import { Injectable, Logger } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
@@ -284,6 +286,92 @@ export class CleanupService {
       if (r?.count) this.logger.log(`🧹 ${r.count} suivi(s) d'envoi push de plus de 30 jours supprimé(s)`);
     } catch (e: any) {
       this.logger.warn(`Purge push_deliveries: ${e?.message ?? e}`);
+    }
+  }
+
+  // ============================================================================
+  // 🆕 Purge des notifications — lues > 90 j, non lues > 365 j
+  // (le rappel pré-début en crée 1 par employé et par jour)
+  // ============================================================================
+  @Cron('40 4 * * *', { timeZone: 'Africa/Brazzaville' })
+  async purgeNotifications(): Promise<void> {
+    try {
+      const d90 = new Date(Date.now() - 90 * 86_400_000);
+      const d365 = new Date(Date.now() - 365 * 86_400_000);
+      const r = await this.prisma.notification.deleteMany({
+        where: {
+          OR: [
+            { read: true, createdAt: { lt: d90 } },
+            { read: false, createdAt: { lt: d365 } },
+          ],
+        },
+      });
+      if (r.count) this.logger.log(`🧹 ${r.count} notification(s) ancienne(s) supprimée(s)`);
+    } catch (e: any) {
+      this.logger.warn(`Purge notifications: ${e?.message ?? e}`);
+    }
+  }
+
+  // ============================================================================
+  // 🆕 Purge des clés anti-doublon — pre-start:/post-end: (1 par employé/jour)
+  // > 30 j ; toutes les autres (abonnements, CNSS, impayés…) > 400 j
+  // ============================================================================
+  @Cron('45 4 * * *', { timeZone: 'Africa/Brazzaville' })
+  async purgeDedupKeys(): Promise<void> {
+    try {
+      const d30 = new Date(Date.now() - 30 * 86_400_000);
+      const d400 = new Date(Date.now() - 400 * 86_400_000);
+      const daily = await this.prisma.notificationDedupKey.deleteMany({
+        where: {
+          createdAt: { lt: d30 },
+          OR: [{ key: { startsWith: 'pre-start:' } }, { key: { startsWith: 'post-end:' } }],
+        },
+      });
+      const others = await this.prisma.notificationDedupKey.deleteMany({
+        where: { createdAt: { lt: d400 } },
+      });
+      const total = daily.count + others.count;
+      if (total) this.logger.log(`🧹 ${total} clé(s) anti-doublon supprimée(s)`);
+    } catch (e: any) {
+      this.logger.warn(`Purge notification_dedup_keys: ${e?.message ?? e}`);
+    }
+  }
+
+  // ============================================================================
+  // 🆕 Purge des journaux système — INFO/WARNING > 30 j, ERROR/ALERT > 180 j
+  // ============================================================================
+  @Cron('50 4 * * *', { timeZone: 'Africa/Brazzaville' })
+  async purgeSystemLogs(): Promise<void> {
+    try {
+      const d30 = new Date(Date.now() - 30 * 86_400_000);
+      const d180 = new Date(Date.now() - 180 * 86_400_000);
+      const light = await this.prisma.systemLog.deleteMany({
+        where: { level: { in: ['INFO', 'WARNING'] }, createdAt: { lt: d30 } },
+      });
+      const heavy = await this.prisma.systemLog.deleteMany({
+        where: { level: { in: ['ERROR', 'ALERT'] }, createdAt: { lt: d180 } },
+      });
+      const total = light.count + heavy.count;
+      if (total) this.logger.log(`🧹 ${total} journal(aux) système supprimé(s)`);
+    } catch (e: any) {
+      this.logger.warn(`Purge system_logs: ${e?.message ?? e}`);
+    }
+  }
+
+  // ============================================================================
+  // 🆕 Purge de l'activité quotidienne des utilisateurs — > 400 jours
+  // (date au format "YYYY-MM-DD" : la comparaison de texte est chronologique)
+  // ============================================================================
+  @Cron('0 5 * * *', { timeZone: 'Africa/Brazzaville' })
+  async purgeDailyUserActivity(): Promise<void> {
+    try {
+      const limit = new Date(Date.now() - 400 * 86_400_000).toISOString().slice(0, 10);
+      const r = await this.prisma.dailyUserActivity.deleteMany({
+        where: { date: { lt: limit } },
+      });
+      if (r.count) this.logger.log(`🧹 ${r.count} ligne(s) d'activité quotidienne supprimée(s)`);
+    } catch (e: any) {
+      this.logger.warn(`Purge daily_user_activity: ${e?.message ?? e}`);
     }
   }
 }

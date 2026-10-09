@@ -179,6 +179,8 @@ export class CompanySiteService {
     basis: 'RADIUS' | 'TOLERANCE' | 'TRUSTED_IP' | null;
     detail: string | null;
     trace: GeoTrace | null; // 🆕 pour l'affichage admin (null = rien à tracer)
+    lowAccuracy?: boolean; // 🆕 refus dû à un GPS trop flou (≠ « trop loin »)
+    accuracy?: number | null; // 🆕 précision GPS annoncée (±m), pour le message de refus
   }> {
     // Sites multi-sites (table CompanySite)
     const sites = await this.findActive(companyId);
@@ -333,7 +335,12 @@ export class CompanySiteService {
       }
     }
 
-    // 4) Refus : on retient le plus proche pour un message d'erreur utile
+    // 4) Refus : on retient le plus proche pour un message d'erreur utile.
+    // 🆕 « GPS trop flou » ≠ « trop loin » : si le cercle d'incertitude (distance − précision) touche la
+    // zone, la personne est peut-être dedans mais la lecture est trop imprécise pour le prouver.
+    // Si le cercle ne touche pas la zone, même avec toute l'erreur possible, elle est vraiment hors zone.
+    const accOk = Number.isFinite(acc) && acc > 0;
+    const lowAccuracy = accOk && closest.distance - acc <= closest.radius;
     return {
       matched: false,
       siteId: closest.id,
@@ -343,6 +350,8 @@ export class CompanySiteService {
       basis: null,
       detail: null,
       trace: null,
+      lowAccuracy,
+      accuracy: accOk ? Math.round(acc) : null,
     };
   }
 
