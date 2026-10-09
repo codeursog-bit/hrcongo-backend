@@ -17,7 +17,7 @@ import {
 import { AuthGuard } from '@nestjs/passport';
 import { IsNotEmpty, IsOptional, IsString, MaxLength } from 'class-validator';
 import { PrismaService } from '../prisma/prisma.service';
-import { CompanySiteService } from './company-site.service';
+import { CompanySiteService, IP_LEARN_WINDOW_HOURS } from './company-site.service';
 import { SubscriptionGuard } from '../subscriptions/guards/subscription.guard';
 import { isPrivateOrLocalIp, normalizeIp } from '../common/ip.util';
 
@@ -79,10 +79,15 @@ export class CompanyTrustedIpController {
     const rec = usable
       ? await this.companySiteService.isIpRecognized(companyId, ip)
       : { recognized: false, via: null };
-    return { ip, usable, recognized: rec.recognized, via: rec.via };
+    // 🆕 règles d'apprentissage en vigueur (le front les affiche au lieu de les coder en dur)
+    return {
+      ip, usable, recognized: rec.recognized, via: rec.via,
+      learnQuorum: await this.companySiteService.getLearnQuorum(companyId),
+      learnWindowHours: IP_LEARN_WINDOW_HOURS,
+    };
   }
 
-  // GET /companies/:companyId/trusted-ips/learned — IP apprises automatiquement (< 24 h)
+  // GET /companies/:companyId/trusted-ips/learned — IP apprises automatiquement (fenêtre glissante)
   // (déclarée AVANT « :id » pour ne pas être confondue avec un identifiant)
   @Get('learned')
   async learned(@Param('companyId') companyId: string, @Request() req) {

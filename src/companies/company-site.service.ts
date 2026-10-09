@@ -22,8 +22,11 @@ export const IP_LEARN_MAX_ACCURACY_M = 50;
 // DIFFÉRENTES ont pointé avec succès au GPS (dans le rayon OU avec marge) depuis
 // cette même IP publique pendant la fenêtre ci-dessous (glissante, renouvelée à
 // chaque pointage GPS valide).
-export const IP_LEARN_QUORUM = 3;
-export const IP_LEARN_WINDOW_HOURS = 24;
+// 🆕 5 personnes différentes sur 72 h (3 jours) : plus dur à tromper qu'avant (3 personnes / 24 h), et la
+// fenêtre couvre un week-end (dernier pointage vendredi soir → lundi matin ≈ 63 h). Pour une petite
+// entreprise, le quorum réellement exigé est plafonné à 60 % des employés actifs (voir getLearnQuorum).
+export const IP_LEARN_QUORUM = 5;
+export const IP_LEARN_WINDOW_HOURS = 72;
 // On ne réécrit pas en base la même observation plus d'une fois par cet intervalle.
 const IP_SIGHTING_WRITE_THROTTLE_MS = 30 * 60 * 1000;
 // « Groupe » d'entreprises = le portefeuille d'un admin multi-entreprises (ex. un client avec 5 sociétés dans
@@ -54,6 +57,7 @@ export class CompanySiteService {
 
   // Anti-écritures répétées : clé « entreprise|ip|personne » → dernier enregistrement (ms)
   private readonly sightingWriteCache = new Map<string, number>();
+  private readonly quorumCache = new Map<string, { at: number; q: number }>(); // 🆕
 
   // 🔒 CORRECTIF SÉCURITÉ (audit) : les routes /companies/:companyId/sites
   // acceptaient n'importe quel companyId d'URL de la part de n'importe quel
@@ -321,10 +325,10 @@ export class CompanySiteService {
           ipLabel: trusted.label,
         });
       }
-      // 3b) IP apprise automatiquement (quorum de personnes différentes, < 24 h)
+      // 3b) IP apprise automatiquement (quorum de personnes différentes sur IP_LEARN_WINDOW_HOURS)
       if (!isPrivateOrLocalIp(ip)) {
         const people = await this.countLearnedIpPeople(companyId, ip);
-        if (people >= IP_LEARN_QUORUM) {
+        if (people > 0 && people >= (await this.getLearnQuorum(companyId))) {
           return ok(
             closest,
             'TRUSTED_IP',
@@ -358,6 +362,23 @@ export class CompanySiteService {
   // ═══════════════════════════════════════════════════════════════════════════
   // IP APPRISE (wifi du site) — alimentée par les pointages GPS valides
   // ═══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * 🆕 Quorum réellement exigé pour apprendre une IP : IP_LEARN_QUORUM (5), mais jamais plus de 60 % des
+   * employés actifs (sociétés du groupe incluses) et au moins 2. Sans ce plafond, une entreprise de moins
+   * de 5 employés ne pourrait JAMAIS apprendre son IP. Mis en cache 10 min.
+   */
+  async getLearnQuorum(companyId: string): Promise<number> {
+    const hit = this.quorumCache.get(companyId);
+    if (hit && Date.now() - hit.at < 10 * 60 * 1000) return hit.q;
+    const group = await this.groupCompanyIds(companyId);
+    const active = await this.prisma.employee.count({
+      where: { companyId: { in: [...group] }, status: 'ACTIVE' },
+    });
+    const q = Math.max(2, Math.min(IP_LEARN_QUORUM, Math.ceil(active * 0.6)));
+    this.quorumCache.set(companyId, { at: Date.now(), q });
+    return q;
+  }
 
   private windowStart(): Date {
     return new Date(Date.now() - IP_LEARN_WINDOW_HOURS * 3600 * 1000);
@@ -490,6 +511,7 @@ export class CompanySiteService {
   async listLearnedIps(companyId: string) {
     const group = await this.groupCompanyIds(companyId);
     const groupIds = [...group];
+    const quorum = await this.getLearnQuorum(companyId); // 🆕
     const rows = await this.prisma.companyIpSighting.findMany({
       where: { companyId: { in: groupIds }, lastSeenAt: { gte: this.windowStart() } },
       select: { ip: true, companyId: true, lastSeenAt: true, blocked: true },
@@ -529,8 +551,9 @@ export class CompanySiteService {
         return {
           ...x,
           shared,
-          active: !x.blocked && !shared && x.people >= IP_LEARN_QUORUM,
-          quorum: IP_LEARN_QUORUM,
+          active: !x.blocked && !shared && x.people >= quorum,
+          quorum,
+          windowHours: IP_LEARN_WINDOW_HOURS,
         };
       })
       .sort((a, b) => b.people - a.people || +b.lastSeenAt - +a.lastSeenAt);
@@ -580,7 +603,7 @@ export class CompanySiteService {
     });
     if (trusted) return { recognized: true, via: 'ADMIN' };
     const people = await this.countLearnedIpPeople(companyId, ip);
-    return people >= IP_LEARN_QUORUM
+    return people > 0 && people >= (await this.getLearnQuorum(companyId))
       ? { recognized: true, via: 'LEARNED' }
       : { recognized: false, via: null };
   }
