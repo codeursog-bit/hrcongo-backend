@@ -5182,3 +5182,16 @@ model ChatMessage {
   @@index([createdAt])
   @@map("chat_messages")
 }
+
+
+model ServerMetricSnapshot {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  createdAt DateTime @default(now()) @db.Timestamptz
+  metrics   Json
+  tables    Json?
+  routes    Json?
+
+  @@index([createdAt])
+  @@map("server_metric_snapshots")
+}
+

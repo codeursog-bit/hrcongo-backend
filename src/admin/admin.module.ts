@@ -3,7 +3,7 @@
 // ============================================================================
 // Fichier: src/admin/admin.module.ts
 
-import { Module } from '@nestjs/common';
+import { MiddlewareConsumer, Module, NestModule, RequestMethod } from '@nestjs/common';
 import { AdminController } from './admin.controller';
 import { PortfolioAdminController } from './controllers/portfolio-admin.controller';
 import { DashboardService } from './services/dashboard.service';
@@ -21,10 +21,17 @@ import { PrismaModule } from '../prisma/prisma.module';
 import { PlatformSettingsModule } from '../platform-settings/platform-settings.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { UltraAdminGuard } from './guards/ultra-admin.guard';
+// 🆕 Suivi du serveur + purge sécurisée (super admin)
+import { SystemLogsModule } from '../system-logs/system-logs.module';
+import { ServerMonitorController } from './server-monitor/server-monitor.controller';
+import { ServerMetricsService } from './server-monitor/server-metrics.service';
+import { AdminPurgeService } from './server-monitor/purge.service';
+import { RouteStatsCollector } from './server-monitor/route-stats.collector';
+import { RequestMetricsMiddleware } from './server-monitor/request-metrics.middleware';
 
 @Module({
-  imports: [PrismaModule, CleanupModule, PlatformSettingsModule, NotificationsModule],
-  controllers: [AdminController, PortfolioAdminController],
+  imports: [PrismaModule, CleanupModule, PlatformSettingsModule, NotificationsModule, SystemLogsModule],
+  controllers: [AdminController, PortfolioAdminController, ServerMonitorController],
   providers: [
     // Services
     DashboardService,
@@ -37,6 +44,10 @@ import { UltraAdminGuard } from './guards/ultra-admin.guard';
     ErrorTrackingService,
     AdminUserActivityService,
     PortfolioAdminService,
+    // 🆕 Suivi du serveur + purge sécurisée
+    ServerMetricsService,
+    AdminPurgeService,
+    RouteStatsCollector,
     // Guards
     UltraAdminGuard,
   ],
@@ -54,4 +65,9 @@ import { UltraAdminGuard } from './guards/ultra-admin.guard';
     PortfolioAdminService,
   ],
 })
-export class AdminModule {}
+export class AdminModule implements NestModule {
+  // 🆕 Mesure la durée de chaque requête (par route) pour le suivi du serveur
+  configure(consumer: MiddlewareConsumer) {
+    consumer.apply(RequestMetricsMiddleware).forRoutes({ path: '*', method: RequestMethod.ALL });
+  }
+}

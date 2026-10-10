@@ -19,11 +19,6 @@
     "test:cov": "jest --coverage",
     "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
     "test:e2e": "jest --config ./test/jest-e2e.json",
-    "seed": "ts-node prisma/seed.ts",
-    "seed:super-admin": "ts-node prisma/super-admin.seed.ts",
-    "repair:payroll": "ts-node src/scripts/repair-payroll-data.ts",
-    "regenerate:attendance": "ts-node src/scripts/regenerate-attendance.ts",
-    "generate:payroll": "ts-node src/scripts/generate-payroll.ts",
     "check-types": "tsc --noEmit"
   },
   "dependencies": {
