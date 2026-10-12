@@ -26,12 +26,15 @@ import { SystemLogsModule } from '../system-logs/system-logs.module';
 import { ServerMonitorController } from './server-monitor/server-monitor.controller';
 import { ServerMetricsService } from './server-monitor/server-metrics.service';
 import { AdminPurgeService } from './server-monitor/purge.service';
+import { AdminSignalsService } from './server-monitor/admin-signals.service';
+import { CompanyInsightsService } from './services/company-insights.service';
+import { CompanyInsightsController } from './services/company-insights.controller';
 import { RouteStatsCollector } from './server-monitor/route-stats.collector';
 import { RequestMetricsMiddleware } from './server-monitor/request-metrics.middleware';
 
 @Module({
   imports: [PrismaModule, CleanupModule, PlatformSettingsModule, NotificationsModule, SystemLogsModule],
-  controllers: [AdminController, PortfolioAdminController, ServerMonitorController],
+  controllers: [AdminController, PortfolioAdminController, ServerMonitorController, CompanyInsightsController],
   providers: [
     // Services
     DashboardService,
@@ -47,6 +50,8 @@ import { RequestMetricsMiddleware } from './server-monitor/request-metrics.middl
     // 🆕 Suivi du serveur + purge sécurisée
     ServerMetricsService,
     AdminPurgeService,
+    AdminSignalsService,
+    CompanyInsightsService,
     RouteStatsCollector,
     // Guards
     UltraAdminGuard,

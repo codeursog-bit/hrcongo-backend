@@ -19,6 +19,35 @@ export class LoansRepaymentService {
     private common: LoansCommonService,
   ) {}
 
+  // ── Période de remboursement ────────────────────────────────────────────
+
+  /**
+   * Résout la période (mois/année) d'un remboursement saisi à la main.
+   * - Sans période fournie → mois courant (comportement historique).
+   * - Avec période → elle est ENREGISTRÉE telle quelle dans le log, donc tout
+   *   ce qui lit les logs (relevé, suivi employé, courbe, paie : skip du mois
+   *   déjà couvert en espèces) suit CETTE période, pas la date du jour.
+   * - Garde-fous : mois 1-12, pas de période future (on ne peut pas encaisser
+   *   en espèces un mois qui n'est pas encore arrivé), et pas avant le début
+   *   de la dette (`notBefore`).
+   */
+  private resolvePeriod(month?: number, year?: number, notBefore?: { month: number; year: number }) {
+    const now = new Date();
+    const curM = now.getMonth() + 1;
+    const curY = now.getFullYear();
+    if (month == null && year == null) return { month: curM, year: curY };
+
+    const m = Number(month ?? curM);
+    const y = Number(year ?? curY);
+    if (!Number.isInteger(m) || m < 1 || m > 12) throw new BadRequestException('Mois de remboursement invalide (1 à 12)');
+    if (!Number.isInteger(y) || y < 2000 || y > 2100) throw new BadRequestException('Année de remboursement invalide');
+    if (y * 12 + m > curY * 12 + curM) throw new BadRequestException('La période de remboursement ne peut pas être dans le futur');
+    if (notBefore && y * 12 + m < notBefore.year * 12 + notBefore.month) {
+      throw new BadRequestException(`La période de remboursement ne peut pas précéder le début de la dette (${String(notBefore.month).padStart(2, '0')}/${notBefore.year})`);
+    }
+    return { month: m, year: y };
+  }
+
   // ── Prêts ────────────────────────────────────────────────────────────────
 
   /**
@@ -48,21 +77,25 @@ export class LoansRepaymentService {
    * forcément la mensualité), ex : "il a remboursé 2 000 FCFA, il reste
    * 10 000 FCFA". Le solde restant et le statut se recalculent aussitôt.
    */
-  async recordCashRepayment(loanId: string, amount: number, userId: string, overrideCompanyId?: string) {
+  async recordCashRepayment(loanId: string, amount: number, userId: string, overrideCompanyId?: string, month?: number, year?: number) {
     const user = await this.common.getVerifiedUser(userId);
     this.common.applyCompanyOverride(user, overrideCompanyId);
     this.common.requireFinanceAccess(user.role);
 
     const loan = await this.common.getOwnedLoanOrThrow(loanId, user.companyId);
+    const remaining = Number(loan.remainingBalance);
+    // 🔒 Dette entièrement remboursée → plus aucune saisie possible (même si
+    // le statut n'a pas encore été mis à jour, le solde à 0 fait foi).
+    if (loan.status === 'PAID' || remaining <= 0) throw new BadRequestException('Ce prêt est entièrement remboursé : aucun nouveau remboursement ne peut être saisi');
     if (loan.status !== 'ACTIVE') throw new BadRequestException('Seul un prêt actif peut recevoir un remboursement en espèces');
     if (!amount || amount <= 0) throw new BadRequestException('Le montant remboursé doit être supérieur à 0');
+    if (amount > remaining) throw new BadRequestException(`Le montant dépasse le reste dû (${remaining} FCFA)`);
 
-    const remaining = Number(loan.remainingBalance);
-    const applied = Math.min(amount, remaining); // ne peut pas rembourser plus que ce qui reste dû
-    const now = new Date();
+    const period = this.resolvePeriod(month, year, { month: new Date(loan.startDate).getUTCMonth() + 1, year: new Date(loan.startDate).getUTCFullYear() });
+    const applied = amount;
 
     await this.prisma.loanRepaymentLog.create({
-      data: { loanId, month: now.getMonth() + 1, year: now.getFullYear(), amount: applied, method: 'CASH', recordedBy: userId },
+      data: { loanId, month: period.month, year: period.year, amount: applied, method: 'CASH', recordedBy: userId },
     });
 
     const newBalance = Math.max(0, remaining - applied);
@@ -71,7 +104,7 @@ export class LoansRepaymentService {
       data: { remainingBalance: newBalance, status: newBalance === 0 ? 'PAID' : 'ACTIVE' },
     });
 
-    return { success: true, applied, remainingBalance: newBalance };
+    return { success: true, applied, remainingBalance: newBalance, month: period.month, year: period.year };
   }
 
   /**
@@ -117,21 +150,23 @@ export class LoansRepaymentService {
    * les prêts. Remplace l'ancien "tout rembourser d'un coup" par un
    * remboursement partiel possible.
    */
-  async recordAdvanceCashRepayment(advanceId: string, amount: number, userId: string, overrideCompanyId?: string) {
+  async recordAdvanceCashRepayment(advanceId: string, amount: number, userId: string, overrideCompanyId?: string, month?: number, year?: number) {
     const user = await this.common.getVerifiedUser(userId);
     this.common.applyCompanyOverride(user, overrideCompanyId);
     this.common.requireFinanceAccess(user.role);
 
     const advance = await this.common.getOwnedAdvanceOrThrow(advanceId, user.companyId);
+    const remaining = Number(advance.remainingBalance);
+    if (['PAID', 'DEDUCTED'].includes(advance.status) || remaining <= 0) throw new BadRequestException('Cette avance est entièrement remboursée : aucun nouveau remboursement ne peut être saisi');
     if (advance.status !== 'APPROVED') throw new BadRequestException('Seule une avance approuvée peut recevoir un remboursement en espèces');
     if (!amount || amount <= 0) throw new BadRequestException('Le montant remboursé doit être supérieur à 0');
+    if (amount > remaining) throw new BadRequestException(`Le montant dépasse le reste dû (${remaining} FCFA)`);
 
-    const remaining = Number(advance.remainingBalance);
-    const applied = Math.min(amount, remaining);
-    const now = new Date();
+    const period = this.resolvePeriod(month, year, { month: advance.month, year: advance.year });
+    const applied = amount;
 
     await this.prisma.advanceRepaymentLog.create({
-      data: { advanceId, month: now.getMonth() + 1, year: now.getFullYear(), amount: applied, method: 'CASH', recordedBy: userId },
+      data: { advanceId, month: period.month, year: period.year, amount: applied, method: 'CASH', recordedBy: userId },
     });
 
     const newBalance = Math.max(0, remaining - applied);
@@ -140,7 +175,7 @@ export class LoansRepaymentService {
       data: { remainingBalance: newBalance, status: newBalance === 0 ? 'PAID' : 'APPROVED', recoverViaPayroll: newBalance === 0 ? false : advance.recoverViaPayroll },
     });
 
-    return { success: true, applied, remainingBalance: newBalance };
+    return { success: true, applied, remainingBalance: newBalance, month: period.month, year: period.year };
   }
 
   /** Supprime une saisie de remboursement d'avance erronée — même logique que pour les prêts. */
@@ -179,7 +214,7 @@ export class LoansRepaymentService {
    * AdvanceRepaymentLog comme recordAdvanceCashRepayment, sinon ce
    * remboursement resterait invisible dans l'historique/traçabilité.
    */
-  async markAdvancePaidInCash(id: string, userId: string, overrideCompanyId?: string) {
+  async markAdvancePaidInCash(id: string, userId: string, overrideCompanyId?: string, month?: number, year?: number) {
     const user = await this.common.getVerifiedUser(userId);
     this.common.applyCompanyOverride(user, overrideCompanyId);
     this.common.requireFinanceAccess(user.role);
@@ -187,11 +222,12 @@ export class LoansRepaymentService {
     if (advance.status !== 'APPROVED') throw new BadRequestException('Seule une avance approuvée peut être marquée remboursée');
 
     const remaining = Number(advance.remainingBalance ?? advance.amount);
-    const now = new Date();
+    if (remaining <= 0) throw new BadRequestException('Cette avance est entièrement remboursée');
+    const period = this.resolvePeriod(month, year, { month: advance.month, year: advance.year });
 
     const [, updated] = await this.prisma.$transaction([
       this.prisma.advanceRepaymentLog.create({
-        data: { advanceId: id, month: now.getMonth() + 1, year: now.getFullYear(), amount: remaining, method: 'CASH', recordedBy: userId },
+        data: { advanceId: id, month: period.month, year: period.year, amount: remaining, method: 'CASH', recordedBy: userId },
       }),
       this.prisma.advance.update({ where: { id }, data: { status: 'PAID', remainingBalance: 0, recoverViaPayroll: false } }),
     ]);

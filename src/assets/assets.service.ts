@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateAssetDto } from './dto/create-asset.dto';
+import { UpdateAssetDto } from './dto/update-asset.dto';
 import { AssetStatus } from '@prisma/client';
 import { SubscriptionGuard } from '../subscriptions/guards/subscription.guard';
 import { resolveVerifiedCompanyId } from '../common/resolve-verified-company.util';
@@ -176,6 +177,67 @@ export class AssetsService {
         },
       },
     });
+  }
+
+  // ── Modifier un actif (nom, n° de série, catégorie, valeur, date d'achat) ───
+  async update(assetId: string, dto: UpdateAssetDto, userId: string) {
+    const user = await this.getVerifiedUser(userId);
+    this.assertAssetManagerRole(user.role);
+    await this.getAssetOrFail(assetId, user.companyId);
+
+    const data: Record<string, any> = {};
+
+    if (dto.name !== undefined) {
+      const name = dto.name.trim();
+      if (!name) {
+        throw new BadRequestException('Le nom du matériel est obligatoire.');
+      }
+      data.name = name;
+    }
+    if (dto.serialNumber !== undefined) {
+      data.serialNumber = dto.serialNumber.trim() || null;
+    }
+    if (dto.category !== undefined) {
+      const category = dto.category.trim();
+      if (!category) {
+        throw new BadRequestException('La catégorie est obligatoire.');
+      }
+      data.category = category as any; // String libre, comme à la création
+    }
+    if (dto.purchaseDate !== undefined) {
+      data.purchaseDate = new Date(dto.purchaseDate);
+    }
+    if (dto.purchaseValue !== undefined) {
+      data.purchasePrice = dto.purchaseValue;
+    }
+
+    return this.prisma.asset.update({
+      where: { id: assetId },
+      data,
+      include: {
+        employee: {
+          select: { id: true, firstName: true, lastName: true, photoUrl: true },
+        },
+      },
+    });
+  }
+
+  // ── Supprimer un actif ──────────────────────────────────────────────────────
+  // Refusé tant que le matériel est attribué à un employé : il faut d'abord le
+  // récupérer (désassigner), pour ne pas perdre la trace de la dotation.
+  async remove(assetId: string, userId: string) {
+    const user = await this.getVerifiedUser(userId);
+    this.assertAssetManagerRole(user.role);
+    const asset = await this.getAssetOrFail(assetId, user.companyId);
+
+    if (asset.status === AssetStatus.IN_USE || asset.assignedTo) {
+      throw new BadRequestException(
+        "Ce matériel est attribué à un employé. Retirez-le d'abord avant de le supprimer.",
+      );
+    }
+
+    await this.prisma.asset.delete({ where: { id: assetId } });
+    return { success: true, id: assetId };
   }
 
   // ── Actifs d'un employé ─────────────────────────────────────────────────────

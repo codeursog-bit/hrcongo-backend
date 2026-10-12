@@ -1120,7 +1120,7 @@ export class ManualPayrollService {
       settings,
       daysToPay,
       settings.workDaysPerMonth,
-      employee,
+      { ...employee, _payrollYear: dto.year }, // ✅ barème fiscal selon l'ANNÉE DU BULLETIN (pas l'année en cours)
       company,
       companyTaxes,
     );
@@ -1145,7 +1145,7 @@ export class ManualPayrollService {
       settings,
       daysToPay,
       settings.workDaysPerMonth,
-      employee,
+      { ...employee, _payrollYear: dto.year }, // ✅ barème fiscal selon l'ANNÉE DU BULLETIN (pas l'année en cours)
       company,
       companyTaxes,
     );
@@ -1332,7 +1332,7 @@ export class ManualPayrollService {
       settings,
       daysToPay,
       settings.workDaysPerMonth,
-      employee,
+      { ...employee, _payrollYear: dto.year }, // ✅ barème fiscal selon l'ANNÉE DU BULLETIN (pas l'année en cours)
       company,
       companyTaxes,
     );
@@ -1360,7 +1360,7 @@ export class ManualPayrollService {
       settings,
       daysToPay,
       settings.workDaysPerMonth,
-      employee,
+      { ...employee, _payrollYear: dto.year }, // ✅ barème fiscal selon l'ANNÉE DU BULLETIN (pas l'année en cours)
       company,
       companyTaxes,
     );

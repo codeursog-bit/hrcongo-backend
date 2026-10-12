@@ -46,12 +46,27 @@ export class PayrollDeductionsService {
   }
 
   /**
+   * 💵 Montant à retenir sur la paie pour une avance = ce qu'il RESTE à
+   * rembourser. Une avance se déduit en une seule fois, mais si l'employé en a
+   * déjà remboursé une partie en espèces (remainingBalance < amount), la paie
+   * ne retire que le restant — jamais deux fois la même somme.
+   * Sécurité anciennes données : une avance APPROUVÉE n'a jamais un reste à 0
+   * (à 0 elle passe PAID et n'est plus chargée) ; un 0 ici signifie donc
+   * "champ jamais renseigné" → on retombe sur le montant total.
+   * Le montant d'origine reste disponible dans `originalAmount`.
+   */
+  private withRemainingAsAmount<T extends { amount: any; remainingBalance?: any }>(adv: T) {
+    const remaining = Number(adv.remainingBalance ?? 0);
+    return { ...adv, originalAmount: adv.amount, amount: remaining > 0 ? remaining : Number(adv.amount) };
+  }
+
+  /**
    * 🔍 RÉCUPÉRER LES AVANCES APPROUVÉES POUR UN MOIS
    * - recoverViaPayroll: true uniquement (sinon marquée payée en espèces
    *   via markAdvancePaidInCash, ne doit jamais être déduite ici).
    */
   async getApprovedAdvances(employeeId: string, month: number, year: number) {
-    return this.prisma.advance.findMany({
+    const advances = await this.prisma.advance.findMany({
       where: {
         employeeId,
         deductMonth: month,
@@ -60,6 +75,7 @@ export class PayrollDeductionsService {
         recoverViaPayroll: true,
       },
     });
+    return advances.map((a) => this.withRemainingAsAmount(a));
   }
 
   /**
@@ -106,12 +122,13 @@ export class PayrollDeductionsService {
       },
     });
 
-    // Regrouper par employé
-    return advances.reduce((acc, adv) => {
+    // Regrouper par employé (montant = reste à rembourser, voir withRemainingAsAmount)
+    const adjusted = advances.map((a) => this.withRemainingAsAmount(a));
+    return adjusted.reduce((acc, adv) => {
       if (!acc[adv.employeeId]) acc[adv.employeeId] = [];
       acc[adv.employeeId].push(adv);
       return acc;
-    }, {} as Record<string, typeof advances>);
+    }, {} as Record<string, typeof adjusted>);
   }
 
   /**
@@ -199,7 +216,8 @@ export class PayrollDeductionsService {
     });
 
     for (const advance of advances) {
-      const deducted = Number(advance.remainingBalance ?? advance.amount);
+      const remaining = Number(advance.remainingBalance ?? 0);
+      const deducted = remaining > 0 ? remaining : Number(advance.amount); // même règle que withRemainingAsAmount
       if (deducted <= 0) continue;
       await tx.advanceRepaymentLog.create({
         data: { advanceId: advance.id, month, year, amount: deducted, method: 'PAYROLL', recordedBy: null },

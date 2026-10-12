@@ -34,12 +34,14 @@ import {
   Post,
   Body,
   Patch,
+  Delete,
   Param,
   UseGuards,
   Request,
 } from '@nestjs/common';
 import { AssetsService } from './assets.service';
 import { CreateAssetDto } from './dto/create-asset.dto';
+import { UpdateAssetDto } from './dto/update-asset.dto';
 import { AuthGuard } from '@nestjs/passport';
 
 @Controller('assets')
@@ -57,6 +59,22 @@ export class AssetsController {
   @Get()
   findAll(@Request() req) {
     return this.assetsService.findAll(req.user.userId);
+  }
+
+  // PATCH /assets/:id — Modifier les informations d'un actif
+  @Patch(':id')
+  update(
+    @Param('id') id: string,
+    @Body() updateAssetDto: UpdateAssetDto,
+    @Request() req,
+  ) {
+    return this.assetsService.update(id, updateAssetDto, req.user.userId);
+  }
+
+  // DELETE /assets/:id — Supprimer un actif (refusé s'il est attribué)
+  @Delete(':id')
+  remove(@Param('id') id: string, @Request() req) {
+    return this.assetsService.remove(id, req.user.userId);
   }
 
   // PATCH /assets/:id/assign — Assigner ou désassigner

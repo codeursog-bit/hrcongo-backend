@@ -8,6 +8,7 @@ import { JwtAuthGuard } from '../../auth/jwt-auth.guard';
 import { UltraAdminGuard } from '../guards/ultra-admin.guard';
 import { ServerMetricsService } from './server-metrics.service';
 import { AdminPurgeService } from './purge.service';
+import { AdminSignalsService } from './admin-signals.service';
 import { PurgeExecuteDto, PurgePreviewDto } from './dto/purge.dto';
 
 @Controller('admin/server')
@@ -16,7 +17,20 @@ export class ServerMonitorController {
   constructor(
     private readonly metrics: ServerMetricsService,
     private readonly purge: AdminPurgeService,
+    private readonly signals: AdminSignalsService,
   ) {}
+
+  /** Alertes réelles pour l'en-tête et le menu latéral (cache 60 s) */
+  @Get('alerts')
+  alerts() {
+    return this.signals.getAlerts();
+  }
+
+  /** Flux en direct : nouvelles entreprises, paiements, alertes système */
+  @Get('feed')
+  feed(@Query('limit') limit?: string) {
+    return this.signals.getFeed(Number(limit) || 8);
+  }
 
   /** Valeurs en direct + diagnostic « pourquoi » */
   @Get('overview')

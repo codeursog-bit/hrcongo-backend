@@ -128,7 +128,21 @@ export class PayrollBonusesService {
       // pas apparaître sur le bulletin du mois en cours
       const startD = new Date(b.startDate);
       const monthEnd = new Date(year, month, 0); // dernier jour du mois de paie
-      if (startD > monthEnd) continue;
+      // ✅ Date de début "automatique" : une prime mensuelle créée SANS date de
+      // début explicite reçoit la date du jour de création (défaut BDD). Elle
+      // disparaissait alors de tous les mois antérieurs (ex. paie de février
+      // générée après coup : primes absentes alors qu'elles sont acquises).
+      // Si startDate == jour de création, on considère qu'aucun début n'a été
+      // choisi et la prime s'applique à tous les mois. Une date de début
+      // volontairement différente du jour de création reste respectée.
+      const createdMs = (b as any).createdAt
+        ? new Date((b as any).createdAt).getTime()
+        : NaN;
+      const isAutoStart =
+        b.frequency === 'MONTHLY' &&
+        Number.isFinite(createdMs) &&
+        Math.abs(createdMs - startD.getTime()) < 36 * 3600 * 1000;
+      if (!isAutoStart && startD > monthEnd) continue;
       // Filtrer prime expirée
       if (b.endDate && new Date(b.endDate) < new Date(year, month - 1, 1))
         continue;

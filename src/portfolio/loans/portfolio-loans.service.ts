@@ -216,10 +216,10 @@ export class PortfolioLoansService {
   }
 
   // ── Remboursement / historique — prêts ──────────────────────────────────
-  async recordCashRepayment(userId: string, id: string, amount: number) {
+  async recordCashRepayment(userId: string, id: string, amount: number, month?: number, year?: number) {
     const companyId = await this.getLoanEmployeeCompanyId(id);
     await this.membership.assertCompanyMembership(userId, companyId);
-    return this.loansService.recordCashRepayment(id, amount, userId, companyId);
+    return this.loansService.recordCashRepayment(id, amount, userId, companyId, month, year);
   }
 
   async deleteCashRepayment(userId: string, id: string, logId: string) {
@@ -235,10 +235,10 @@ export class PortfolioLoansService {
   }
 
   // ── Remboursement / historique — avances ────────────────────────────────
-  async recordAdvanceCashRepayment(userId: string, id: string, amount: number) {
+  async recordAdvanceCashRepayment(userId: string, id: string, amount: number, month?: number, year?: number) {
     const companyId = await this.getAdvanceEmployeeCompanyId(id);
     await this.membership.assertCompanyMembership(userId, companyId);
-    return this.loansService.recordAdvanceCashRepayment(id, amount, userId, companyId);
+    return this.loansService.recordAdvanceCashRepayment(id, amount, userId, companyId, month, year);
   }
 
   async deleteAdvanceCashRepayment(userId: string, id: string, logId: string) {
@@ -253,9 +253,9 @@ export class PortfolioLoansService {
     return this.loansService.getAdvanceHistory(id, userId, companyId);
   }
 
-  async markAdvancePaidInCash(userId: string, id: string) {
+  async markAdvancePaidInCash(userId: string, id: string, month?: number, year?: number) {
     const companyId = await this.getAdvanceEmployeeCompanyId(id);
     await this.membership.assertCompanyMembership(userId, companyId);
-    return this.loansService.markAdvancePaidInCash(id, userId, companyId);
+    return this.loansService.markAdvancePaidInCash(id, userId, companyId, month, year);
   }
 }

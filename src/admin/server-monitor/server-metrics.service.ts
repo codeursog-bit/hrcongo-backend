@@ -21,6 +21,7 @@ import { analyzeServer, Finding } from './diagnostics';
 import { PURGE_TABLES } from './purge-registry';
 
 const TABLES_EVERY_MS = 6 * 3600_000;
+const LOOP_RESOLUTION_MS = 20; // l'histogramme Node inclut l'intervalle du timer : on le retire
 const RETENTION_DAYS = 30;
 
 const mb = (b: number) => Math.round((b / 1048576) * 10) / 10;
@@ -40,9 +41,11 @@ export interface TableInfo {
 @Injectable()
 export class ServerMetricsService implements OnModuleInit {
   private readonly logger = new Logger('📈 ServerMetrics');
-  private readonly loop = monitorEventLoopDelay({ resolution: 20 });
+  private readonly loop = monitorEventLoopDelay({ resolution: LOOP_RESOLUTION_MS });
   private lastCpu = process.cpuUsage();
   private lastCpuAt = Date.now();
+  private lastMachineCpu = ServerMetricsService.cpuTimes();
+  private lastMachineCpuPct: number | null = null;
   private lastTablesAt = 0;
   private collecting = false;
   private frontFailStreak = 0;
@@ -57,6 +60,18 @@ export class ServerMetricsService implements OnModuleInit {
 
   onModuleInit() {
     this.loop.enable();
+  }
+
+  /** Temps CPU cumulés de la machine (lus dans /proc/stat : valeurs de l'hôte, comme la console Hetzner) */
+  private static cpuTimes() {
+    let idle = 0;
+    let total = 0;
+    for (const c of os.cpus()) {
+      const x = c.times;
+      idle += x.idle;
+      total += x.user + x.nice + x.sys + x.idle + x.irq;
+    }
+    return { idle, total };
   }
 
   // ==========================================================================
@@ -128,6 +143,7 @@ export class ServerMetricsService implements OnModuleInit {
         const m: any = r.metrics;
         return {
           at: r.createdAt,
+          cpuPct: m.machine?.cpuPct ?? null,
           loadPct: m.machine?.loadPct ?? null,
           memPct: m.machine?.memPct ?? null,
           diskPct: m.machine?.diskPct ?? null,
@@ -232,10 +248,22 @@ export class ServerMetricsService implements OnModuleInit {
     const cpuPct = round1(((usage.user + usage.system) / 1000 / elapsedMs) * 100);
 
     // Boucle d'événements
-    const loopMean = Number.isFinite(this.loop.mean) ? this.loop.mean / 1e6 : 0;
-    const loopMax = Number.isFinite(this.loop.max) ? this.loop.max / 1e6 : 0;
+    // (retard réel = valeur mesurée − résolution du timer ; jamais négatif)
+    const loopMean = Number.isFinite(this.loop.mean) ? Math.max(0, this.loop.mean / 1e6 - LOOP_RESOLUTION_MS) : 0;
+    const loopMax = Number.isFinite(this.loop.max) ? Math.max(0, this.loop.max / 1e6 - LOOP_RESOLUTION_MS) : 0;
+
+    // % réel d'utilisation du processeur de la machine depuis le dernier relevé
+    // (≠ charge moyenne « load average », qui compte aussi les processus en attente du disque)
+    const mc = ServerMetricsService.cpuTimes();
+    const dTotal = mc.total - this.lastMachineCpu.total;
+    const dIdle = mc.idle - this.lastMachineCpu.idle;
+    let machineCpuPct: number | null;
+    if (now - this.lastCpuAt < 30_000 && this.lastMachineCpuPct !== null) machineCpuPct = this.lastMachineCpuPct; // fenêtre trop courte
+    else machineCpuPct = dTotal > 0 ? round1((1 - dIdle / dTotal) * 100) : null;
 
     if (opts.commit) {
+      this.lastMachineCpu = mc;
+      this.lastMachineCpuPct = machineCpuPct;
       this.lastCpu = process.cpuUsage();
       this.lastCpuAt = now;
       this.loop.reset();
@@ -250,6 +278,7 @@ export class ServerMetricsService implements OnModuleInit {
       machine: {
         cpuLoad1: round1(load1),
         cpuCores: cores,
+        cpuPct: machineCpuPct,
         loadPct: round1((load1 / cores) * 100),
         memTotalMb: Math.round(totalMem / 1048576),
         memUsedMb: Math.round(usedMem / 1048576),

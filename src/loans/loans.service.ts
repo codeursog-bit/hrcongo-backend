@@ -68,21 +68,21 @@ export class LoansService {
   processMonthlyDeduction(loanId: string, userId: string, overrideCompanyId?: string) {
     return this.repayment.processMonthlyDeduction(loanId, userId, overrideCompanyId);
   }
-  recordCashRepayment(loanId: string, amount: number, userId: string, overrideCompanyId?: string) {
-    return this.repayment.recordCashRepayment(loanId, amount, userId, overrideCompanyId);
+  recordCashRepayment(loanId: string, amount: number, userId: string, overrideCompanyId?: string, month?: number, year?: number) {
+    return this.repayment.recordCashRepayment(loanId, amount, userId, overrideCompanyId, month, year);
   }
   deleteCashRepayment(loanId: string, logId: string, userId: string, overrideCompanyId?: string) {
     return this.repayment.deleteCashRepayment(loanId, logId, userId, overrideCompanyId);
   }
   getLoanHistory(loanId: string, userId: string, overrideCompanyId?: string) { return this.repayment.getLoanHistory(loanId, userId, overrideCompanyId); }
-  recordAdvanceCashRepayment(advanceId: string, amount: number, userId: string, overrideCompanyId?: string) {
-    return this.repayment.recordAdvanceCashRepayment(advanceId, amount, userId, overrideCompanyId);
+  recordAdvanceCashRepayment(advanceId: string, amount: number, userId: string, overrideCompanyId?: string, month?: number, year?: number) {
+    return this.repayment.recordAdvanceCashRepayment(advanceId, amount, userId, overrideCompanyId, month, year);
   }
   deleteAdvanceCashRepayment(advanceId: string, logId: string, userId: string, overrideCompanyId?: string) {
     return this.repayment.deleteAdvanceCashRepayment(advanceId, logId, userId, overrideCompanyId);
   }
   getAdvanceHistory(advanceId: string, userId: string, overrideCompanyId?: string) { return this.repayment.getAdvanceHistory(advanceId, userId, overrideCompanyId); }
-  markAdvancePaidInCash(id: string, userId: string, overrideCompanyId?: string) { return this.repayment.markAdvancePaidInCash(id, userId, overrideCompanyId); }
+  markAdvancePaidInCash(id: string, userId: string, overrideCompanyId?: string, month?: number, year?: number) { return this.repayment.markAdvancePaidInCash(id, userId, overrideCompanyId, month, year); }
   markAdvanceAsDeducted(advanceId: string, userId: string, overrideCompanyId?: string) {
     return this.repayment.markAdvanceAsDeducted(advanceId, userId, overrideCompanyId);
   }

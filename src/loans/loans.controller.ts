@@ -92,8 +92,13 @@ export class LoansController {
   }
 
   @Patch('advances/:id/mark-paid-cash')
-  markAdvancePaidInCash(@Param('id') id: string, @GetUser('id') userId: string) {
-    return this.loansService.markAdvancePaidInCash(id, userId);
+  markAdvancePaidInCash(
+    @Param('id') id: string,
+    @GetUser('id') userId: string,
+    @Body('month') month?: number,
+    @Body('year') year?: number,
+  ) {
+    return this.loansService.markAdvancePaidInCash(id, userId, undefined, month != null ? Number(month) : undefined, year != null ? Number(year) : undefined);
   }
 
   /** Remboursement en espèces à montant LIBRE (comme les prêts) — remplace le seul "tout rembourser d'un coup". */
@@ -103,8 +108,10 @@ export class LoansController {
     @Param('id') id: string,
     @Body('amount') amount: number,
     @GetUser('id') userId: string,
+    @Body('month') month?: number,
+    @Body('year') year?: number,
   ) {
-    return this.loansService.recordAdvanceCashRepayment(id, Number(amount), userId);
+    return this.loansService.recordAdvanceCashRepayment(id, Number(amount), userId, undefined, month != null ? Number(month) : undefined, year != null ? Number(year) : undefined);
   }
 
   /** Supprime une saisie de remboursement d'avance erronée — recalcule automatiquement le solde. */
@@ -290,8 +297,10 @@ export class LoansController {
     @Param('id') id: string,
     @Body('amount') amount: number,
     @GetUser('id') userId: string,
+    @Body('month') month?: number,
+    @Body('year') year?: number,
   ) {
-    return this.loansService.recordCashRepayment(id, Number(amount), userId);
+    return this.loansService.recordCashRepayment(id, Number(amount), userId, undefined, month != null ? Number(month) : undefined, year != null ? Number(year) : undefined);
   }
 
   @Get(':id/history')

@@ -9,6 +9,7 @@ import {
   IsOptional,
   IsBoolean,
   Min,
+  Max,
   IsInt,
 } from 'class-validator';
 
@@ -30,6 +31,19 @@ export class CreateAdvanceDto {
   @IsNotEmpty()
   @IsInt()
   deductYear: number;
+
+  /** Période de la demande (mois/année) — optionnelle, défaut = mois courant.
+   *  Sert de date de référence de l'avance dans le profil/suivi de l'employé. */
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(12)
+  month?: number;
+
+  @IsOptional()
+  @IsInt()
+  @Min(2000)
+  year?: number;
 
   @IsString()
   reason: string;

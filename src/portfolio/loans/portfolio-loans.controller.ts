@@ -89,8 +89,13 @@ export class PortfolioLoansController {
   }
 
   @Patch('advances/:id/mark-paid-cash')
-  markAdvancePaidInCash(@GetUser('id') userId: string, @Param('id') id: string) {
-    return this.service.markAdvancePaidInCash(userId, id);
+  markAdvancePaidInCash(
+    @GetUser('id') userId: string,
+    @Param('id') id: string,
+    @Body('month') month?: number,
+    @Body('year') year?: number,
+  ) {
+    return this.service.markAdvancePaidInCash(userId, id, month != null ? Number(month) : undefined, year != null ? Number(year) : undefined);
   }
 
   @Post('advances/:id/cash-repayment')
@@ -98,8 +103,10 @@ export class PortfolioLoansController {
     @GetUser('id') userId: string,
     @Param('id') id: string,
     @Body('amount') amount: number,
+    @Body('month') month?: number,
+    @Body('year') year?: number,
   ) {
-    return this.service.recordAdvanceCashRepayment(userId, id, Number(amount));
+    return this.service.recordAdvanceCashRepayment(userId, id, Number(amount), month != null ? Number(month) : undefined, year != null ? Number(year) : undefined);
   }
 
   @Delete('advances/:id/cash-repayment/:logId')
@@ -163,8 +170,10 @@ export class PortfolioLoansController {
     @GetUser('id') userId: string,
     @Param('id') id: string,
     @Body('amount') amount: number,
+    @Body('month') month?: number,
+    @Body('year') year?: number,
   ) {
-    return this.service.recordCashRepayment(userId, id, Number(amount));
+    return this.service.recordCashRepayment(userId, id, Number(amount), month != null ? Number(month) : undefined, year != null ? Number(year) : undefined);
   }
 
   @Get(':id/history')

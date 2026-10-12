@@ -26,6 +26,7 @@ import {
 import type { Response } from 'express';
 import { AuthGuard } from '@nestjs/passport';
 import { LeavesService } from './leaves.service';
+import { LeavesHistoryService } from './leaves-history.service';
 import { CreateLeaveDto } from './dto/create-leave.dto';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { RolesGuard } from '../auth/guards/roles.guard';
@@ -33,7 +34,10 @@ import { RolesGuard } from '../auth/guards/roles.guard';
 @Controller('leaves')
 @UseGuards(AuthGuard('jwt'))
 export class LeavesController {
-  constructor(private readonly leavesService: LeavesService) {}
+  constructor(
+    private readonly leavesService: LeavesService,
+    private readonly historyService: LeavesHistoryService,
+  ) {}
 
   /**
    * Calcule automatiquement la date de retour à partir d'une date de départ
@@ -226,6 +230,97 @@ export class LeavesController {
     @Query('companyId') companyId?: string,
   ) {
     return this.leavesService.findAll(req.user.userId, employeeId, companyId);
+  }
+
+  // ==========================================================================
+  // 🆕 HISTORIQUES + DIAGRAMMES
+  // ⚠️ Routes à segment fixe : doivent rester AVANT @Get(':id')
+  // ==========================================================================
+
+  /** Historique des départs : congés approuvés dont la date de départ est arrivée. */
+  @Get('departure-history')
+  getDepartureHistory(
+    @Request() req,
+    @Query('year') year?: string,
+    @Query('month') month?: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+    @Query('type') type?: string,
+    @Query('departmentId') departmentId?: string,
+    @Query('search') search?: string,
+    @Query('companyId') companyId?: string,
+  ) {
+    return this.historyService.getDepartureHistory(
+      req.user.userId,
+      {
+        year: year ? parseInt(year) : undefined,
+        month: month ? parseInt(month) : undefined,
+        from,
+        to,
+        type,
+        departmentId,
+        search,
+      },
+      companyId,
+    );
+  }
+
+  /** Fiche enrichie d'un employé (embauche, ancienneté, départs passés). */
+  @Get('departure-history/employee/:employeeId')
+  getEmployeeDepartureProfile(
+    @Param('employeeId') employeeId: string,
+    @Request() req,
+    @Query('companyId') companyId?: string,
+  ) {
+    return this.historyService.getEmployeeDepartureProfile(
+      req.user.userId,
+      employeeId,
+      companyId,
+    );
+  }
+
+  /** Historique des demandes (tous statuts) avec circuit de traitement. */
+  @Get('requests-history')
+  getRequestsHistory(
+    @Request() req,
+    @Query('year') year?: string,
+    @Query('month') month?: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+    @Query('type') type?: string,
+    @Query('status') status?: string,
+    @Query('departmentId') departmentId?: string,
+    @Query('search') search?: string,
+    @Query('companyId') companyId?: string,
+  ) {
+    return this.historyService.getRequestsHistory(
+      req.user.userId,
+      {
+        year: year ? parseInt(year) : undefined,
+        month: month ? parseInt(month) : undefined,
+        from,
+        to,
+        type,
+        status,
+        departmentId,
+        search,
+      },
+      companyId,
+    );
+  }
+
+  /** Données d'une année pour la vue en diagrammes (direction). */
+  @Get('visual-overview')
+  getVisualOverview(
+    @Request() req,
+    @Query('year') year?: string,
+    @Query('companyId') companyId?: string,
+  ) {
+    return this.historyService.getVisualOverview(
+      req.user.userId,
+      year ? parseInt(year) : new Date().getFullYear(),
+      companyId,
+    );
   }
 
   @Get('yearly-trend')

@@ -536,6 +536,7 @@ export class PayrollGeneratorService {
         taxExemptionReason: true,
         tolZone: true,
         contractType: true, // ← essentiel pour les règles fiscales par contrat
+        isResident: true, // ✅ taux BNC 10 % (résident) / 20 % (non résident) — comme create()/simulate
         hireDate: true, // 🆕 pour calcul ancienneté automatique
       },
     });
@@ -737,7 +738,7 @@ export class PayrollGeneratorService {
           settings,
           summary.daysToPay,
           workDays,
-          emp,
+          { ...emp, _payrollYear: year }, // ✅ barème fiscal selon l'ANNÉE DU BULLETIN (pas l'année en cours)
           company,
           companyTaxes,
         );
@@ -798,7 +799,7 @@ export class PayrollGeneratorService {
           settings,
           summary.daysToPay,
           workDays,
-          emp,
+          { ...emp, _payrollYear: year }, // ✅ barème fiscal selon l'ANNÉE DU BULLETIN (pas l'année en cours)
           company,
           companyTaxes,
           leaveOptions, // 🆕 1 seul argument de plus au lieu de 2
@@ -850,7 +851,7 @@ export class PayrollGeneratorService {
           settings,
           summary.daysToPay,
           workDays,
-          emp,
+          { ...emp, _payrollYear: year }, // ✅ barème fiscal selon l'ANNÉE DU BULLETIN (pas l'année en cours)
           company,
           companyTaxes,
           leaveOptions, // 🆕 1 seul argument de plus au lieu de 2

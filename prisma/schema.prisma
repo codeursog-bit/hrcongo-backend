@@ -315,6 +315,11 @@ model Company {
   promotionProposals    PromotionProposal[]
   developmentPlans      DevelopmentPlan[]
 
+//audit
+  auditRuns        AuditRun[]
+  auditFindings    AuditFinding[]
+  auditCheckpoints AuditCheckpoint[]
+
   affiliatedBy          String?                   @db.Uuid
   affiliate             Affiliate?                @relation("AffiliateCompanies", fields: [affiliatedBy], references: [id], onDelete: SetNull)
   affiliateCompany      AffiliateCompany?
@@ -4108,9 +4113,25 @@ model EmployeeContract {
   createdAt DateTime @default(now()) @db.Timestamptz
   updatedAt DateTime @updatedAt @db.Timestamptz
 
+
+  //audit 
+
+  chainId            String            @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  rank               Int               @default(1) @db.SmallInt // 1 = contrat initial, 2 = 1er renouvellement…
+  kind               ContractLinkKind  @default(INITIAL)
+  previousContractId String?           @unique @db.Uuid // @unique : un contrat n'a qu'UN successeur
+  previousContract   EmployeeContract? @relation("ContractChain", fields: [previousContractId], references: [id], onDelete: NoAction)
+  nextContract       EmployeeContract? @relation("ContractChain")
+  cddMotif           String?           @db.VarChar(40) // validé côté code (CDD_MOTIFS), pas d'enum → pas de migration pour en ajouter
+  renewalReason      String?           @db.VarChar(255)
+  renewedAt          DateTime?         @db.Timestamptz // date à laquelle un successeur a pris le relais
+  renewedBy          String?           @db.Uuid
+
   // Relation rupture de contrat
   rupture ContractRupture?
 
+  @@unique([chainId, rank])
+  @@index([chainId])
   @@index([employeeId])
   @@index([companyId])
   @@index([contractType])
@@ -5195,3 +5216,166 @@ model ServerMetricSnapshot {
   @@map("server_metric_snapshots")
 }
 
+
+
+
+
+
+//module et table de l'audit
+
+enum ContractLinkKind {
+  INITIAL        // premier contrat de la chaîne
+  RENEWAL        // renouvellement d'un CDD
+  CONVERSION_CDI // CDD devenu CDI
+
+  @@map("contract_link_kind")
+}
+
+enum AuditSeverity {
+  INFO
+  WARN
+  CRITICAL
+
+  @@map("audit_severity")
+}
+
+enum AuditActorType {
+  USER
+  SYSTEM // cron, scripts, moteur d'audit
+
+  @@map("audit_actor_type")
+}
+
+// Journal d'audit en AJOUT SEUL, chaîné par hash.
+// ⚠️ Volontairement SANS clé étrangère vers User / Company : supprimer un
+// utilisateur ou une entreprise ne doit JAMAIS effacer ni bloquer sa trace.
+model AuditEvent {
+  id         String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId  String         @db.Uuid
+  seq        BigInt // 1,2,3… par entreprise → un trou = suppression détectée
+  occurredAt DateTime       @db.Timestamptz // fixé par l'app (entre dans le hash)
+
+  actorType  AuditActorType @default(USER)
+  actorId    String?        @db.Uuid
+  actorRole  String?        @db.VarChar(30)
+  actorLabel String?        @db.VarChar(200) // "Prénom NOM" figé au moment des faits
+
+  action     String         @db.VarChar(80) // ex : CONTRACT_RENEWED
+  entity     String         @db.VarChar(50) // ex : EMPLOYEE_CONTRACT
+  entityId   String?        @db.Uuid
+  severity   AuditSeverity  @default(INFO)
+  summary    String         @db.VarChar(500)
+
+  changes    Json? // { values: { champ: { from, to } }, maskedFields: [...] }
+  context    Json? // { ip, requestId, route… }
+
+  prevHash   String?        @db.Char(64)
+  hash       String         @db.Char(64)
+
+  @@unique([companyId, seq])
+  @@index([companyId, occurredAt])
+  @@index([companyId, entity, entityId])
+  @@index([companyId, action])
+  @@map("audit_events")
+}
+
+
+enum AuditFindingStatus {
+  OPEN      // détecté, à traiter
+  JUSTIFIED // un humain a examiné et justifié (constat non bloquant)
+  WAIVED    // un ADMIN a passé outre un constat bloquant, avec motif
+  RESOLVED  // plus détecté (corrigé)
+
+  @@map("audit_finding_status")
+}
+
+enum AuditRunTrigger {
+  MANUAL // bouton « Lancer le contrôle »
+  GATE   // déclenché à la validation d'une paie
+  CRON   // contrôle automatique nocturne
+
+  @@map("audit_run_trigger")
+}
+
+enum AuditCheckpointStatus {
+  DONE           // fait, preuve renseignée
+  NOT_APPLICABLE // sans objet ce mois-ci
+
+  @@map("audit_checkpoint_status")
+}
+
+// Une exécution du moteur (traçabilité : qui/quand/combien).
+model AuditRun {
+  id               String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId        String          @db.Uuid
+  company          Company         @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  month            Int             @db.SmallInt
+  year             Int             @db.SmallInt
+  trigger          AuditRunTrigger
+  startedBy        String?         @db.Uuid // null = système
+  startedAt        DateTime        @db.Timestamptz
+  finishedAt       DateTime        @db.Timestamptz
+  payrollsChecked  Int
+  payrollsWithFindings Int @default(0) // bulletins portant au moins un écart ouvert (courbe de conformité)
+  rulesRun         Int
+  findingsNew      Int // nouveaux + rouverts
+  findingsResolved Int // clos automatiquement (plus détectés)
+  findingsOpen     Int // ouverts à l'issue du contrôle (périmètre du contrôle)
+  openCritical     Int
+  openBlocking     Int
+
+  @@index([companyId, year, month, startedAt])
+  @@map("audit_runs")
+}
+
+// Un écart détecté. Dédupliqué par `fingerprint` : relancer le contrôle ne crée pas de doublons.
+model AuditFinding {
+  id              String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId       String             @db.Uuid
+  company         Company            @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  runId           String?            @db.Uuid // dernier contrôle ayant vu cet écart
+  fingerprint     String             @db.VarChar(200)
+  ruleCode        String             @db.VarChar(60)
+  severity        AuditSeverity
+  blocking        Boolean
+  status          AuditFindingStatus @default(OPEN)
+  entity          String             @db.VarChar(50) // PAYROLL | EMPLOYEE | CONTRACT_CHAIN | COMPANY
+  entityId        String?            @db.Uuid
+  employeeId      String?            @db.Uuid
+  periodMonth     Int?               @db.SmallInt // null = écart propre à l'employé (pas à un mois)
+  periodYear      Int?               @db.SmallInt
+  message         String             @db.VarChar(500)
+  expected        String?            @db.VarChar(200)
+  actual          String?            @db.VarChar(200)
+  resolutionNote  String?            @db.VarChar(500)
+  resolvedBy      String?            @db.Uuid // null + RESOLVED = clos automatiquement
+  resolvedAt      DateTime?          @db.Timestamptz
+  firstDetectedAt DateTime           @db.Timestamptz
+  lastDetectedAt  DateTime           @db.Timestamptz
+
+  @@unique([companyId, fingerprint])
+  @@index([companyId, status, blocking])
+  @@index([companyId, periodYear, periodMonth])
+  @@index([employeeId])
+  @@map("audit_findings")
+}
+
+// Les ~10 % humains : contrôles que le logiciel ne peut pas faire seul
+// (dépôt CNSS, déclarations DGI…). Le RH atteste et renseigne la preuve.
+model AuditCheckpoint {
+  id          String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId   String                @db.Uuid
+  company     Company               @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  code        String                @db.VarChar(40)
+  periodMonth Int                   @db.SmallInt
+  periodYear  Int                   @db.SmallInt
+  status      AuditCheckpointStatus
+  evidenceRef String?               @db.VarChar(200) // n° de reçu, référence e-Tax…
+  note        String?               @db.VarChar(500)
+  attestedBy  String                @db.Uuid
+  attestedAt  DateTime              @db.Timestamptz
+
+  @@unique([companyId, code, periodYear, periodMonth])
+  @@map("audit_checkpoints")
+}
+// <<< FIN SECTION 3

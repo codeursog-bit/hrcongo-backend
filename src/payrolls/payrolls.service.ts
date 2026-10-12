@@ -1536,22 +1536,24 @@ export class PayrollsService {
       this.companyTaxService.findActive(effectiveCompanyId, { month: monthNum, year }), // ✅ taxes actives du mois
     ]);
 
+    // 🔒 Même règle que la génération en masse : HS désactivées → aucune HS issue du pointage
+    const otAllowedCreate = (settings as any)?.overtimeEnabled !== false;
     const eff10 =
       overtime10 != null
         ? Number(overtime10)
-        : Number((summary as any)?.overtime10Hours ?? 0);
+        : otAllowedCreate ? Number((summary as any)?.overtime10Hours ?? 0) : 0;
     const eff25 =
       overtime25 != null
         ? Number(overtime25)
-        : Number((summary as any)?.overtime25Hours ?? 0);
+        : otAllowedCreate ? Number((summary as any)?.overtime25Hours ?? 0) : 0;
     const eff50 =
       overtime50 != null
         ? Number(overtime50)
-        : Number((summary as any)?.overtime50Hours ?? 0);
+        : otAllowedCreate ? Number((summary as any)?.overtime50Hours ?? 0) : 0;
     const eff100 =
       overtime100 != null
         ? Number(overtime100)
-        : Number((summary as any)?.overtime100Hours ?? 0);
+        : otAllowedCreate ? Number((summary as any)?.overtime100Hours ?? 0) : 0;
 
     const seniorityMode = (company as any).seniorityMode ?? 'AUTO';
     const calculatedBonuses =
@@ -1582,13 +1584,15 @@ export class PayrollsService {
       settings,
       daysToPay,
       settings.workDaysPerMonth,
-      employee,
+      { ...employee, _payrollYear: year }, // ✅ barème fiscal selon l'année du bulletin
       company,
       companyTaxes,
     );
 
     const [loans, advances, companyDeductions, leaveImpact, leaveBalanceSnap] = await Promise.all([
-      this.deductionsService.getActiveLoans(employeeId),
+      // ✅ month/year : même règle que la génération en masse (prêts déjà
+      // remboursés en espèces ce mois-ci exclus)
+      this.deductionsService.getActiveLoans(employeeId, monthNum, year),
       this.deductionsService.getApprovedAdvances(employeeId, monthNum, year),
       this.deductionsService.getPendingCompanyDeductionsForEmployee(employeeId),
       // ✅ Charger l'impact congé — cohérence avec la génération batch
@@ -1652,7 +1656,7 @@ export class PayrollsService {
       settings,
       daysToPay,
       settings.workDaysPerMonth,
-      employee,
+      { ...employee, _payrollYear: year }, // ✅ barème fiscal selon l'année du bulletin
       company,
       companyTaxes,
       { leaveIndemnity, isPaidLeave },
@@ -2421,7 +2425,7 @@ export class PayrollsService {
       settings,
       effectiveDays,
       settings.workDaysPerMonth,
-      employee,
+      { ...employee, _payrollYear: payroll.year }, // ✅ barème fiscal selon l'année du bulletin
       company,
       companyTaxes,
     );
@@ -2902,10 +2906,13 @@ export class PayrollsService {
           // pour que ça saute aux yeux avant de lancer, pas après.
           if (!hasWorkedDaysOverride) daysToPay = s.daysToPay;
           if (!hasOvertimeOverride) {
-            att10 = Number((s as any).overtime10Hours ?? 0);
-            att25 = Number((s as any).overtime25Hours ?? 0);
-            att50 = Number(s.overtime50Hours ?? 0);
-            att100 = Number((s as any).overtime100Hours ?? 0);
+            // 🔒 Même règle que la génération en masse : HS désactivées pour
+            // l'entreprise → aucune heure sup, même si un ancien résumé en contient.
+            const otAllowedSim = (settings as any)?.overtimeEnabled !== false;
+            att10 = otAllowedSim ? Number((s as any).overtime10Hours ?? 0) : 0;
+            att25 = otAllowedSim ? Number((s as any).overtime25Hours ?? 0) : 0;
+            att50 = otAllowedSim ? Number(s.overtime50Hours ?? 0) : 0;
+            att100 = otAllowedSim ? Number((s as any).overtime100Hours ?? 0) : 0;
           }
         }
       } catch {
@@ -2989,14 +2996,20 @@ export class PayrollsService {
       settings,
       daysToPay,
       settings.workDaysPerMonth,
-      employee,
+      { ...employee, _payrollYear: year }, // ✅ barème fiscal selon l'année du bulletin
       company,
       companyTaxes,
     );
 
-    const [loans, advances, leaveImpact, leaveBalanceSummary] = await Promise.all([
-      this.deductionsService.getActiveLoans(employeeId),
+    const [loans, advances, companyDeductions, leaveImpact, leaveBalanceSummary] = await Promise.all([
+      // ✅ month/year : exclut les prêts déjà remboursés en espèces ce mois-ci
+      // (comme la génération en masse) — sinon l'aperçu déduisait un prêt que
+      // le bulletin réel ne déduit pas.
+      this.deductionsService.getActiveLoans(employeeId, monthNum, year),
       this.deductionsService.getApprovedAdvances(employeeId, monthNum, year),
+      // ✅ Retenues diverses (pharmacie, cantine, casse…) : la création et la
+      // génération en masse les déduisent, l'aperçu les ignorait → net différent.
+      this.deductionsService.getPendingCompanyDeductionsForEmployee(employeeId),
       // ✅ Charger l'impact congé — cohérence avec la génération batch
       this.leavesService
         .getLeaveImpactForPayroll(employeeId, monthNum, year, prelimCalcForLeave.grossSalary)
@@ -3049,6 +3062,15 @@ export class PayrollsService {
       advances,
       protectionMode,
     );
+    // ✅ Retenues diverses : même préparation que create() / generate()
+    const { calcEntries: companyDeductionEntries } =
+      this.deductionsService.prepareCompanyDeductionsForCalc(companyDeductions);
+    const deductionsForCalc = [...adjustedDeductions, ...companyDeductionEntries];
+    const totalCompanyDeduction = companyDeductionEntries.reduce(
+      (s, d) => s + Number(d.amount || 0),
+      0,
+    );
+
     // ✅ CORRECTIF (câblage) : transmet l'indemnité au moteur de calcul —
     // sinon jamais incluse dans grossSalary/netSalary/its/cnssSalarial.
     const calc = this.calculator.calculate(
@@ -3058,11 +3080,11 @@ export class PayrollsService {
       eff50,
       eff100,
       calculatedBonuses,
-      adjustedDeductions,
+      deductionsForCalc,
       settings,
       daysToPay,
       settings.workDaysPerMonth,
-      employee,
+      { ...employee, _payrollYear: year }, // ✅ barème fiscal selon l'année du bulletin
       company,
       companyTaxes,
       { leaveIndemnity, isPaidLeave },
@@ -3143,6 +3165,12 @@ export class PayrollsService {
       })),
       totalLoanDeduction,
       totalAdvanceDeduction,
+      // ✅ Retenues diverses (déjà comprises dans totalDeductions et netSalary)
+      companyDeductions: companyDeductionEntries.map((d: any) => ({
+        label: d.label,
+        amount: Number(d.amount),
+      })),
+      totalCompanyDeduction,
       // 🆕 Retenues libres (paie manuelle) : comptées dans le total et le net
       manualDeductions: simManualDeductions,
       manualDeductionTotal: simManualDeductionTotal,
@@ -3234,6 +3262,19 @@ export class PayrollsService {
         ),
         totalCnss: successful.reduce((s, d: any) => s + d.cnssSalarial, 0),
         totalIts: successful.reduce((s, d: any) => s + d.its, 0),
+        // ✅ Détail affiché dans l'estimation de la paie en masse
+        totalBonuses: successful.reduce((s, d: any) => s + Number(d.totalBonuses || 0), 0),
+        totalDeductions: successful.reduce((s, d: any) => s + Number(d.totalDeductions || 0), 0),
+        totalLoanAdvance: successful.reduce(
+          (s, d: any) => s + Number(d.totalLoanDeduction || 0) + Number(d.totalAdvanceDeduction || 0),
+          0,
+        ),
+        totalCompanyDeduction: successful.reduce(
+          (s, d: any) => s + Number(d.totalCompanyDeduction || 0),
+          0,
+        ),
+        totalOvertime: successful.reduce((s, d: any) => s + Number(d.overtime?.total || 0), 0),
+        failedCount: results.length - successful.length,
       },
     };
   }

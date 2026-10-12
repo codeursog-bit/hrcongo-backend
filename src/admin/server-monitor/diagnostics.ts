@@ -73,18 +73,22 @@ export function analyzeServer(
         action: 'Surveille la croissance ci-dessous et purge les journaux inutiles.',
       });
     }
-    // Rythme de remplissage (24 h)
+    // Rythme de remplissage — seulement une fois ~24 h de relevés disponibles :
+    // sur quelques heures, un déploiement (images Docker, cache de build) fausse la pente.
     const first = snaps[0]?.metrics;
     const spanDays = (snaps[snaps.length - 1].createdAt.getTime() - snaps[0].createdAt.getTime()) / 86400_000;
-    if (first?.machine?.diskUsedGb != null && spanDays >= 0.25) {
+    if (first?.machine?.diskUsedGb != null && spanDays >= 0.9) {
       const slope = (last.machine.diskUsedGb - first.machine.diskUsedGb) / spanDays; // Go / jour
       const free = last.machine.diskTotalGb - last.machine.diskUsedGb;
       if (slope > 0.05 && free / slope < 30) {
+        const daysLeft = free / slope;
+        const dbMb = last.db?.sizeMb;
         f.push({
-          key: 'disk-eta', level: free / slope < 7 ? 'CRITICAL' : 'WARNING',
-          title: `Disque plein dans ~${Math.max(1, Math.round(free / slope))} jour(s) à ce rythme`,
-          detail: `+${slope.toFixed(2)} Go/jour sur les dernières ${Math.round(spanDays * 24)} h, il reste ${free.toFixed(1)} Go.`,
-          action: 'Regarde les tables qui grossissent le plus (plus bas) et les images Docker anciennes.',
+          key: 'disk-eta', level: daysLeft < 3 ? 'CRITICAL' : 'WARNING',
+          title: `Disque plein dans ~${Math.max(1, Math.round(daysLeft))} jour(s) à ce rythme`,
+          detail: `+${slope.toFixed(2)} Go/jour sur les dernières 24 h, il reste ${free.toFixed(1)} Go.` +
+            (typeof dbMb === 'number' ? ` La base ne pèse que ${dbMb} Mo : la croissance vient d'ailleurs (images Docker, cache de build, logs de conteneurs).` : ''),
+          action: 'Sur le serveur : `docker system df` pour voir ce qui prend la place, puis `docker image prune -a` et `docker builder prune`. Un gros déploiement ce jour-là peut fausser la mesure.',
         });
       }
     }
@@ -196,7 +200,7 @@ export function analyzeServer(
   // ── Back : CPU et boucle d'événements ────────────────────────────────────
   const loopMean = avg(lastHourMetrics.map((m) => m.app?.eventLoopMeanMs ?? 0));
   const loopMax = Math.max(0, ...lastHourMetrics.map((m) => m.app?.eventLoopMaxMs ?? 0));
-  if (loopMean > 50 || loopMax > 2000) {
+  if (loopMean > 30 || loopMax > 1500) {
     f.push({
       key: 'event-loop', level: 'WARNING',
       title: 'Le back est parfois « bloqué »',
@@ -209,6 +213,17 @@ export function analyzeServer(
     f.push({
       key: 'app-cpu', level: 'WARNING', title: `Le back utilise ${Math.round(cpuApp)} % d’un cœur`,
       detail: 'Node.js n’exploite qu’un cœur : au-delà de 80 % en moyenne, tout ralentit.',
+    });
+  }
+
+  // ── Processeur de la machine (utilisation réelle, comme la console Hetzner) ──
+  const cpuSamples = lastHourMetrics.map((m) => m.machine?.cpuPct).filter((v) => typeof v === 'number') as number[];
+  if (cpuSamples.length >= 6 && avg(cpuSamples) > 85) {
+    f.push({
+      key: 'cpu-high', level: 'WARNING',
+      title: `Processeur de la machine à ${Math.round(avg(cpuSamples))} % en moyenne (1 h)`,
+      detail: 'Le serveur travaille presque à fond : tout ralentit (API, base, front).',
+      action: 'Regarde les routes les plus coûteuses, un build Coolify en cours, ou passe à un serveur avec plus de cœurs.',
     });
   }
 

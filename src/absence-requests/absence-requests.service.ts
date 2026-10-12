@@ -306,6 +306,21 @@ private async getUserWithCompany(userId: string, overrideCompanyId?: string): Pr
     // reste en PENDING, comme avant.
     const autoApprove = !!dto.employeeId;
 
+    // 🆕 Motif « Autre » (saisi librement, hors catalogue conventionnel) : aucun droit
+    // fixé par la convention → c'est la RH qui tranche si la période est payée ou non.
+    //  - demande de l'employé : isPaid = false en attendant (non applicable tant que la
+    //    demande est PENDING) ; la RH DOIT préciser payé / non payé à la validation
+    //    (voir updateStatus).
+    //  - RH/Admin qui crée pour un employé (validation directe) : le choix est
+    //    obligatoire dans la requête.
+    const isOther = !motif && subType === 'AUTRE';
+    if (isOther && autoApprove && typeof dto.isPaid !== 'boolean') {
+      throw new BadRequestException(
+        'Pour un motif « Autre », précisez si la période est payée ou non payée.',
+      );
+    }
+    const initialIsPaid = isOther ? (autoApprove ? dto.isPaid! : false) : (dto.isPaid ?? true);
+
     const absenceRequest = await this.prisma.absenceRequest.create({
       data: {
         employeeId:    employee.id,
@@ -317,7 +332,7 @@ private async getUserWithCompany(userId: string, overrideCompanyId?: string): Pr
         workingDays,
         coveredDays,
         reason,
-        isPaid:        dto.isPaid ?? true,
+        isPaid:        initialIsPaid,
         attachmentUrl: dto.attachmentUrl,
         status:        autoApprove ? 'APPROVED' : 'PENDING',
         reviewedBy:    autoApprove ? userId : undefined,
@@ -452,6 +467,13 @@ private async getUserWithCompany(userId: string, overrideCompanyId?: string): Pr
     if (absenceRequest.status !== 'PENDING') throw new BadRequestException('Cette demande a déjà été traitée');
     if (status === 'REJECTED' && !rejectionReason?.trim()) throw new BadRequestException('Un motif de refus est requis');
 
+    // 🆕 Motif « Autre » : on n'approuve pas sans avoir tranché payé / non payé.
+    if (status === 'APPROVED' && absenceRequest.subType === 'AUTRE' && typeof isPaid !== 'boolean') {
+      throw new BadRequestException(
+        'Précisez si cette période est payée ou non payée avant de valider une absence « Autre ».',
+      );
+    }
+
     const updated = await this.prisma.absenceRequest.update({
       where: { id },
       data: {
@@ -577,12 +599,16 @@ private async getUserWithCompany(userId: string, overrideCompanyId?: string): Pr
       ? getMotifsForCompany(request.company?.collectiveAgreement)
       : [];
     const motifKey = catalog.find((m) => m.label === request.reason)?.key;
+    // 🆕 Motif « Autre » saisi librement : n'est pas dans le catalogue → exposé à part
+    //    pour que le document coche la ligne « Autre (précisez) ».
+    const otherReason = !motifKey && request.subType === 'AUTRE' ? request.reason : undefined;
 
     return {
       id: request.id,
       type: request.type,
       subType: request.subType,
       motifKey,
+      otherReason,
       catalog,
       isPaid: request.isPaid,
       startDate: request.startDate,
