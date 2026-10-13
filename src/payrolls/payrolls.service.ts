@@ -1149,6 +1149,7 @@ import { LoansService } from '../loans/loans.service';
 import { AttendanceSummaryService } from '../attendance/attendance-summary.service';
 import { PayrollSettingsService } from '../payroll/settings/settings.service';
 import { YtdCheckpointService } from './services/ytd-checkpoint.service';
+import { AuditGateService } from '../audit-engine/audit-gate.service';
 // ✅ Réutilise la même classification ITS/BNC10/BNC20 que les rapports —
 // jamais recalculée différemment d'un endroit à l'autre.
 import { classifyFiscalCategory } from '../reports/payroll-recap.service';
@@ -1207,6 +1208,7 @@ export class PayrollsService {
     private bonusesService: PayrollBonusesService,
     private companyTaxService: CompanyTaxService, // ✅
     private ytdCheckpointService: YtdCheckpointService,
+    private auditGate: AuditGateService,
   ) {}
 
   private getMonthNumber(month: string): number {
@@ -2203,6 +2205,29 @@ export class PayrollsService {
         cumulBrutOverride: (updatePayrollDto as any).cumulBrutOverride,
       };
       return this.recalculatePayroll(id, userId!, overrides);
+    }
+
+    // 🛡️ Barrière d'audit : contrôle avant de passer un bulletin en VALIDATED.
+    // Mode `observe` (défaut) : on enregistre les écarts mais on laisse valider.
+    // Mode `enforce` : 422 AUDIT_BLOCKED si un écart bloquant reste ouvert.
+    if ((updatePayrollDto as any).status === 'VALIDATED' && payroll.status !== 'VALIDATED') {
+      const actorUser = userId
+        ? await this.prisma.user.findUnique({
+            where: { id: userId },
+            select: { role: true, firstName: true, lastName: true },
+          })
+        : null;
+      await this.auditGate.assertCanValidate({
+        companyId: payroll.companyId,
+        payrollIds: [id],
+        actor: userId
+          ? {
+              id: userId,
+              role: actorUser?.role ?? null,
+              label: actorUser ? `${actorUser.firstName} ${actorUser.lastName}` : null,
+            }
+          : null,
+      });
     }
 
     // Sinon → mise à jour simple des champs workflow (status, notes, paymentReference…)

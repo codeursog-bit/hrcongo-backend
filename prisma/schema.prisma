@@ -5177,6 +5177,7 @@ model ChatParticipant {
 
   unreadCount Int       @default(0)
   lastReadAt  DateTime? @db.Timestamptz
+  lastDeliveredAt DateTime? @db.Timestamptz
   createdAt   DateTime  @default(now()) @db.Timestamptz
 
   @@unique([conversationId, userId])

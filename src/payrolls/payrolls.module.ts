@@ -18,6 +18,7 @@ import { PayrollSeniorityService } from './services/payroll-seniority.service'; 
 import { CompanyDeductionsModule } from '../company-deductions/company-deductions.module';
 import { PrismaService } from '../prisma/prisma.service';
 import { LoansModule } from '../loans/loans.module';
+import { AuditEngineModule } from '../audit-engine/audit-engine.module';
 import { AttendanceModule } from '../attendance/attendance.module';
 import { PayrollSettingsService } from '../payroll/settings/settings.service';
 import { IrppCalculatorService } from '../payroll/fiscal/irpp-calculator.service';
@@ -46,6 +47,7 @@ import { ManualPayrollService } from './services/manual-payroll.service';
     CompanyDeductionsModule,
     NotificationsModule,
     LoansModule,
+    AuditEngineModule, // barrière d'audit à la validation de la paie
   ],
   controllers: [
     PayrollsController,

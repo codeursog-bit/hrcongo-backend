@@ -7,6 +7,9 @@ import { Module } from '@nestjs/common';
 import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { CryptoModule } from './crypto/crypto.module';
 import { AuditModule } from './audit/audit.module';
+import { AuditTrailModule } from './audit-trail/audit-trail.module';
+import { AuditEngineModule } from './audit-engine/audit-engine.module';
+import { ContractChainModule } from './contract-chain/contract-chain.module';
 import { CleanupModule } from './cleanup/cleanup.module';
 import { HolidaysModule } from './holidays/holidays.module';
 import { AuditInterceptor } from './audit/audit.interceptor';
@@ -78,6 +81,9 @@ import { ChatModule } from './chat/chat.module';
     // ── SÉCURITÉ — CHIFFREMENT & AUDIT ──────────────────────────────────────
     CryptoModule, // Chiffrement AES-256-GCM des données sensibles (global)
     AuditModule,
+    AuditTrailModule, // Journal d'audit chaîné (global) : /audit-trail/*
+    AuditEngineModule, // Moteur de contrôle de paie : /audit-engine/*
+    ContractChainModule, // Chaîne de contrats : /contract-chain/*
     CleanupModule, // Audit log des actions sensibles (global)
     HolidaysModule, // 🇨🇬 Mise à jour auto des jours fériés légaux (hebdo, idempotent)
 

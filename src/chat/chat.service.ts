@@ -33,7 +33,9 @@ import {
   ChatContactDto,
   ChatConversationDto,
   ChatMessageDto,
+  ChatPeerDto,
   ChatPollDto,
+  ChatReceiptStatus,
   MAX_BODY_LENGTH,
 } from './chat.types';
 
@@ -51,6 +53,22 @@ export interface ChatPushSender {
 }
 
 const PREVIEW_LENGTH = 80;
+
+/** Accusés de l'autre personne. `deliveredAt` = max(reçu, lu) : un message lu a forcément été reçu. */
+function toPeer(p: { lastReadAt: Date | null; lastDeliveredAt: Date | null } | undefined): ChatPeerDto {
+  const read = p?.lastReadAt ?? null;
+  const del = p?.lastDeliveredAt ?? null;
+  const delivered = read && (!del || read > del) ? read : del;
+  return { deliveredAt: delivered?.toISOString() ?? null, readAt: read?.toISOString() ?? null };
+}
+
+function statusFor(createdAt: Date | null, peer: ChatPeerDto): ChatReceiptStatus {
+  if (!createdAt) return 'sent';
+  const t = createdAt.getTime();
+  if (peer.readAt && Date.parse(peer.readAt) >= t) return 'read';
+  if (peer.deliveredAt && Date.parse(peer.deliveredAt) >= t) return 'delivered';
+  return 'sent';
+}
 
 @Injectable()
 export class ChatService {
@@ -140,7 +158,7 @@ export class ChatService {
             lastSenderId: true,
             participants: {
               where: { userId: { not: actor.id } },
-              select: { user: { select: CONTACT_SELECT } },
+              select: { lastReadAt: true, lastDeliveredAt: true, user: { select: CONTACT_SELECT } },
             },
           },
         },
@@ -152,12 +170,14 @@ export class ChatService {
       const c = r.conversation;
       const otherUser = c.participants[0]?.user;
       if (!otherUser) continue;
+      const fromMe = c.lastSenderId === actor.id;
       out.push({
         id: c.id,
         other: toContactDto(otherUser),
         lastMessageAt: c.lastMessageAt?.toISOString() ?? null,
         lastPreview: c.lastPreviewEnc ? decryptChatText(c.lastPreviewEnc, c.id) : null,
-        lastFromMe: c.lastSenderId === actor.id,
+        lastFromMe: fromMe,
+        ...(fromMe ? { lastStatus: statusFor(c.lastMessageAt, toPeer(c.participants[0])) } : {}),
         unreadCount: r.unreadCount,
       });
     }
@@ -169,9 +189,12 @@ export class ChatService {
     actor: ChatActor,
     conversationId: string,
     opts: { before?: number; after?: number; limit?: number },
-  ): Promise<{ messages: ChatMessageDto[]; hasMore: boolean }> {
+  ): Promise<{ messages: ChatMessageDto[]; hasMore: boolean; peer: ChatPeerDto }> {
     this.assertReady();
-    await this.assertMember(actor, conversationId);
+    const { otherId, peer } = await this.assertMemberWithPeer(actor, conversationId);
+    // Je viens de récupérer les messages (ouverture ou delta) : ils sont « reçus » pour l'expéditeur.
+    // (pas pour l'historique plus ancien `before`, qui ne change rien à ce qu'il a déjà reçu)
+    if (opts.before === undefined) await this.markDelivered(actor, conversationId, otherId);
     const limit = Math.min(Math.max(opts.limit ?? 30, 1), 100);
 
     const select = { id: true, seq: true, senderId: true, bodyEnc: true, createdAt: true } as const;
@@ -191,7 +214,7 @@ export class ChatService {
         take: limit,
         select,
       });
-      return { messages: rows.map(toDto), hasMore: rows.length === limit };
+      return { messages: rows.map(toDto), hasMore: rows.length === limit, peer };
     }
 
     // Historique : les N derniers (ou les N précédant `before`)
@@ -202,7 +225,7 @@ export class ChatService {
       select,
     });
     const hasMore = rows.length > limit;
-    return { messages: rows.slice(0, limit).reverse().map(toDto), hasMore };
+    return { messages: rows.slice(0, limit).reverse().map(toDto), hasMore, peer };
   }
 
   // ─── Envoi ─────────────────────────────────────────────────────────────────
@@ -258,7 +281,7 @@ export class ChatService {
         }),
         this.prisma.chatParticipant.updateMany({
           where: { conversationId, userId: actor.id },
-          data: { unreadCount: 0, lastReadAt: now },
+          data: { unreadCount: 0, lastReadAt: now, lastDeliveredAt: now },
         }),
       ]);
       created = msg;
@@ -287,12 +310,16 @@ export class ChatService {
   // ─── Marquer comme lu ──────────────────────────────────────────────────────
   async markRead(actor: ChatActor, conversationId: string): Promise<{ ok: true }> {
     this.assertReady();
-    await this.assertMember(actor, conversationId);
+    const otherId = await this.assertMember(actor, conversationId);
+    const now = new Date();
     const res = await this.prisma.chatParticipant.updateMany({
       where: { conversationId, userId: actor.id, unreadCount: { gt: 0 } },
-      data: { unreadCount: 0, lastReadAt: new Date() },
+      data: { unreadCount: 0, lastReadAt: now, lastDeliveredAt: now },
     });
-    if (res.count > 0) this.signals.bump(actor.id); // synchronise le badge des autres onglets
+    if (res.count > 0) {
+      this.signals.bump(actor.id); // synchronise le badge des autres onglets
+      this.signals.bump(otherId); // l'expéditeur voit passer son message en « lu »
+    }
     return { ok: true };
   }
 
@@ -309,7 +336,11 @@ export class ChatService {
     const sinceMs = sinceIso ? Date.parse(sinceIso) : NaN;
     const since = Number.isFinite(sinceMs) ? new Date(sinceMs - 1000) : null; // marge d'1 s
 
-    const [agg, rows] = await Promise.all([
+    // Du nouveau pour moi : tout message en attente est désormais « reçu » (app ouverte, même sur une autre page).
+    // Sans attendre : ça ne doit jamais ralentir la réponse du poll.
+    void this.deliverPending(actor).catch((e) => this.logger.warn(`Accusés de réception : ${(e as Error).message}`));
+
+    const [agg, rows, receipts] = await Promise.all([
       this.prisma.chatParticipant.aggregate({
         where: { userId: actor.id, conversation: { companyId: actor.companyId } },
         _sum: { unreadCount: true },
@@ -324,6 +355,7 @@ export class ChatService {
             take: 50,
           })
         : Promise.resolve([] as { conversationId: string; unreadCount: number }[]),
+      since ? this.receiptsSince(actor, since) : Promise.resolve([]),
     ]);
 
     return {
@@ -332,6 +364,7 @@ export class ChatService {
       serverTime,
       unreadTotal: agg._sum.unreadCount ?? 0,
       conversations: rows.map((r) => ({ id: r.conversationId, unreadCount: r.unreadCount })),
+      receipts,
     };
   }
 
@@ -343,22 +376,91 @@ export class ChatService {
   // ─── Internes ──────────────────────────────────────────────────────────────
   /** Vérifie l'appartenance + l'entreprise. Retourne l'id de l'AUTRE participant. */
   private async assertMember(actor: ChatActor, conversationId: string): Promise<string> {
+    return (await this.assertMemberWithPeer(actor, conversationId)).otherId;
+  }
+
+  /** Comme assertMember, + les accusés (reçu / lu) de l'autre personne. */
+  private async assertMemberWithPeer(
+    actor: ChatActor,
+    conversationId: string,
+  ): Promise<{ otherId: string; peer: ChatPeerDto }> {
     const part = await this.prisma.chatParticipant.findUnique({
       where: { conversationId_userId: { conversationId, userId: actor.id } },
       select: {
         conversation: {
           select: {
             companyId: true,
-            participants: { where: { userId: { not: actor.id } }, select: { userId: true } },
+            participants: {
+              where: { userId: { not: actor.id } },
+              select: { userId: true, lastReadAt: true, lastDeliveredAt: true },
+            },
           },
         },
       },
     });
-    const other = part?.conversation.participants[0]?.userId;
+    const other = part?.conversation.participants[0];
     if (!part || part.conversation.companyId !== actor.companyId || !other) {
       throw new NotFoundException('Conversation introuvable.');
     }
-    return other;
+    return { otherId: other.userId, peer: toPeer(other) };
+  }
+
+  // ─── Accusés de réception ──────────────────────────────────────────────────
+  /** Je viens de récupérer les messages d'UNE conversation → « reçu » pour l'expéditeur. */
+  private async markDelivered(actor: ChatActor, conversationId: string, otherId: string) {
+    const res = await this.prisma.chatParticipant.updateMany({
+      where: { conversationId, userId: actor.id, unreadCount: { gt: 0 } },
+      data: { lastDeliveredAt: new Date() },
+    });
+    if (res.count > 0) this.signals.bump(otherId);
+  }
+
+  /**
+   * Mon app est ouverte et il y a du nouveau : tous mes messages en attente sont « reçus ».
+   * Une seule requête SQL ; ne touche que les lignes qui changent réellement.
+   */
+  private async deliverPending(actor: ChatActor) {
+    const now = new Date();
+    const rows = await this.prisma.$queryRaw<{ conversationId: string }[]>(Prisma.sql`
+      UPDATE "chat_participants" cp
+         SET "lastDeliveredAt" = ${now}::timestamptz
+        FROM "chat_conversations" c
+       WHERE cp."conversationId" = c."id"
+         AND cp."userId" = ${actor.id}::uuid
+         AND c."companyId" = ${actor.companyId}::uuid
+         AND cp."unreadCount" > 0
+         AND c."lastMessageAt" IS NOT NULL
+         AND (cp."lastDeliveredAt" IS NULL OR cp."lastDeliveredAt" < c."lastMessageAt")
+      RETURNING cp."conversationId"`);
+    if (rows.length === 0) return;
+    const others = await this.prisma.chatParticipant.findMany({
+      where: { conversationId: { in: rows.map((r) => r.conversationId) }, userId: { not: actor.id } },
+      select: { userId: true },
+    });
+    for (const uid of new Set(others.map((o) => o.userId))) this.signals.bump(uid);
+  }
+
+  /** Accusés modifiés depuis `since`, pour mes conversations récentes (2 requêtes indexées, jamais de scan de table). */
+  private async receiptsSince(actor: ChatActor, since: Date) {
+    const mine = await this.prisma.chatParticipant.findMany({
+      where: {
+        userId: actor.id,
+        conversation: { companyId: actor.companyId, lastMessageAt: { gt: new Date(Date.now() - 14 * 86_400_000) } },
+      },
+      select: { conversationId: true },
+      take: 100,
+    });
+    if (mine.length === 0) return [];
+    const peers = await this.prisma.chatParticipant.findMany({
+      where: {
+        conversationId: { in: mine.map((m) => m.conversationId) },
+        userId: { not: actor.id },
+        OR: [{ lastReadAt: { gt: since } }, { lastDeliveredAt: { gt: since } }],
+      },
+      select: { conversationId: true, lastReadAt: true, lastDeliveredAt: true },
+      take: 50,
+    });
+    return peers.map((p) => ({ conversationId: p.conversationId, ...toPeer(p) }));
   }
 
   private cleanBody(raw: string): string {

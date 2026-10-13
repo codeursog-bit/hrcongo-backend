@@ -27,9 +27,11 @@ export class LoansRepaymentService {
    * - Avec période → elle est ENREGISTRÉE telle quelle dans le log, donc tout
    *   ce qui lit les logs (relevé, suivi employé, courbe, paie : skip du mois
    *   déjà couvert en espèces) suit CETTE période, pas la date du jour.
-   * - Garde-fous : mois 1-12, pas de période future (on ne peut pas encaisser
-   *   en espèces un mois qui n'est pas encore arrivé), et pas avant le début
-   *   de la dette (`notBefore`).
+   * - Garde-fous : seulement mois 1-12 et année plausible. Aucune contrainte
+   *   sur le mois choisi (ni "pas dans le futur", ni "pas avant le début de la
+   *   dette") : ces règles bloquaient des cas réels, ex. un prêt programmé pour
+   *   novembre qu'on rembourse déjà en octobre. `notBefore` est conservé en
+   *   paramètre pour ne pas changer les appels, mais n'est plus utilisé.
    */
   private resolvePeriod(month?: number, year?: number, notBefore?: { month: number; year: number }) {
     const now = new Date();
@@ -41,10 +43,6 @@ export class LoansRepaymentService {
     const y = Number(year ?? curY);
     if (!Number.isInteger(m) || m < 1 || m > 12) throw new BadRequestException('Mois de remboursement invalide (1 à 12)');
     if (!Number.isInteger(y) || y < 2000 || y > 2100) throw new BadRequestException('Année de remboursement invalide');
-    if (y * 12 + m > curY * 12 + curM) throw new BadRequestException('La période de remboursement ne peut pas être dans le futur');
-    if (notBefore && y * 12 + m < notBefore.year * 12 + notBefore.month) {
-      throw new BadRequestException(`La période de remboursement ne peut pas précéder le début de la dette (${String(notBefore.month).padStart(2, '0')}/${notBefore.year})`);
-    }
     return { month: m, year: y };
   }
 
