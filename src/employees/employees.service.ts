@@ -688,6 +688,7 @@ import {
 import { normalizeNationality } from '../common/utils/nationality.util';
 import { ConventionsService } from '../conventions/conventions.service';
 import { resolveVerifiedCompanyId } from '../common/resolve-verified-company.util';
+import { ContractSyncService } from '../contract-chain/contract-sync.service';
 
 // ─── Rôles autorisés ──────────────────────────────────────────────────────────
 const CAN_CREATE = ['SUPER_ADMIN', 'ADMIN', 'HR_MANAGER'];
@@ -736,7 +737,17 @@ export class EmployeesService {
     private prisma: PrismaService,
     private subscriptionGuard: SubscriptionGuard,
     private conventionsService: ConventionsService,
+    private contractSync: ContractSyncService,
   ) {}
+
+  // Auteur de l'action pour le journal d'audit (id + rôle + « Prénom NOM »)
+  private async auditActor(userId: string, role: string) {
+    const u = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { firstName: true, lastName: true },
+    });
+    return { id: userId, role, label: u ? `${u.firstName} ${u.lastName}` : null };
+  }
 
   private async getVerifiedUser(userId: string): Promise<{
     id: string;
@@ -1066,7 +1077,7 @@ export class EmployeesService {
           },
         });
 
-        await tx.employeeContract.create({
+        const createdContract = await tx.employeeContract.create({
           data: {
             employeeId: newEmployee.id,
             companyId: user.companyId,
@@ -1081,6 +1092,13 @@ export class EmployeesService {
             trialEndDate: computedTrialEndDate,
             notes: "Créé automatiquement à l'enregistrement",
           },
+        });
+
+        // 🛡️ Trace d'audit : embauche + contrat initial (même transaction)
+        await this.contractSync.recordHire(tx, {
+          employee: newEmployee as any,
+          contract: createdContract as any,
+          actor: await this.auditActor(userId, user.role),
         });
 
         return newEmployee;
@@ -1804,9 +1822,20 @@ export class EmployeesService {
     }
 
     try {
-      const updated = await this.prisma.employee.update({
-        where: { id },
-        data: dataToUpdate,
+      // 🛡️ Fiche employé + chaîne de contrats dans la MÊME transaction :
+      // fin de CDD, conversion en CDI, salaire, poste, fin de relation → historique + audit.
+      const actor = await this.auditActor(userId, user.role);
+      const updated = await this.prisma.$transaction(async (tx) => {
+        const row = await tx.employee.update({
+          where: { id },
+          data: dataToUpdate,
+        });
+        await this.contractSync.syncFromEmployeeChange(tx, {
+          before: employee as any,
+          after: row as any,
+          actor,
+        });
+        return row;
       });
 
       // ✅ SYNCHRO : si l'email de l'employé change, on répercute sur le compte

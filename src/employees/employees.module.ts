@@ -35,10 +35,17 @@ import { PrismaModule } from '../prisma/prisma.module';
 import { SubscriptionsModule } from '../subscriptions/subscriptions.module';
 import { ConventionsModule } from '../conventions/conventions.module';
 import { FiscalModule } from '../payroll/fiscal/fiscal.module';
+import { ContractChainModule } from '../contract-chain/contract-chain.module';
 import { SalaryEstimateService } from './salary-estimate.service';
 
 @Module({
-  imports: [PrismaModule, SubscriptionsModule, ConventionsModule, FiscalModule],
+  imports: [
+    PrismaModule,
+    SubscriptionsModule,
+    ConventionsModule,
+    FiscalModule,
+    ContractChainModule, // historique des contrats (renouvellements, conversions)
+  ],
   controllers: [
     EmployeesController,
     EmployeesImportController,
