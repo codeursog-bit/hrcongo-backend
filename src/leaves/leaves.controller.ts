@@ -237,6 +237,12 @@ export class LeavesController {
   // ⚠️ Routes à segment fixe : doivent rester AVANT @Get(':id')
   // ==========================================================================
 
+  /** Mon solde expliqué (employé connecté) — progression vers 26j, ancienneté, prochain départ. */
+  @Get('me/balance-explained')
+  getMyBalanceExplained(@Request() req) {
+    return this.historyService.getMyBalanceExplained(req.user.userId);
+  }
+
   /** Historique des départs : congés approuvés dont la date de départ est arrivée. */
   @Get('departure-history')
   getDepartureHistory(

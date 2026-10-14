@@ -19,10 +19,17 @@
 //    Les montants (indemnités) ne sont exposés qu'aux rôles RH/Admin.
 // ============================================================================
 
-import { ForbiddenException, Injectable } from '@nestjs/common';
+import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { getUserWithCompany, getManagerDepartmentId } from './leaves-common.util';
 import { congoDateString } from '../common/utils/congo-time';
+import { LeavesBalanceService } from './leaves-balance.service';
+import { CONGO_LEAVE } from './leaves.constants';
+import {
+  LEAVE_SENIORITY_CONVENTIONS,
+  DEFAULT_LEAVE_CONVENTION_KEY,
+  getSeniorityDaysForConvention,
+} from './config/leave-seniority-conventions';
 
 const HR_ROLES = ['ADMIN', 'SUPER_ADMIN', 'HR_MANAGER'];
 const ALLOWED_ROLES = [
@@ -45,7 +52,10 @@ export interface HistoryFilters {
 
 @Injectable()
 export class LeavesHistoryService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly balanceService: LeavesBalanceService,
+  ) {}
 
   // ───────────────────────── helpers ─────────────────────────
 
@@ -497,6 +507,184 @@ export class LeavesHistoryService {
         ),
       },
       truncated: leaves.length >= 2000,
+    };
+  }
+
+  // ───────── 5) Mon solde expliqué (espace employé) ─────────
+
+  /**
+   * Tout ce qu'il faut pour AFFICHER le solde de façon compréhensible :
+   * progression vers les 26 jours, d'où vient chaque chiffre (base + ancienneté),
+   * ancienneté et convention, éligibilité, et date de départ (planifiée ou probable).
+   * Lecture seule — aucun calcul de solde n'est modifié, on réutilise le moteur existant.
+   */
+  async getMyBalanceExplained(userId: string) {
+    const user = await getUserWithCompany(this.prisma, userId);
+    const employee = await this.prisma.employee.findFirst({
+      where: { email: user.email ?? undefined, companyId: user.companyId },
+      select: {
+        id: true,
+        firstName: true,
+        hireDate: true,
+        company: {
+          select: { leaveConventionKey: true, appliesSeniorityLeaveBonus: true, leaveCycleMode: true },
+        },
+      },
+    });
+    if (!employee) throw new NotFoundException('Employé introuvable');
+
+    const today = this.todayUtc();
+    const bal: any = await this.balanceService.getEmployeeBalanceDetails(employee.id);
+
+    const entitled = Number(bal.annualEntitled);
+    const taken = Number(bal.annualTaken);
+    const remaining = Number(bal.annualRemaining);
+    const seniorityDays = Number(bal.seniorityDays ?? 0);
+    const baseAcquired = Math.max(0, Math.round((entitled - seniorityDays) * 10) / 10);
+    const baseMax = CONGO_LEAVE.ANNUAL_DAYS;
+
+    const cycleStart = new Date(bal.cycleStartDate);
+    const cycleEnd = new Date(bal.cycleEndDate);
+    const monthsWorked = Math.max(
+      0,
+      Math.min(12, (today.getTime() - cycleStart.getTime()) / (1000 * 60 * 60 * 24 * 30.44)),
+    );
+
+    // Date à partir de laquelle un congé annuel normal est possible (12 mois de cycle)
+    const eligibleDate = new Date(cycleStart);
+    eligibleDate.setUTCMonth(eligibleDate.getUTCMonth() + CONGO_LEAVE.MIN_MONTHS_BEFORE_LEAVE);
+
+    // Ancienneté & convention
+    const hire = new Date(employee.hireDate);
+    const seniority = this.seniorityBetween(hire, today);
+    const conventionKey = employee.company?.leaveConventionKey ?? DEFAULT_LEAVE_CONVENTION_KEY;
+    const convention = LEAVE_SENIORITY_CONVENTIONS.find((c) => c.key === conventionKey);
+    const appliesBonus = employee.company?.appliesSeniorityLeaveBonus ?? true;
+    const yearsFloat = (today.getTime() - hire.getTime()) / (1000 * 60 * 60 * 24 * 365.25);
+    const currentBonus = appliesBonus
+      ? getSeniorityDaysForConvention(conventionKey, Math.max(0, yearsFloat))
+      : 0;
+    const nextBracket = appliesBonus
+      ? convention?.brackets.find((b) => b.minYears > yearsFloat)
+      : undefined;
+    let nextSeniority: null | { minYears: number; days: number; date: Date } = null;
+    if (nextBracket) {
+      const d = new Date(hire);
+      d.setUTCFullYear(d.getUTCFullYear() + nextBracket.minYears);
+      nextSeniority = { minYears: nextBracket.minYears, days: nextBracket.days, date: d };
+    }
+
+    // ── Congés ANTICIPÉS pris dans ce cycle (déduits du solde) ──
+    const anticipatedRows = await this.prisma.leave.findMany({
+      where: {
+        employeeId: employee.id,
+        type: 'ANNUAL_ANTICIPATED',
+        status: 'APPROVED',
+        startDate: { gte: cycleStart, lte: cycleEnd },
+      },
+      orderBy: { startDate: 'asc' },
+    });
+    const anticipatedDays = anticipatedRows.reduce((sum, l) => sum + Number(l.daysCount), 0);
+
+    // ── Projection à la fin du cycle : le droit complet (26j + ancienneté) moins ce qui a déjà été
+    //    pris (anticipé compris). C'est avec ce nombre-là que l'employé part à la date normale —
+    //    le système n'attend jamais d'avoir 26 jours si une partie a déjà été prise.
+    const fullEntitlement = this.round1(baseMax + seniorityDays);
+    const projectedRemaining = this.round1(Math.max(0, fullEntitlement - taken));
+
+    const startsOnHire = cycleStart.toISOString().slice(0, 10) === hire.toISOString().slice(0, 10);
+    const startReason: 'HIRE' | 'ANNIVERSARY' | 'LAST_LEAVE_RETURN' = startsOnHire
+      ? 'HIRE'
+      : employee.company?.leaveCycleMode === 'ANNIVERSARY'
+        ? 'ANNIVERSARY'
+        : 'LAST_LEAVE_RETURN';
+
+    // Prochain départ : planifié (réel) sinon probable (fin de cycle)
+    const upcoming = await this.prisma.leave.findFirst({
+      where: {
+        employeeId: employee.id,
+        type: { in: ['ANNUAL', 'ANNUAL_ANTICIPATED'] },
+        status: { in: ['APPROVED', 'PENDING'] },
+        endDate: { gte: today },
+      },
+      orderBy: { startDate: 'asc' },
+    });
+
+    let nextDeparture: any;
+    if (upcoming) {
+      const started = upcoming.startDate <= today;
+      nextDeparture = {
+        kind: started && upcoming.status === 'APPROVED' ? 'IN_PROGRESS' : 'PLANNED',
+        status: upcoming.status, // APPROVED | PENDING
+        startDate: upcoming.startDate,
+        endDate: upcoming.endDate,
+        days: Number(upcoming.daysCount),
+      };
+    } else if (remaining > 0 && bal.canTakeAnnualLeave) {
+      nextDeparture = {
+        kind: 'PROBABLE',
+        startDate: cycleEnd > today ? cycleEnd : today,
+        reason: cycleEnd > today ? 'END_OF_CYCLE' : 'AVAILABLE_NOW',
+      };
+    } else if (!bal.canTakeAnnualLeave) {
+      nextDeparture = { kind: 'NOT_YET', startDate: eligibleDate };
+    } else {
+      nextDeparture = { kind: 'NONE' };
+    }
+
+    return {
+      employee: {
+        firstName: employee.firstName,
+        hireDate: employee.hireDate,
+        seniority,
+      },
+      cycle: {
+        startDate: cycleStart,
+        endDate: cycleEnd,
+        monthsWorked: this.round1(monthsWorked),
+        monthsElapsedFull: Math.floor(monthsWorked),
+        startReason,
+        monthsTotal: 12,
+        progressPct: Math.round((monthsWorked / 12) * 100),
+        eligibleDate,
+        canTakeLeave: !!bal.canTakeAnnualLeave,
+        monthsUntilEligible: bal.monthsUntilEligible ?? 0,
+      },
+      base: {
+        acquired: baseAcquired,
+        max: baseMax,
+        missing: this.round1(Math.max(0, baseMax - baseAcquired)),
+        perMonth: this.round1(CONGO_LEAVE.MONTHLY_RATE),
+        daysUntilNextAccrual: bal.daysUntilNextAccrual ?? null,
+      },
+      seniority: {
+        days: seniorityDays,
+        applies: appliesBonus,
+        currentBonus,
+        conventionName: convention ? convention.label.split(' (')[0] : null,
+        next: nextSeniority,
+      },
+      anticipated: {
+        days: this.round1(anticipatedDays),
+        leaves: anticipatedRows.map((l) => ({
+          id: l.id,
+          startDate: l.startDate,
+          endDate: l.endDate,
+          days: Number(l.daysCount),
+        })),
+      },
+      projection: {
+        fullEntitlement, // 26j + ancienneté, acquis en fin de cycle
+        taken: this.round1(taken), // déjà pris (anticipé compris)
+        remainingAtCycleEnd: projectedRemaining, // = avec quoi il partira à la date normale
+        cycleEndDate: cycleEnd,
+      },
+      totals: {
+        entitled: this.round1(entitled),
+        taken: this.round1(taken),
+        remaining: this.round1(remaining),
+      },
+      nextDeparture,
     };
   }
 
