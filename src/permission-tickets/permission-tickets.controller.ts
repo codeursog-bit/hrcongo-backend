@@ -19,6 +19,11 @@ import { Roles } from '../auth/decorators/roles.decorator';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { PermissionTicketsService } from './permission-tickets.service';
 import { CreatePermissionTicketDto } from './dto/create-permission-ticket.dto';
+import {
+  ConfirmReturnDto,
+  RejectReturnDto,
+  UpdateTimesDto,
+} from './dto/permission-return.dto';
 
 @Controller('permission-tickets')
 @UseGuards(AuthGuard('jwt'))
@@ -62,9 +67,64 @@ export class PermissionTicketsController {
     );
   }
 
+  // 🔙 L'employé déclare son retour (à valider) — Admin/RH : enregistré directement
   @Patch(':id/return')
   markReturn(@Param('id') id: string, @Request() req) {
     return this.permissionTicketsService.markReturn(id, req.user.userId);
+  }
+
+  // ✅ Confirmer le retour déclaré (heures ajustables, motif si modifiées)
+  @Patch(':id/return/confirm')
+  @UseGuards(RolesGuard)
+  @Roles('ADMIN', 'SUPER_ADMIN', 'HR_MANAGER')
+  confirmReturn(
+    @Param('id') id: string,
+    @Body() dto: ConfirmReturnDto,
+    @Request() req,
+  ) {
+    return this.permissionTicketsService.confirmReturn(
+      id,
+      dto,
+      req.user.userId,
+    );
+  }
+
+  // ❌ Retour non validé
+  @Patch(':id/return/reject')
+  @UseGuards(RolesGuard)
+  @Roles('ADMIN', 'SUPER_ADMIN', 'HR_MANAGER')
+  rejectReturn(
+    @Param('id') id: string,
+    @Body() dto: RejectReturnDto,
+    @Request() req,
+  ) {
+    return this.permissionTicketsService.rejectReturn(
+      id,
+      dto,
+      req.user.userId,
+    );
+  }
+
+  // ✏️ Corriger les heures de sortie / retour (imprévus) — motif obligatoire
+  @Patch(':id/times')
+  @UseGuards(RolesGuard)
+  @Roles('ADMIN', 'SUPER_ADMIN', 'HR_MANAGER')
+  updateTimes(
+    @Param('id') id: string,
+    @Body() dto: UpdateTimesDto,
+    @Request() req,
+  ) {
+    return this.permissionTicketsService.updateTimes(
+      id,
+      dto,
+      req.user.userId,
+    );
+  }
+
+  // 🧾 Timeline d'un ticket (traçabilité)
+  @Get(':id/events')
+  findEvents(@Param('id') id: string, @Request() req) {
+    return this.permissionTicketsService.findEvents(id, req.user.userId);
   }
 
   @Patch(':id/cancel')

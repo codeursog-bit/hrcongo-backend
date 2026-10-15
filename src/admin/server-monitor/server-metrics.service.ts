@@ -17,7 +17,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { SystemLogsService } from '../../system-logs/system-logs.service';
 import { NotificationsService } from '../../notifications/notifications.service';
 import { RouteStatsCollector } from './route-stats.collector';
-import { analyzeServer, Finding } from './diagnostics';
+import { analyzeServer, DiskPoint, Finding } from './diagnostics';
 import { PURGE_TABLES } from './purge-registry';
 
 const TABLES_EVERY_MS = 6 * 3600_000;
@@ -229,7 +229,19 @@ export class ServerMetricsService implements OnModuleInit {
       orderBy: { createdAt: 'asc' },
       select: { createdAt: true, tables: true },
     });
-    return analyzeServer(snaps as any, tableSnaps as any, PURGE_TABLES);
+    // Série du disque sur 7 jours (2 valeurs par relevé : requête légère, sans charger le JSON complet)
+    const diskSeries: DiskPoint[] = await this.prisma
+      .$queryRaw<{ at: Date; used: number | null; total: number | null }[]>`
+        SELECT "createdAt" AS at,
+               (metrics->'machine'->>'diskUsedGb')::float8 AS used,
+               (metrics->'machine'->>'diskTotalGb')::float8 AS total
+        FROM server_metric_snapshots
+        WHERE "createdAt" >= now() - interval '7 days'
+          AND metrics->'machine'->>'diskUsedGb' IS NOT NULL
+        ORDER BY "createdAt" ASC`
+      .then((rows) => rows.filter((r) => r.used != null && r.total != null).map((r) => ({ at: new Date(r.at), used: Number(r.used), total: Number(r.total) })))
+      .catch(() => [] as DiskPoint[]);
+    return analyzeServer(snaps as any, tableSnaps as any, PURGE_TABLES, diskSeries);
   }
 
   // ==========================================================================

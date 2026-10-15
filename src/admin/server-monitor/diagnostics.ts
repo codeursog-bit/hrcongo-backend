@@ -32,10 +32,46 @@ const SEVERITY: Record<FindingLevel, number> = { CRITICAL: 0, WARNING: 1, INFO: 
 const mb = (bytes: number) => Math.round((bytes / 1048576) * 10) / 10;
 const avg = (a: number[]) => (a.length ? a.reduce((x, y) => x + y, 0) / a.length : 0);
 
+/** Un point de la courbe du disque (lu sur 7 jours) */
+export interface DiskPoint {
+  at: Date;
+  used: number; // Go utilisés
+  total: number; // Go au total
+}
+
+/**
+ * Tendance du disque, robuste aux déploiements : le disque fait des « dents de scie »
+ * (un build ajoute des Go d'images, le nettoyage Docker les retire). On ne regarde donc
+ * que le MINIMUM de chaque jour (le disque après nettoyage), sur au moins 3 jours.
+ * Retourne la pente en Go/jour, ou null s'il n'y a pas assez d'historique.
+ */
+export function diskTrend(series: DiskPoint[]): { slope: number; days: number; usedGb: number; freeGb: number } | null {
+  if (series.length === 0) return null;
+  const perDay = new Map<string, { min: number; n: number }>();
+  for (const p of series) {
+    const d = p.at.toISOString().slice(0, 10);
+    const cur = perDay.get(d);
+    if (!cur) perDay.set(d, { min: p.used, n: 1 });
+    else { cur.min = Math.min(cur.min, p.used); cur.n++; }
+  }
+  // Jours suffisamment couverts (≈ 4 h de relevés) : un jour partiel fausserait la pente
+  const days = [...perDay.entries()].filter(([, v]) => v.n >= 48).sort(([a], [b]) => (a < b ? -1 : 1));
+  if (days.length < 3) return null;
+  const xs = days.map(([d]) => new Date(d).getTime() / 86400_000);
+  const ys = days.map(([, v]) => v.min);
+  const mx = avg(xs), my = avg(ys);
+  let num = 0, den = 0;
+  for (let i = 0; i < xs.length; i++) { num += (xs[i] - mx) * (ys[i] - my); den += (xs[i] - mx) ** 2; }
+  if (den === 0) return null;
+  const lastPoint = series[series.length - 1];
+  return { slope: num / den, days: days.length, usedGb: lastPoint.used, freeGb: lastPoint.total - lastPoint.used };
+}
+
 export function analyzeServer(
   snaps: SnapshotRow[],
   tableSnaps: TablesRow[],
   purgeTables: Set<string>,
+  diskSeries: DiskPoint[] = [],
 ): Finding[] {
   const f: Finding[] = [];
   const last = snaps[snaps.length - 1]?.metrics;
@@ -73,25 +109,20 @@ export function analyzeServer(
         action: 'Surveille la croissance ci-dessous et purge les journaux inutiles.',
       });
     }
-    // Rythme de remplissage — seulement une fois ~24 h de relevés disponibles :
-    // sur quelques heures, un déploiement (images Docker, cache de build) fausse la pente.
-    const first = snaps[0]?.metrics;
-    const spanDays = (snaps[snaps.length - 1].createdAt.getTime() - snaps[0].createdAt.getTime()) / 86400_000;
-    if (first?.machine?.diskUsedGb != null && spanDays >= 0.9) {
-      const slope = (last.machine.diskUsedGb - first.machine.diskUsedGb) / spanDays; // Go / jour
-      const free = last.machine.diskTotalGb - last.machine.diskUsedGb;
-      if (slope > 0.05 && free / slope < 30) {
-        const daysLeft = free / slope;
-        const dbMb = last.db?.sizeMb;
-        f.push({
-          key: 'disk-eta', level: daysLeft < 3 ? 'CRITICAL' : 'WARNING',
-          title: `Disque plein dans ~${Math.max(1, Math.round(daysLeft))} jour(s) à ce rythme`,
-          detail: `+${slope.toFixed(2)} Go/jour sur les dernières 24 h, il reste ${free.toFixed(1)} Go.` +
-            (typeof dbMb === 'number' ? ` La base ne pèse que ${dbMb} Mo : la croissance vient d'ailleurs (images Docker, cache de build, logs de conteneurs).` : ''),
-          action: 'Sur le serveur : `docker system df` pour voir ce qui prend la place, puis `docker image prune -a` et `docker builder prune`. Un gros déploiement ce jour-là peut fausser la mesure.',
-        });
-      }
-    }
+  }
+
+  // Tendance du disque (minimum quotidien, ≥ 3 jours) : insensible aux builds et aux nettoyages Docker
+  const trend = diskTrend(diskSeries);
+  if (trend && trend.slope > 0.05 && trend.freeGb / trend.slope < 30) {
+    const daysLeft = trend.freeGb / trend.slope;
+    const dbMb = last.db?.sizeMb;
+    f.push({
+      key: 'disk-eta', level: daysLeft < 3 ? 'CRITICAL' : daysLeft < 14 ? 'WARNING' : 'INFO',
+      title: `Disque plein dans ~${Math.max(1, Math.round(daysLeft))} jour(s) à ce rythme`,
+      detail: `Tendance de fond : +${trend.slope.toFixed(2)} Go/jour (minimum quotidien sur ${trend.days} jours), il reste ${trend.freeGb.toFixed(1)} Go.` +
+        (typeof dbMb === 'number' ? ` La base ne pèse que ${dbMb} Mo : la croissance vient d'ailleurs (images Docker, logs de conteneurs, fichiers).` : ''),
+      action: 'Sur le serveur : `docker system df` pour voir ce qui prend la place, et vérifie le nettoyage Docker automatique de Coolify (Servers → Docker Cleanup).',
+    });
   }
 
   // ── Mémoire machine / conteneur ──────────────────────────────────────────

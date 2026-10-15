@@ -16,6 +16,50 @@
 //
 // ============================================================================
 
+// ============================================================================
+// 🧭 SOMMAIRE (recherche rapide : chercher "SECTION NN")
+// ============================================================================
+// 01. AUTHENTIFICATION & UTILISATEURS
+// 02. ENTREPRISE
+// 03. EMPLOYÉS
+// 04. CONTRATS & FIN DE CONTRAT
+// 05. PAIE
+// 06. PRIMES & CONVENTIONS COLLECTIVES
+// 07. PRÊTS, AVANCES & RETENUES
+// 08. CONGÉS, ABSENCES & PERMISSIONS
+// 09. PRÉSENCES & POINTAGE
+// 10. RECRUTEMENT
+// 11. PERFORMANCE, COMPÉTENCES & CARRIÈRE
+// 12. FORMATION & ONBOARDING
+// 13. DOCUMENTS & IMPORTS
+// 14. CIRCUITS D'APPROBATION & AVIS
+// 15. NOTIFICATIONS & PUSH
+// 16. CHAT INTERNE
+// 17. ABONNEMENTS & PAIEMENTS (ENTREPRISES)
+// 18. MODULE CABINET (MULTI-ENTREPRISES)
+// 19. AFFILIATION
+// 20. SITE PUBLIC : BLOG, CONTACT & CONFIG PLATEFORME
+// 21. AUDIT, LOGS & SYSTÈME
+// ============================================================================
+
+// ============================================================================
+// 🐘 SCHEMA PRISMA - POSTGRESQL PRODUCTION (NEON.TECH)
+// ============================================================================
+// 
+// ✅ Optimisé pour PostgreSQL (pas SQLite)
+// ✅ Indexes stratégiques pour performances
+// ✅ Contraintes d'intégrité robustes
+// ✅ Types natifs PostgreSQL
+// ✅ Prêt pour scalabilité
+// ✅ Compatible Neon.tech (serverless Postgres)
+//
+// 🔥 CONFORME FISCALITÉ CONGO 2025-2026
+// - IRPP/ITS avec abattement 20%
+// - Quotient familial (parts fiscales)
+// - CNSS 4% salariale / 16% patronale
+//
+// ============================================================================
+
 generator client {
   provider        = "prisma-client-js"
   previewFeatures = ["postgresqlExtensions"]
@@ -30,9 +74,10 @@ datasource db {
   extensions = [pgcrypto]
 }
 
-// ============================================================================
-// 1️⃣ AUTHENTIFICATION & UTILISATEURS
-// ============================================================================
+// ===========================================================================
+// 📂 SECTION 01 — AUTHENTIFICATION & UTILISATEURS
+// Comptes, rôles, sessions, invitations, rattachement utilisateur-entreprise
+// ===========================================================================
 
 model User {
   id        String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
@@ -96,6 +141,8 @@ model User {
   advancePrintAuthorized  Advance[]              @relation("AdvancePrintAuthorizedBy")
   permissionsCreated      PermissionTicket[]     @relation("PermissionCreatedBy")
   permissionsReviewed     PermissionTicket[]     @relation("PermissionReviewedBy")
+  permissionReturnsConfirmed PermissionTicket[]  @relation("PermissionReturnConfirmedBy")
+  permissionEvents        PermissionTicketEvent[] @relation("PermissionEventActor")
   conductedReviews        PerformanceReview[]    @relation("Reviewer")
   attendanceLogs          AttendanceLog[]
   correctionsMade         AttendanceCorrection[] @relation("CorrectionModifier")
@@ -126,6 +173,7 @@ model User {
 }
 
 // ✅ Enum PostgreSQL natif
+
 enum UserRole {
   SUPER_ADMIN
   ADMIN
@@ -138,9 +186,68 @@ enum UserRole {
   @@map("user_role")
 }
 
-// ============================================================================
-// 2️⃣ ENTREPRISE
-// ============================================================================
+// ─── Sessions JWT révocables ──────────────────────────────────────────────────
+
+model UserSession {
+  id        String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId    String    @db.Uuid
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  jti       String    @unique @db.VarChar(255)
+  expiresAt DateTime  @db.Timestamptz
+  revokedAt DateTime? @db.Timestamptz
+  createdAt DateTime  @default(now()) @db.Timestamptz
+
+  @@index([userId])
+  @@index([jti])
+  @@index([expiresAt])
+  @@map("user_sessions")
+}
+
+model UserInvitation {
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+
+  email     String   @db.VarChar(255)
+  role      UserRole
+  token     String   @unique @db.VarChar(255)
+  expiresAt DateTime @db.Timestamptz
+
+  invitedBy String @db.Uuid
+
+  companyId               String?   @db.Uuid
+  cabinetId               String?   @db.Uuid
+  manageMultipleCompanies Boolean   @default(false)
+  cabinetName             String?   @db.VarChar(255)
+  accepted                Boolean   @default(false)
+  acceptedAt              DateTime? @db.Timestamptz
+
+  createdAt DateTime @default(now()) @db.Timestamptz
+
+  @@index([email])
+  @@index([token])
+  @@index([expiresAt])
+  @@map("user_invitations")
+}
+
+model UserCompany {
+  id        String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId    String @db.Uuid
+  companyId String @db.Uuid
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now()) @db.Timestamptz
+
+  @@unique([userId, companyId])
+  @@index([userId])
+  @@index([companyId])
+  @@map("user_companies")
+}
+
+// ===========================================================================
+// 📂 SECTION 02 — ENTREPRISE
+// Entreprise, sites, calendrier, sécurité réseau, modèles de documents
+// ===========================================================================
 
 model Company {
   id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
@@ -331,25 +438,36 @@ model Company {
   @@map("companies")
 }
 
-model NonWorkingDay {
+enum DocumentTemplate {
+  DEFAULT
+  ORCA
+  STANDARD // ← ajouté
+
+  @@map("document_template")
+}
+
+// ═══════════════════════════════════════════════════════
+// MULTI-SITES DE POINTAGE
+// ═══════════════════════════════════════════════════════
+
+model CompanySite {
   id        String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   companyId String  @db.Uuid
   company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
 
-  dayOfWeek   Int     @db.SmallInt // 0-6
-  description String? @db.VarChar(255)
+  name      String  @db.VarChar(100)
+  latitude  Decimal @db.Decimal(10, 8)
+  longitude Decimal @db.Decimal(11, 8)
+  radius    Int     @default(100) @db.SmallInt // ≥ 1 mètre
+  isActive  Boolean @default(true)
 
   createdAt DateTime @default(now()) @db.Timestamptz
   updatedAt DateTime @updatedAt @db.Timestamptz
 
-  @@unique([companyId, dayOfWeek])
   @@index([companyId])
-  @@map("non_working_days")
+  @@index([isActive])
+  @@map("company_sites")
 }
-
-// ============================================================================
-// 3️⃣ DÉPARTEMENTS
-// ============================================================================
 
 model Department {
   id          String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
@@ -376,9 +494,72 @@ model Department {
   @@map("departments")
 }
 
-// ============================================================================
-// 4️⃣ EMPLOYÉS
-// ============================================================================
+model NonWorkingDay {
+  id        String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId String  @db.Uuid
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  dayOfWeek   Int     @db.SmallInt // 0-6
+  description String? @db.VarChar(255)
+
+  createdAt DateTime @default(now()) @db.Timestamptz
+  updatedAt DateTime @updatedAt @db.Timestamptz
+
+  @@unique([companyId, dayOfWeek])
+  @@index([companyId])
+  @@map("non_working_days")
+}
+
+model PublicHoliday {
+  id   String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name String @db.VarChar(100)
+  date String @db.VarChar(10)
+  year Int    @db.SmallInt
+
+  companyId String  @db.Uuid
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now()) @db.Timestamptz
+
+  @@unique([companyId, date])
+  @@index([companyId, year])
+  @@map("public_holidays")
+}
+
+model CompanyTrustedIp {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId String   @db.Uuid
+  company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  label     String   @db.VarChar(100)
+  ip        String   @db.VarChar(64)
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now()) @db.Timestamptz
+
+  @@unique([companyId, ip])
+  @@index([companyId])
+  @@map("company_trusted_ips")
+}
+
+model CompanyIpSighting {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId  String   @db.Uuid
+  company    Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  userId     String   @db.Uuid
+  ip         String   @db.VarChar(64)
+  lastSeenAt DateTime @default(now()) @db.Timestamptz
+  blocked    Boolean  @default(false)
+ 
+  @@unique([companyId, ip, userId])
+  @@index([companyId, ip, lastSeenAt])
+  @@index([lastSeenAt])
+  @@map("company_ip_sightings")
+}
+
+// ===========================================================================
+// 📂 SECTION 03 — EMPLOYÉS
+// Fiche employé, secrets, équipements (actifs)
+// ===========================================================================
 
 // ============================================================================
 // 🔥 MODIFICATION CRITIQUE : CNI/Passeport maintenant OPTIONNEL
@@ -562,6 +743,7 @@ model Employee {
 }
 
 // ✅ Enums PostgreSQL natifs
+
 enum Gender {
   MALE
   FEMALE
@@ -624,9 +806,410 @@ enum TrialStatus {
   EXPIRED
 }
 
+// Mot secret / PIN de pointage. On ne stocke QUE l'empreinte HMAC (clé serveur) :
+// impossible de retrouver le mot en base. Unique globalement (identification par le code seul).
+
+model EmployeeSecret {
+  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  employeeId   String   @unique @db.Uuid
+  employee     Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  companyId    String   @db.Uuid
+  company      Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  secretLookup String   @unique @db.VarChar(64)
+  setByUserId  String?  @db.Uuid
+  createdAt    DateTime @default(now()) @db.Timestamptz
+  updatedAt    DateTime @updatedAt @db.Timestamptz
+
+  @@index([companyId])
+  @@map("employee_secrets")
+}
+
+model Asset {
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+
+  name         String  @db.VarChar(255)
+  category     String  @db.VarChar(100) // ✅ String libre — plus d'enum
+  serialNumber String? @db.VarChar(100)
+
+  purchaseDate  DateTime @db.Date
+  purchasePrice Decimal  @db.Decimal(15, 2)
+  currentValue  Decimal? @db.Decimal(15, 2)
+
+  assignedTo String?   @db.Uuid
+  employee   Employee? @relation("AssignedAssets", fields: [assignedTo], references: [id], onDelete: SetNull)
+
+  status AssetStatus @default(AVAILABLE)
+
+  companyId String  @db.Uuid
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now()) @db.Timestamptz
+  updatedAt DateTime @updatedAt @db.Timestamptz
+
+  @@index([companyId])
+  @@index([assignedTo])
+  @@index([status])
+  @@index([category]) // ✅ Index pour filtrer par catégorie
+  @@map("assets")
+}
+
+// ✅ AssetCategory enum SUPPRIMÉ — remplacé par String libre dans le modèle
+
+enum AssetStatus {
+  AVAILABLE
+  IN_USE
+  MAINTENANCE
+  RETIRED
+
+  @@map("asset_status")
+}
+
+// ===========================================================================
+// 📂 SECTION 04 — CONTRATS & FIN DE CONTRAT
+// Contrats, ruptures, PSE, contrats générés
+// ===========================================================================
+
 // ============================================================================
-// 5️⃣ PAIE (CONFORME CONGO 2025-2026)
+// 🆕 MODEL 2 : EmployeeContract — Contrat complet avec historique
+// (remplace les champs contractType/contractEndDate directement sur Employee)
 // ============================================================================
+
+model EmployeeContract {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  employeeId String   @db.Uuid
+  employee   Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  companyId  String   @db.Uuid
+  company    Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  // Type et durée
+  contractType ContractType
+  startDate    DateTime     @db.Date
+  endDate      DateTime?    @db.Date // null = CDI ou en cours
+  duration     Int?         @db.SmallInt // durée en mois (CDD)
+  isRenewable  Boolean      @default(false)
+  renewalCount Int          @default(0) @db.SmallInt
+
+  // Poste et rémunération au moment de signature
+  position     String  @db.VarChar(100)
+  baseSalary   Decimal @db.Decimal(15, 2)
+  departmentId String  @db.Uuid
+
+  // Période d'essai
+  trialPeriodDays  Int?      @db.SmallInt // durée période essai en jours
+  trialEndDate     DateTime? @db.Date
+  trialConfirmedAt DateTime? @db.Timestamptz
+
+  // Spécifique PRESTATAIRE / CONSULTANT
+  serviceDescription String?  @db.Text // Objet de la prestation
+  dailyRate          Decimal? @db.Decimal(15, 2) // TJM si consultant
+  invoicingMode      String?  @db.VarChar(50) // MENSUEL / À_LA_MISSION / FORFAIT
+
+  // Spécifique INTÉRIM
+  interimAgency    String? @db.VarChar(100)
+  interimAgencyRef String? @db.VarChar(50)
+
+  // Statut
+  status ContractStatus @default(ACTIVE)
+
+  // Document PDF du contrat
+  documentUrl String? @db.Text
+
+  // Métadonnées
+  signedAt    DateTime? @db.Timestamptz
+  signedByEmp Boolean   @default(false) // Contrat signé par l'employé ?
+  notes       String?   @db.Text
+  createdBy   String?   @db.Uuid
+
+  createdAt DateTime @default(now()) @db.Timestamptz
+  updatedAt DateTime @updatedAt @db.Timestamptz
+
+
+  //audit 
+
+  chainId            String            @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  rank               Int               @default(1) @db.SmallInt // 1 = contrat initial, 2 = 1er renouvellement…
+  kind               ContractLinkKind  @default(INITIAL)
+  previousContractId String?           @unique @db.Uuid // @unique : un contrat n'a qu'UN successeur
+  previousContract   EmployeeContract? @relation("ContractChain", fields: [previousContractId], references: [id], onDelete: NoAction)
+  nextContract       EmployeeContract? @relation("ContractChain")
+  cddMotif           String?           @db.VarChar(40) // validé côté code (CDD_MOTIFS), pas d'enum → pas de migration pour en ajouter
+  renewalReason      String?           @db.VarChar(255)
+  renewedAt          DateTime?         @db.Timestamptz // date à laquelle un successeur a pris le relais
+  renewedBy          String?           @db.Uuid
+
+  // Relation rupture de contrat
+  rupture ContractRupture?
+
+  @@unique([chainId, rank])
+  @@index([chainId])
+  @@index([employeeId])
+  @@index([companyId])
+  @@index([contractType])
+  @@index([status])
+  @@index([endDate])
+  @@map("employee_contracts")
+}
+
+enum ContractStatus {
+  ACTIVE
+  EXPIRED // CDD arrivé à terme
+  TERMINATED // Rupture anticipée
+  TRIAL // En période d'essai
+  TRIAL_FAILED // Essai non concluant
+  CONVERTED // CDD converti en CDI
+  SUSPENDED // Suspendu (ex: suspension disciplinaire)
+
+  @@map("contract_status")
+}
+
+//module et table de l'audit
+
+enum ContractLinkKind {
+  INITIAL        // premier contrat de la chaîne
+  RENEWAL        // renouvellement d'un CDD
+  CONVERSION_CDI // CDD devenu CDI
+
+  @@map("contract_link_kind")
+}
+
+// ============================================================================
+// 🆕 MODEL 3 : ContractRupture — Gestion complète de la fin de contrat
+// ============================================================================
+
+model ContractRupture {
+  id          String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  contractId  String           @unique @db.Uuid
+  contract    EmployeeContract @relation(fields: [contractId], references: [id], onDelete: Cascade)
+  employeeId  String           @db.Uuid
+  employee    Employee         @relation(fields: [employeeId], references: [id]) // <--- AJOUTE CETTE LIGNE PRÉCISEMENT
+  companyId   String           @db.Uuid
+  company     Company          @relation(fields: [companyId], references: [id])
+  // Type et cause de rupture
+  ruptureType RuptureType
+  ruptureDate DateTime         @db.Date // Date effective de fin
+  noticeGiven DateTime?        @db.Date // Date de remise du préavis
+
+  // Cause détaillée (obligatoire pour licenciement)
+  causeCode   String? @db.VarChar(50) // Ex: "FAUTE_GRAVE", "MOTIF_ECONOMIQUE"
+  causeLabel  String? @db.VarChar(255)
+  causeDetail String? @db.Text // Description complète
+
+  // Préavis
+  noticePeriodDays Int?    @db.SmallInt // Durée légale du préavis en jours
+  noticeWorked     Boolean @default(true) // Préavis effectué ?
+  noticeWaived     Boolean @default(false) // Préavis dispensé (avec indemnité) ?
+
+  // Ancienneté et calculs
+  yearsOfService           Decimal  @db.Decimal(5, 2) // Années d'ancienneté exactes
+  monthsOfService          Int      @db.SmallInt // Mois d'ancienneté
+  lastMonthlyGross         Decimal  @db.Decimal(15, 2) // Dernier salaire brut de référence
+  avgLast3MonthsGross      Decimal? @db.Decimal(15, 2) // Moyenne 3 derniers mois (parfois utilisée)
+  //   // ✅ AJOUTS — Convention collective
+  conventionCode           String?  @db.VarChar(50) // "COMMERCE", "BTP"...
+  avgLast12MonthsGross     Decimal? @db.Decimal(15, 2) // Base congés art.127 CT
+  categorieConventionnelle Int?     @db.SmallInt // Catégorie numérique 1-11
+  indemLicenciementDetail  String?  @db.Text // Détail barème ex: "2 ans × 30%..."
+  indemGratification       Decimal  @default(0) @db.Decimal(15, 2) // Gratification proratisée
+  brutImposable            Decimal  @default(0) @db.Decimal(15, 2) // Brut soumis ITS
+  indemnitesExonerees      Decimal  @default(0) @db.Decimal(15, 2) // Exonérées ITS (lic + congés)
+  alertes                  Json     @default("[]") // Alertes calcul
+
+  // ── INDEMNITÉS (conformes Code du Travail Congo) ──────────────────────────
+  // Indemnité de licenciement (art. 82 Code Travail Congo)
+  //   = ancienneté × taux selon barème
+  indemLicenciement     Decimal @default(0) @db.Decimal(15, 2)
+  indemLicenciementBase String? @db.VarChar(100) // Ex: "1 mois/an pour les 5 premières années"
+
+  // Indemnité compensatrice de préavis (si préavis non effectué)
+  indemPreavis     Decimal @default(0) @db.Decimal(15, 2)
+  indemPreavisDays Int     @default(0) @db.SmallInt
+
+  // Indemnité compensatrice de congés payés (congés non pris)
+  indemConges     Decimal @default(0) @db.Decimal(15, 2)
+  indemCongesDays Decimal @default(0) @db.Decimal(5, 2)
+
+  // Dernier salaire proratisé (jours travaillés ce mois)
+  dernierSalaireProrata Decimal @default(0) @db.Decimal(15, 2)
+  dernierSalaireDays    Int     @default(0) @db.SmallInt
+
+  // Autres sommes dues (primes, remboursements...)
+  autresSommesDues   Decimal @default(0) @db.Decimal(15, 2)
+  autresSommesDetail String? @db.Text
+
+  // Total net à payer lors de la rupture
+  totalBrut      Decimal @default(0) @db.Decimal(15, 2)
+  totalNet       Decimal @default(0) @db.Decimal(15, 2) // Après déductions éventuelles
+  cnssApplicable Boolean @default(false) // Indemnités soumises à CNSS ?
+  itsApplicable  Boolean @default(false) // Indemnités soumises à ITS ?
+
+  // ── DOCUMENTS ─────────────────────────────────────────────────────────────
+  lettreNotificationUrl String? @db.Text // Lettre de licenciement / démission
+  conventionRuptureUrl  String? @db.Text // Convention rupture conventionnelle
+  recuSoldeUrl          String? @db.Text // Reçu pour solde de tout compte
+
+  cnssAttestationUrl String? // HTML attestation CNSS stocké
+  cnssNotifiedAt     DateTime? // Date envoi effectif à la CNSS
+  // ── WORKFLOW ──────────────────────────────────────────────────────────────
+  status             RuptureStatus @default(EN_COURS)
+  paidAt             DateTime?     @db.Timestamptz
+  paymentRef         String?       @db.VarChar(100)
+
+  processedBy String? @db.Uuid
+  notes       String? @db.Text
+
+  createdAt DateTime @default(now()) @db.Timestamptz
+  updatedAt DateTime @updatedAt @db.Timestamptz
+
+  @@index([employeeId])
+  @@index([companyId])
+  @@index([ruptureType])
+  @@index([status])
+  @@index([ruptureDate])
+  @@map("contract_ruptures")
+}
+
+enum RuptureType {
+  DEMISSION // Démission (initiative employé)
+  LICENCIEMENT_FAUTE_SIMPLE // Licenciement pour faute simple
+  LICENCIEMENT_FAUTE_GRAVE // Licenciement pour faute grave (pas d'indemnités)
+  LICENCIEMENT_FAUTE_LOURDE // Faute lourde (idem + dommages)
+  LICENCIEMENT_ECONOMIQUE // Motif économique
+  RUPTURE_CONVENTIONNELLE // Rupture d'un commun accord
+  FIN_CDD // CDD arrivé à terme normalement
+  FIN_PERIODE_ESSAI // Rupture pendant/à la fin de l'essai
+  RETRAITE // Départ à la retraite
+  DECES // Décès de l'employé
+  FORCE_MAJEURE // Cas de force majeure
+  INVALIDITE // Inaptitude / invalidité reconnue
+
+  @@map("rupture_type")
+}
+
+enum RuptureStatus {
+  EN_COURS // En cours de traitement
+  CALCULE // Indemnités calculées, en attente validation
+  VALIDE // Validé par RH/Admin
+  PAYE // Solde de tout compte payé
+  CONTESTE // Contesté par l'employé
+  ARCHIVE // Archivé
+
+  @@map("rupture_status")
+}
+
+model PSEProcedure {
+  id        String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId String  @db.Uuid
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  createdBy String  @db.Uuid
+
+  // Statut : OUVERT | EN_COURS | CLOTURE | ANNULE
+  status            String  @default("OUVERT") @db.VarChar(20)
+  motif             String  @db.Text
+  nbPostesSupprimes Int     @db.SmallInt
+  notes             String? @db.Text
+
+  // Étapes légales — Json array
+  // [{ label: string, done: boolean, requis: boolean, date?: string }]
+  etapes Json @default("[]")
+
+  // Dates clés
+  dateOuverture              DateTime  @default(now()) @db.Timestamptz
+  dateNotificationInspection DateTime? @db.Timestamptz
+  dateReunionDP              DateTime? @db.Timestamptz
+  dateCloture                DateTime? @db.Timestamptz
+
+  createdAt DateTime @default(now()) @db.Timestamptz
+  updatedAt DateTime @updatedAt @db.Timestamptz
+
+  salariesConcernes PSESalarie[]
+
+  @@index([companyId])
+  @@index([status])
+  @@map("pse_procedures")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// [NOUVEAU MODÈLE] PSESalarie — coller juste après PSEProcedure
+// ─────────────────────────────────────────────────────────────────────────────
+
+model PSESalarie {
+  id         String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  pseId      String       @db.Uuid
+  pse        PSEProcedure @relation(fields: [pseId], references: [id], onDelete: Cascade)
+  employeeId String       @db.Uuid
+  employee   Employee     @relation(fields: [employeeId], references: [id])
+
+  // PREVU | CONFIRME | MAINTENU
+  statut    String   @default("PREVU") @db.VarChar(20)
+  createdAt DateTime @default(now()) @db.Timestamptz
+
+  @@unique([pseId, employeeId])
+  @@index([pseId])
+  @@index([employeeId])
+  @@map("pse_salaries")
+}
+
+model GeneratedContract {
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+
+  companyId String  @db.Uuid
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  employeeId String   @db.Uuid
+  employee   Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+
+  kind             GeneratedContractKind
+  contractDuration String                  @default("INDETERMINEE") @db.VarChar(20)
+  status           GeneratedContractStatus @default(GENERE)
+
+  startDate       DateTime? @db.Date
+  endDate         DateTime? @db.Date
+  trialPeriodText String?   @db.VarChar(100)
+
+  snapshot Json
+
+  baseSalary         Decimal @db.Decimal(15, 2)
+  overSalary         Decimal @default(0) @db.Decimal(15, 2)
+  overtimeFlat       Decimal @default(0) @db.Decimal(15, 2)
+  bonuses            Json    @default("[]")
+  totalGross         Decimal @db.Decimal(15, 2)
+  cnssDeduction      Decimal @default(0) @db.Decimal(15, 2)
+  itsDeduction       Decimal @default(0) @db.Decimal(15, 2)
+  tolDeduction       Decimal @default(0) @db.Decimal(15, 2)
+  transportAllowance Decimal @default(0) @db.Decimal(15, 2)
+  transportIndemnity Decimal @default(0) @db.Decimal(15, 2)
+  allowances         Json    @default("[]")
+  netPay             Decimal @db.Decimal(15, 2)
+
+  fileUrl  String? @db.Text
+  fileName String? @db.VarChar(255)
+
+  generatedByUserId String?
+  generatedAt       DateTime @default(now()) @db.Timestamptz
+  updatedAt         DateTime @updatedAt @db.Timestamptz
+
+  @@index([companyId])
+  @@index([employeeId])
+  @@index([status])
+  @@map("generated_contracts")
+}
+
+enum GeneratedContractKind {
+  CONTRAT_TRAVAIL
+  PRESTATION_SERVICES
+  CONSULTANT
+  STAGE
+}
+
+enum GeneratedContractStatus {
+  GENERE
+  ARCHIVE
+}
+
+// ===========================================================================
+// 📂 SECTION 05 — PAIE
+// Bulletins, paramètres de paie, taxes, CNSS, cumuls annuels, impayés
+// ===========================================================================
 
 model Payroll {
   id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
@@ -782,10 +1365,6 @@ enum PayrollItemType {
   @@map("payroll_item_type")
 }
 
-// ============================================================================
-// 6️⃣ PARAMÈTRES DE PAIE (SOURCE DE VÉRITÉ)
-// ============================================================================
-
 model PayrollSettings {
   id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
 
@@ -856,9 +1435,870 @@ model PayrollSettings {
   @@map("payroll_settings")
 }
 
+model BulletinTemplate {
+  id        String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId String  @unique @db.Uuid
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  // Stocke la config complète en JSON — supporte mode "template" ET mode "canvas"
+  // Mode template : { mode:"template", templateId, style, blocks }
+  // Mode canvas   : { mode:"canvas", canvasLayout: { primaryColor, blocks:[{id,type,variable,...}] } }
+  config Json @default("{}")
+
+  createdAt DateTime @default(now()) @db.Timestamptz
+  updatedAt DateTime @updatedAt @db.Timestamptz
+
+  @@index([companyId])
+  @@map("bulletin_templates")
+}
+
+model YtdCheckpoint {
+  id            String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  employeeId    String   @db.Uuid
+  employee      Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  effectiveDate DateTime @db.Date
+  brut          Decimal  @default(0) @db.Decimal(15, 2)
+  netImp        Decimal  @default(0) @db.Decimal(15, 2)
+  netSalary     Decimal  @default(0) @db.Decimal(15, 2)
+  chargesSal    Decimal  @default(0) @db.Decimal(15, 2)
+  chargesPat    Decimal  @default(0) @db.Decimal(15, 2)
+  createdAt     DateTime @default(now()) @db.Timestamptz
+
+  @@index([employeeId, effectiveDate])
+  @@map("ytd_checkpoints")
+}
+
 // ============================================================================
-// 7️⃣ CONGÉS
+// 💼 TAXES & COTISATIONS CONFIGURABLES PAR ENTREPRISE
 // ============================================================================
+
+model CompanyTax {
+  id        String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId String  @db.Uuid
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  // Identité
+  name        String  @db.VarChar(100) // "TOL", "CAMU", "Taxe apprentissage"
+  code        String  @db.VarChar(20) // "TOL", "CAMU", "TAX_APP"
+  description String? @db.Text
+
+  // Taux — salarié
+  employeeRate  Decimal @default(0) @db.Decimal(6, 4) // ex: 0.0100 = 1%
+  fixedEmployee Decimal @default(0) @db.Decimal(15, 2) // ex: 1000 = TOL fixe
+
+  // Taux — employeur
+  employerRate  Decimal @default(0) @db.Decimal(6, 4) // ex: 0.0100 = 1%
+  fixedEmployer Decimal @default(0) @db.Decimal(15, 2)
+
+  // Base de calcul
+  baseType   CompanyTaxBase @default(GROSS)
+  hasCeiling Boolean        @default(false)
+  ceiling    Decimal?       @db.Decimal(15, 2)
+
+  minSalaryThreshold Decimal?            @db.Decimal(15, 2)
+  // ELIGIBILITY (défaut) = filtre binaire : taxe ignorée si brut < seuil
+  // EXCESS_ONLY           = taxe sur l'excédent : base = max(0, base − seuil)
+  //                         ex CAMU solidarité : (BI − 500 000) × 0,5%
+  thresholdType      CompanyTaxThreshold @default(ELIGIBILITY)
+
+  // Types de contrat concernés (défaut : CDI + CDD)
+  applicableContractTypes ContractType[] @default([CDI, CDD])
+
+  // Périodicité : true = chaque mois ; false = uniquement applicableMonth/applicableYear
+  isRecurring     Boolean @default(true)
+  applicableMonth Int?    @db.SmallInt // 1-12
+  applicableYear  Int?    @db.SmallInt
+
+  // Activation
+  isActive Boolean @default(true)
+
+  createdAt DateTime @default(now()) @db.Timestamptz
+  updatedAt DateTime @updatedAt @db.Timestamptz
+
+  @@index([companyId])
+  @@index([isActive])
+  @@index([code])
+  @@map("company_taxes")
+}
+
+enum CompanyTaxThreshold {
+  ELIGIBILITY // Filtre binaire : taxe ignorée si brut < seuil (défaut)
+  EXCESS_ONLY // Taxe sur l'excédent : base = max(0, base − seuil)
+}
+
+enum CompanyTaxBase {
+  GROSS // Brut total
+  TAXABLE // SBT (brut − CNSS)
+  NET_IMPOSABLE // RNI (après abattement)
+  FIXED // Montant fixe (ex: TOL = 1 000 F)
+
+  @@map("company_tax_base")
+}
+
+model CnssDeclaration {
+  id        String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId String  @db.Uuid
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  month Int @db.SmallInt // 1-12
+  year  Int @db.SmallInt
+
+  // Données agrégées de la déclaration
+  effectif       Int     @db.SmallInt // Nombre de salariés déclarés
+  masseSalariale Decimal @db.Decimal(15, 2) // Masse salariale brute totale
+
+  // Cotisations CNSS
+  cotisationSalariale Decimal @db.Decimal(15, 2) // Part salarié (pension 4%)
+  cotisationPatronale Decimal @db.Decimal(15, 2) // Part employeur (pension 8% + famille 10.03% + AT 2.25%)
+  cotisationTotale    Decimal @db.Decimal(15, 2) // Total CNSS = salariale + patronale
+
+  // TUS
+  tusCnss Decimal @db.Decimal(15, 2) // TUS → CNSS (5.475%)
+  tusDgi  Decimal @db.Decimal(15, 2) // TUS → DGI (2.025%)
+
+  // Montants à verser
+  totalAVerserCnss Decimal @db.Decimal(15, 2) // cotisationTotale + tusCnss
+  totalAVerserDgi  Decimal @db.Decimal(15, 2) // tusDgi
+
+  // Statut et workflow
+  status           CnssDeclarationStatus @default(A_DECLARER)
+  declaredAt       DateTime?             @db.Timestamptz // Date effective de dépôt
+  paidAt           DateTime?             @db.Timestamptz // Date de paiement
+  paymentReference String?               @db.VarChar(100) // Référence virement/chèque
+  paymentMode      String?               @db.VarChar(50) // VIREMENT / CHEQUE / GUICHET
+
+  // Pénalités (si retard)
+  isLate        Boolean @default(false)
+  monthsLate    Int     @default(0) @db.SmallInt
+  penaltyAmount Decimal @default(0) @db.Decimal(15, 2)
+
+  // Métadonnées export
+  lastExportedAt DateTime? @db.Timestamptz
+  exportedByUser String?   @db.Uuid
+  warnings       String[]  @default([]) // Ex: ["Dupont: N° CNSS manquant"]
+
+  // Qui a déclaré
+  declaredBy String? @db.Uuid
+  notes      String? @db.Text
+
+  createdAt DateTime @default(now()) @db.Timestamptz
+  updatedAt DateTime @updatedAt @db.Timestamptz
+
+  // Ligne par salarié (snapshot de la déclaration)
+  lines CnssDeclarationLine[]
+
+  @@unique([companyId, month, year])
+  @@index([companyId])
+  @@index([month, year])
+  @@index([status])
+  @@map("cnss_declarations")
+}
+
+model CnssDeclarationLine {
+  id            String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  declarationId String          @db.Uuid
+  declaration   CnssDeclaration @relation(fields: [declarationId], references: [id], onDelete: Cascade)
+
+  employeeId     String       @db.Uuid
+  employee       Employee     @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  employeeNumber String       @db.VarChar(50)
+  employeeName   String       @db.VarChar(200)
+  cnssNumber     String?      @db.VarChar(50)
+  contractType   ContractType
+
+  brutMensuel      Decimal @db.Decimal(15, 2)
+  pensionSalarial  Decimal @db.Decimal(15, 2) // 4% plaf. 1 200 000
+  pensionPatronal  Decimal @db.Decimal(15, 2) // 8% plaf. 1 200 000
+  familyPatronal   Decimal @db.Decimal(15, 2) // 10.03% plaf. 600 000
+  accidentPatronal Decimal @db.Decimal(15, 2) // 2.25% plaf. 600 000
+  totalCnss        Decimal @db.Decimal(15, 2)
+  tusCnss          Decimal @db.Decimal(15, 2)
+  tusDgi           Decimal @db.Decimal(15, 2)
+
+  @@index([declarationId])
+  @@index([employeeId])
+  @@map("cnss_declaration_lines")
+}
+
+enum CnssDeclarationStatus {
+  A_DECLARER // Bulletins disponibles, déclaration non faite
+  DECLAREE // Déposée à la CNSS (en attente paiement)
+  PAYEE // Payée et quittancée
+  EN_RETARD // Date limite dépassée
+  REGULARISEE // Retard régularisé avec pénalités
+
+  @@map("cnss_declaration_status")
+}
+
+// ============================================================================
+// 🆕 MODEL 4 : UnpaidSalaryAlert — Suivi salaires impayés
+// ============================================================================
+
+model UnpaidSalaryAlert {
+  id        String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId String  @db.Uuid
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  // Période non payée
+  month Int @db.SmallInt
+  year  Int @db.SmallInt
+
+  // Montants
+  totalNetDu    Decimal @db.Decimal(15, 2) // Total net à payer ce mois
+  employeeCount Int     @db.SmallInt // Nombre d'employés concernés
+
+  // Statut
+  status      UnpaidStatus @default(EN_ATTENTE)
+  daysOverdue Int          @default(0) @db.SmallInt // Jours de retard
+
+  // Alerte envoyée
+  alertSentAt DateTime? @db.Timestamptz
+  alertLevel  Int       @default(1) @db.SmallInt // 1=info, 2=warn, 3=urgent
+
+  // Régularisation
+  partiallyPaidAt DateTime? @db.Timestamptz
+  partialAmount   Decimal?  @db.Decimal(15, 2)
+  fullyPaidAt     DateTime? @db.Timestamptz
+  notes           String?   @db.Text
+
+  createdAt DateTime @default(now()) @db.Timestamptz
+  updatedAt DateTime @updatedAt @db.Timestamptz
+
+  @@unique([companyId, month, year])
+  @@index([companyId])
+  @@index([status])
+  @@map("unpaid_salary_alerts")
+}
+
+enum UnpaidStatus {
+  EN_ATTENTE // Bulletin généré, pas encore payé
+  PAIEMENT_PARTIEL // Paiement partiel reçu
+  PAYE // Entièrement payé
+  EN_LITIGE // Contesté / litige
+
+  @@map("unpaid_status")
+}
+
+// ===========================================================================
+// 📂 SECTION 06 — PRIMES & CONVENTIONS COLLECTIVES
+// Primes employés, modèles de primes, règles de conventions, échelons
+// ===========================================================================
+
+// ============================================================================
+// 💰 PRIMES EMPLOYÉS (MANUEL + AUTO)
+// ============================================================================
+
+model EmployeeBonus {
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+
+  employeeId String   @db.Uuid
+  employee   Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+
+  // 🏷️ TYPE DE PRIME
+  bonusType String @db.VarChar(100) // "Prime de transport", "Prime d'ancienneté"
+
+  // 🔧 MODE DE CALCUL
+  calculationType BonusCalculationType @default(FIXED_AMOUNT)
+
+  // 💵 VALEURS
+  fixedAmount     Decimal?   @db.Decimal(15, 2) // Montant fixe (ex: 20 000 FCFA)
+  percentage      Decimal?   @db.Decimal(5, 2) // Pourcentage (ex: 5.00 pour 5%)
+  baseCalculation BonusBase? @default(BASE_SALARY) // BASE_SALARY ou GROSS_SALARY
+
+  // 📅 FRÉQUENCE
+  frequency BonusFrequency @default(MONTHLY)
+
+  // 🤖 ORIGINE
+  isAutomatic Boolean @default(false) // true = calculé par convention, false = manuel
+  ruleId      String? @db.Uuid // Lien vers la règle de convention (si auto)
+
+  // 🟢 ACTIVATION
+  isActive  Boolean   @default(true)
+  startDate DateTime  @default(now()) @db.Date
+  endDate   DateTime? @db.Date
+
+  // 📝 NOTES
+  notes String? @db.Text
+
+  createdAt DateTime @default(now()) @db.Timestamptz
+  updatedAt DateTime @updatedAt @db.Timestamptz
+
+  isTaxable       Boolean       @default(true)
+  isCnss          Boolean       @default(true)
+  isProratized    Boolean       @default(false) // 🆕 Prime réduite si absence
+  fiscalType      String?       @db.VarChar(20)
+  unitAmount      Decimal?      @db.Decimal(15, 2)
+  quantityMode    String?       @db.VarChar(20)
+  defaultQuantity Decimal?      @db.Decimal(8, 2)
+  isInLeaveBase   Boolean       @default(true) // 🆕 Incluse dans moyenne 12 mois
+  bonusCategory   BonusCategory @default(PERFORMANCE) // Catégorie principale
+
+  bonusTemplateId String? @db.Uuid
+
+  monthlyQuantities BonusMonthlyQuantity[]
+  bonusTemplate     BonusTemplate?         @relation(fields: [bonusTemplateId], references: [id])
+
+  @@index([employeeId])
+  @@index([isActive])
+  @@index([isAutomatic])
+  @@index([frequency])
+  @@map("employee_bonuses")
+}
+
+// 🔧 Type de calcul
+
+enum BonusCalculationType {
+  FIXED_AMOUNT // Montant fixe (20 000 FCFA)
+  PERCENTAGE // Pourcentage (5% du salaire)
+
+  @@map("bonus_calculation_type")
+}
+
+// 📊 Base de calcul (pour les pourcentages)
+
+enum BonusBase {
+  BASE_SALARY // Salaire de base
+  GROSS_SALARY // Salaire brut
+
+  @@map("bonus_base")
+}
+
+// 📅 Fréquence de la prime
+
+enum BonusFrequency {
+  MONTHLY // Chaque mois
+  ANNUAL // Une fois par an (ex: 13ème mois)
+  ONE_TIME // Une seule fois (prime exceptionnelle)
+
+  @@map("bonus_frequency")
+}
+
+enum BonusCategory {
+  FRAIS // Indemnité représentative de frais (transport, panier, logement)
+  POSTE // Liée au poste/ancienneté/diplôme — maintenue à 100%
+  PERFORMANCE // Liée à présence/rendement — proratisable
+  EXCEPTIONNELLE // Ponctuelle (13e mois, prime résultat annuel)
+
+  @@map("bonus_category")
+}
+
+model BonusTemplate {
+  id                String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId         String   @db.Uuid
+  name              String
+  defaultAmount     Decimal? @db.Decimal(15, 2)
+  defaultPercentage Decimal? @db.Decimal(5, 2)
+  baseCalculation   String? // "BASE_SALARY" | "GROSS_SALARY"
+  isRecurring       Boolean  @default(true)
+  isTaxable         Boolean  @default(true)
+  isCnss            Boolean  @default(true)
+  isNature          Boolean  @default(false)
+  description       String?
+  isActive          Boolean  @default(true)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  fiscalType      String?  @db.VarChar(20)
+  unitAmount      Decimal? @db.Decimal(15, 2)
+  quantityMode    String?  @db.VarChar(20)
+  defaultQuantity Decimal? @db.Decimal(8, 2)
+
+  isProratized  Boolean       @default(false)
+  isInLeaveBase Boolean       @default(true)
+  bonusCategory BonusCategory @default(PERFORMANCE)
+
+  company         Company         @relation(fields: [companyId], references: [id])
+  employeeBonuses EmployeeBonus[]
+
+  @@index([companyId])
+}
+
+model BonusMonthlyQuantity {
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+
+  employeeBonusId String        @db.Uuid
+  employeeBonus   EmployeeBonus @relation(fields: [employeeBonusId], references: [id], onDelete: Cascade)
+
+  month Int @db.SmallInt // 1-12
+  year  Int @db.SmallInt // ex: 2026
+
+  /// Quantité saisie (ex: 7 repas, 3 déplacements, 5 opérations)
+  quantity Decimal @db.Decimal(8, 2)
+
+  /// Montant pré-calculé = unitAmount × quantity (stocké pour audit)
+  computedAmount Decimal @db.Decimal(15, 2)
+
+  /// Note optionnelle (ex: "7 repas pris en avril")
+  note String? @db.VarChar(200)
+
+  createdAt DateTime @default(now()) @db.Timestamptz
+  updatedAt DateTime @updatedAt @db.Timestamptz
+
+  @@unique([employeeBonusId, month, year])
+  @@index([employeeBonusId])
+  @@map("bonus_monthly_quantities")
+}
+
+// ============================================================================
+// 🤖 RÈGLES DES CONVENTIONS COLLECTIVES (AUTO)
+// ============================================================================
+
+model CollectiveAgreementRule {
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+
+  companyId String  @db.Uuid
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  // 🏷️ CONVENTION
+  agreementCode String @db.VarChar(50) // "BTP", "COMMERCE", "BANQUES"
+
+  // 🎯 TYPE DE RÈGLE
+  ruleType CollectiveAgreementRuleType
+
+  // 📋 CATÉGORIE CONCERNÉE (optionnel)
+  professionalCategory String? @db.VarChar(50) // "Cat.3 Éch.4", "A1" (null = toutes)
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // RÈGLE: SALAIRE MINIMUM
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  minimumSalary Decimal? @db.Decimal(15, 2)
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // RÈGLE: PRIME AUTOMATIQUE
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  bonusType            String?    @db.VarChar(100) // "Prime d'ancienneté"
+  minMonthsOfService   Int?       @db.SmallInt // Ex: 24 mois = 2 ans
+  maxMonthsOfService   Int?       @db.SmallInt // Ex: 60 mois = 5 ans (plafond)
+  bonusPercentage      Decimal?   @db.Decimal(5, 2) // Ex: 5.00 pour 5%
+  bonusFixedAmount     Decimal?   @db.Decimal(15, 2)
+  bonusBaseCalculation BonusBase? @default(BASE_SALARY)
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // RÈGLE: CONGÉS SUPPLÉMENTAIRES
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  additionalLeaveDays Int? @db.SmallInt
+
+  // 🟢 ACTIVATION
+  isActive Boolean @default(true)
+
+  createdAt DateTime @default(now()) @db.Timestamptz
+  updatedAt DateTime @updatedAt @db.Timestamptz
+
+  @@index([companyId])
+  @@index([agreementCode])
+  @@index([ruleType])
+  @@index([professionalCategory])
+  @@index([isActive])
+  @@map("collective_agreement_rules")
+}
+
+// 🎯 Types de règles possibles
+
+enum CollectiveAgreementRuleType {
+  MINIMUM_SALARY // Salaire minimum par catégorie
+  AUTOMATIC_BONUS // Prime automatique (ancienneté, transport...)
+  ADDITIONAL_LEAVE // Jours de congé supplémentaires
+  OVERTIME_RATE // Taux heures sup personnalisé
+
+  @@map("collective_agreement_rule_type")
+}
+
+// ============================================================================
+// 📚 BIBLIOTHÈQUE DES CONVENTIONS PRÉDÉFINIES
+// ============================================================================
+
+model PredefinedConvention {
+  id          String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  code        String  @unique @db.VarChar(50) // "BTP", "COMMERCE"
+  name        String  @db.VarChar(200) // "Bâtiment et Travaux Publics"
+  description String? @db.Text
+  country     String  @default("CG") @db.Char(2)
+
+  // 📄 DOCUMENT OFFICIEL
+  pdfUrl String? @db.Text
+
+  // 📅 DATES
+  effectiveDate DateTime @db.Date
+  lastUpdated   DateTime @default(now()) @db.Timestamptz
+
+  // 🎯 CATÉGORIES PROFESSIONNELLES
+  categories Json // Array de { code: "A1", label: "Manœuvre", minSalary: 95000 }
+
+  // 🤖 RÈGLES PAR DÉFAUT
+  defaultRules Json // Array de règles standard pour cette convention
+
+  createdAt DateTime @default(now()) @db.Timestamptz
+  updatedAt DateTime @updatedAt @db.Timestamptz
+
+  @@index([code])
+  @@index([country])
+  @@map("predefined_conventions")
+}
+
+model EchelonSuggestion {
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+
+  employeeId String   @db.Uuid
+  employee   Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  companyId  String   @db.Uuid
+  company    Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  conventionCode String @db.VarChar(50)
+
+  currentEchelonIndex   Int
+  suggestedEchelonIndex Int
+
+  yearsCompleted  Int
+  anniversaryDate DateTime @db.Date
+
+  scheduledNotifyDate DateTime  @db.Date
+  notifiedAt          DateTime? @db.Timestamptz
+
+  status      EchelonSuggestionStatus @default(PENDING)
+  decidedAt   DateTime?               @db.Timestamptz
+  decidedById String?                 @db.Uuid
+
+  createdAt DateTime @default(now()) @db.Timestamptz
+  updatedAt DateTime @updatedAt @db.Timestamptz
+
+  @@index([companyId, status])
+  @@index([employeeId, status])
+  @@index([scheduledNotifyDate, notifiedAt])
+  @@map("echelon_suggestions")
+}
+
+enum EchelonSuggestionStatus {
+  PENDING
+  ACCEPTED
+  REJECTED
+
+  @@map("echelon_suggestion_status")
+}
+
+// ===========================================================================
+// 📂 SECTION 07 — PRÊTS, AVANCES & RETENUES
+// Prêts, avances, amendements de dette, retenues entreprise et remboursements
+// ===========================================================================
+
+model Loan {
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+
+  employeeId String   @db.Uuid
+  employee   Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+
+  amount           Decimal     @db.Decimal(15, 2)
+  monthlyRepayment Decimal     @db.Decimal(15, 2)
+  remainingBalance Decimal     @db.Decimal(15, 2)
+  nature           LoanNature? // ← à ajouter (nullable
+  attachmentUrl    String?     @db.Text // ← ajouté
+
+  startDate DateTime @db.Date
+  endDate   DateTime @db.Date
+
+  status LoanStatus @default(ACTIVE)
+  type   LoanType   @default(ARGENT)
+
+  reason            String?   @db.Text
+  approvedBy        String?   @db.Uuid
+  approvedAt        DateTime? @db.Timestamptz
+  requestedByUserId String?   @db.Uuid
+  recoverViaPayroll Boolean   @default(true)
+
+  drhDecision  ApprovalDecision?
+  drhDecidedBy String?           @db.Uuid
+  drhDecidedAt DateTime?         @db.Timestamptz
+
+  dgDecision  ApprovalDecision?
+  dgDecidedBy String?           @db.Uuid
+  dgDecidedAt DateTime?         @db.Timestamptz
+
+  // Validation désormais PARALLÈLE (DRH et DG reçoivent en même temps, le
+  // premier présent valide/refuse) — drhDecision/dgDecision sont donc
+  // toujours renseignés ensemble avec la même valeur (conservés pour la
+  // fiche imprimable qui a 2 cases de signature). decidedByRole retient la
+  // casquette (DRH ou DG) de la personne qui a effectivement tranché, pour
+  // affichage/traçabilité dans l'historique.
+  decidedByRole String? @db.VarChar(10)
+
+  rejectionReason       String?   @db.Text
+  notes                 String?   @db.Text
+  printAuthorized       Boolean   @default(false)
+  printAuthorizedBy     String?   @db.Uuid
+  printAuthorizedByUser User?     @relation("LoanPrintAuthorizedBy", fields: [printAuthorizedBy], references: [id], onDelete: SetNull)
+  printAuthorizedAt     DateTime? @db.Timestamptz
+
+  createdAt DateTime @default(now()) @db.Timestamptz
+  updatedAt DateTime @updatedAt @db.Timestamptz
+
+  repaymentLogs LoanRepaymentLog[]
+
+    // Traçabilité des modifications RH/Admin
+  requestedAmount           Decimal?  @db.Decimal(15, 2)
+  requestedMonthlyRepayment Decimal?  @db.Decimal(15, 2)
+  amountModifiedBy          String?   @db.Uuid
+  amountModifiedAt          DateTime? @db.Timestamptz
+  amendments                DebtAmendment[]
+
+  @@index([employeeId])
+  @@index([status])
+  @@map("loans")
+}
+
+enum LoanNature {
+  SOCIAL
+  SCOLARITE
+  LOGEMENT
+  EXCEPTIONNEL
+  AUTRE
+
+  @@map("loan_nature")
+}
+
+enum LoanStatus {
+  PENDING
+  PENDING_DG // DRH a dit oui, en attente de la décision du Directeur Général
+  ACTIVE
+  PAID
+  REJECTED // refusé par le DRH ou le DG
+  CANCELLED
+
+  @@map("loan_status")
+}
+
+enum LoanType {
+  ARGENT
+  MARCHANDISE
+  AUTRE
+
+  @@map("loan_type")
+}
+
+enum ApprovalDecision {
+  OUI
+  NON
+
+  @@map("approval_decision")
+}
+
+enum RepaymentMethod {
+  PAYROLL // déduit automatiquement sur le bulletin
+  CASH // payé en espèces / présentiel, saisi manuellement
+
+  @@map("repayment_method")
+}
+
+model LoanRepaymentLog {
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+
+  loanId String @db.Uuid
+  loan   Loan   @relation(fields: [loanId], references: [id], onDelete: Cascade)
+
+  month Int @db.SmallInt
+  year  Int @db.SmallInt
+
+  amount Decimal         @db.Decimal(15, 2)
+  method RepaymentMethod
+
+  recordedBy String?  @db.Uuid
+  recordedAt DateTime @default(now()) @db.Timestamptz
+
+  @@map("loan_repayment_logs")
+}
+
+model Advance {
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+
+  employeeId String   @db.Uuid
+  employee   Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+
+  amount Decimal @db.Decimal(15, 2)
+
+  month       Int @db.SmallInt
+  year        Int @db.SmallInt
+  deductMonth Int @db.SmallInt
+  deductYear  Int @db.SmallInt
+
+  status   AdvanceStatus @default(PENDING)
+  deducted Boolean       @default(false)
+
+  // Solde restant — permet le remboursement PARTIEL en espèces (comme les
+  // prêts), au lieu du seul "tout payer d'un coup" d'avant.
+  remainingBalance Decimal               @default(0) @db.Decimal(15, 2)
+  repaymentLogs    AdvanceRepaymentLog[]
+
+  requestedByUserId String? @db.Uuid
+  recoverViaPayroll Boolean @default(true)
+
+  rejectedBy      String?   @db.Uuid
+  rejectedAt      DateTime? @db.Timestamptz
+  rejectionReason String?   @db.Text
+
+  approvedBy String?   @db.Uuid
+  approvedAt DateTime? @db.Timestamptz
+
+  reason                String?   @db.Text
+  printAuthorized       Boolean   @default(false)
+  printAuthorizedBy     String?   @db.Uuid
+  printAuthorizedByUser User?     @relation("AdvancePrintAuthorizedBy", fields: [printAuthorizedBy], references: [id], onDelete: SetNull)
+  printAuthorizedAt     DateTime? @db.Timestamptz
+
+  createdAt DateTime @default(now()) @db.Timestamptz
+  updatedAt DateTime @updatedAt @db.Timestamptz
+
+    // Traçabilité des modifications RH/Admin
+  requestedAmount  Decimal?        @db.Decimal(15, 2)
+  amountModifiedBy String?         @db.Uuid
+  amountModifiedAt DateTime?       @db.Timestamptz
+  amendments       DebtAmendment[]
+
+  @@index([employeeId])
+  @@index([status])
+  @@index([deductMonth, deductYear])
+  @@map("advances")
+}
+
+enum AdvanceStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  PAID
+  DEDUCTED
+  CANCELLED
+
+  @@map("advance_status")
+}
+
+// ============================================================================
+// ➕ AJOUT : MODÈLE ADVANCE REPAYMENT LOG
+// ============================================================================
+
+model AdvanceRepaymentLog {
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+
+  advanceId String  @db.Uuid
+  advance   Advance @relation(fields: [advanceId], references: [id], onDelete: Cascade)
+
+  month  Int             @db.SmallInt
+  year   Int             @db.SmallInt
+  method RepaymentMethod @default(CASH)
+
+  amount    Decimal  @db.Decimal(15, 2)
+  payrollId String?  @db.Uuid
+  payroll   Payroll? @relation(fields: [payrollId], references: [id], onDelete: SetNull)
+
+  recordedBy String? @db.Uuid
+
+  notes     String?  @db.Text
+  createdAt DateTime @default(now()) @db.Timestamptz
+  updatedAt DateTime @updatedAt @db.Timestamptz
+
+  @@index([advanceId])
+  @@index([payrollId])
+  @@map("advance_repayment_logs")
+}
+
+/// Historique des modifications d'un prêt ou d'une avance par RH/Admin
+
+model DebtAmendment {
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+
+  loanId    String?  @db.Uuid
+  loan      Loan?    @relation(fields: [loanId], references: [id], onDelete: Cascade)
+  advanceId String?  @db.Uuid
+  advance   Advance? @relation(fields: [advanceId], references: [id], onDelete: Cascade)
+
+  oldAmount Decimal? @db.Decimal(15, 2)
+  newAmount Decimal? @db.Decimal(15, 2)
+
+  oldMonthlyRepayment Decimal? @db.Decimal(15, 2)
+  newMonthlyRepayment Decimal? @db.Decimal(15, 2)
+
+  oldDeductMonth Int? @db.SmallInt
+  newDeductMonth Int? @db.SmallInt
+  oldDeductYear  Int? @db.SmallInt
+  newDeductYear  Int? @db.SmallInt
+
+  modifiedBy     String? @db.Uuid
+  modifiedByName String? @db.VarChar(200)
+  modifiedByRole String? @db.VarChar(30)
+
+  createdAt DateTime @default(now()) @db.Timestamptz
+
+  @@index([loanId])
+  @@index([advanceId])
+  @@map("debt_amendments")
+}
+
+model CompanyDeduction {
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+
+  employeeId String   @db.Uuid
+  employee   Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+
+  companyId String  @db.Uuid
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  label  String  @db.VarChar(150) // "Pharmacie", "Cantine", "Casse matériel"... libre
+  amount Decimal @db.Decimal(15, 2) // montant total dû, fixé à la création — ne change jamais
+
+  // ✅ NOUVEAU — solde restant réellement dû, décrémenté à chaque règlement
+  // (espèces ou paie). Initialisé à `amount` à la création.
+  remainingBalance Decimal @db.Decimal(15, 2)
+
+  // ✅ NOUVEAU — montant que la paie retire à CHAQUE génération tant qu'il
+  // reste un solde (comme la mensualité d'un prêt). Si null : tout le solde
+  // restant part en une fois à la prochaine paie.
+  monthlyDeduction Decimal? @db.Decimal(15, 2)
+
+  month Int @db.SmallInt // référence de création — la paie ne filtre plus dessus
+  year  Int @db.SmallInt
+
+  recoverViaPayroll Boolean                @default(true)
+  status            CompanyDeductionStatus @default(PENDING)
+
+  recordedBy String @db.Uuid
+
+  createdAt DateTime @default(now()) @db.Timestamptz
+  updatedAt DateTime @updatedAt @db.Timestamptz
+
+  repaymentLogs CompanyDeductionRepaymentLog[]
+
+  @@index([employeeId])
+  @@index([companyId, month, year])
+  @@map("company_deductions")
+}
+
+enum CompanyDeductionStatus {
+  PENDING // en attente d'être déduite sur une paie
+  DEDUCTED // déjà déduite
+  PAID
+  CANCELLED
+
+  @@map("company_deduction_status")
+}
+
+model CompanyDeductionRepaymentLog {
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+
+  companyDeductionId String           @db.Uuid
+  companyDeduction   CompanyDeduction @relation(fields: [companyDeductionId], references: [id], onDelete: Cascade)
+
+  month Int @db.SmallInt
+  year  Int @db.SmallInt
+
+  amount Decimal         @db.Decimal(15, 2)
+  method RepaymentMethod // PAYROLL | CASH (enum déjà existant)
+
+  recordedBy String?  @db.Uuid
+  recordedAt DateTime @default(now()) @db.Timestamptz
+
+  @@map("company_deduction_repayment_logs")
+}
+
+// ===========================================================================
+// 📂 SECTION 08 — CONGÉS, ABSENCES & PERMISSIONS
+// Congés, soldes, demandes d'absence, tickets de permission
+// ===========================================================================
 
 model Leave {
   id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
@@ -953,6 +2393,41 @@ enum LeaveStatus {
   @@map("leave_status")
 }
 
+model LeaveBalance {
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+
+  employeeId String   @db.Uuid
+  employee   Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+
+  year Int @db.SmallInt
+
+  annualEntitled  Decimal @db.Decimal(5, 2)
+  annualTaken     Decimal @default(0) @db.Decimal(5, 2)
+  annualRemaining Decimal @db.Decimal(5, 2)
+
+  lastAccrualMonth Int? @db.SmallInt
+  lastAccrualYear  Int? @db.SmallInt
+
+  seniorityDays        Decimal   @default(0) @db.Decimal(5, 2)
+  carriedForward       Decimal   @default(0) @db.Decimal(5, 2)
+  carriedForwardExpiry DateTime? @db.Date
+  adjustmentNote       String?   @db.Text // ✅ AJOUT — note d'ajustement manuel/migratio
+
+  lastCalculated DateTime @default(now()) @db.Timestamptz
+
+  cycleNumber    Int?
+  cycleStartDate DateTime? @db.Date
+  cycleEndDate   DateTime? @db.Date
+
+  createdAt DateTime @default(now()) @db.Timestamptz
+  updatedAt DateTime @updatedAt @db.Timestamptz
+
+  @@unique([employeeId, cycleStartDate], name: "employeeId_cycleStartDate")
+  @@index([employeeId])
+  @@index([year])
+  @@map("leave_balances")
+}
+
 model AbsenceRequest {
   id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
 
@@ -1045,7 +2520,20 @@ model PermissionTicket {
 
   departureTime      DateTime  @db.Timestamptz
   expectedReturnTime DateTime  @db.Timestamptz
-  actualReturnTime   DateTime? @db.Timestamptz
+  // Sortie effective (null = la sortie autorisée n'a pas été corrigée → departureTime fait foi)
+  actualDepartureTime DateTime? @db.Timestamptz
+  // ⚠️ actualReturnTime = heure de retour VALIDÉE par un admin/RH (jamais la simple déclaration de l'employé)
+  actualReturnTime    DateTime? @db.Timestamptz
+
+  // 🔙 Validation du retour : l'employé déclare, un admin/RH confirme
+  returnStatus          PermissionReturnStatus @default(NOT_RETURNED)
+  returnDeclaredAt      DateTime?              @db.Timestamptz // heure du clic « Je suis de retour »
+  returnConfirmedBy     String?                @db.Uuid
+  returnConfirmedByUser User?                  @relation("PermissionReturnConfirmedBy", fields: [returnConfirmedBy], references: [id], onDelete: SetNull)
+  returnConfirmedAt     DateTime?              @db.Timestamptz
+  timesAdjusted         Boolean                @default(false) // true dès qu'un admin/RH a corrigé une heure
+
+  events PermissionTicketEvent[]
 
   status PermissionStatus @default(PENDING)
 
@@ -1093,44 +2581,53 @@ enum PermissionStatus {
   @@map("permission_status")
 }
 
-model LeaveBalance {
-  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+enum PermissionReturnStatus {
+  NOT_RETURNED // pas encore revenu
+  PENDING_VALIDATION // l'employé a déclaré son retour, en attente d'un admin/RH
+  CONFIRMED // retour validé (actualReturnTime fait foi)
 
-  employeeId String   @db.Uuid
-  employee   Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
-
-  year Int @db.SmallInt
-
-  annualEntitled  Decimal @db.Decimal(5, 2)
-  annualTaken     Decimal @default(0) @db.Decimal(5, 2)
-  annualRemaining Decimal @db.Decimal(5, 2)
-
-  lastAccrualMonth Int? @db.SmallInt
-  lastAccrualYear  Int? @db.SmallInt
-
-  seniorityDays        Decimal   @default(0) @db.Decimal(5, 2)
-  carriedForward       Decimal   @default(0) @db.Decimal(5, 2)
-  carriedForwardExpiry DateTime? @db.Date
-  adjustmentNote       String?   @db.Text // ✅ AJOUT — note d'ajustement manuel/migratio
-
-  lastCalculated DateTime @default(now()) @db.Timestamptz
-
-  cycleNumber    Int?
-  cycleStartDate DateTime? @db.Date
-  cycleEndDate   DateTime? @db.Date
-
-  createdAt DateTime @default(now()) @db.Timestamptz
-  updatedAt DateTime @updatedAt @db.Timestamptz
-
-  @@unique([employeeId, cycleStartDate], name: "employeeId_cycleStartDate")
-  @@index([employeeId])
-  @@index([year])
-  @@map("leave_balances")
+  @@map("permission_return_status")
 }
 
-// ============================================================================
-// 8️⃣ PRÉSENCES
-// ============================================================================
+enum PermissionEventType {
+  CREATED
+  APPROVED
+  REJECTED
+  CANCELLED
+  RETURN_DECLARED
+  RETURN_CONFIRMED
+  RETURN_REJECTED
+  TIMES_EDITED
+
+  @@map("permission_event_type")
+}
+
+/// Journal d'événements d'un ticket de permission (historique / traçabilité)
+model PermissionTicketEvent {
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+
+  ticketId String           @db.Uuid
+  ticket   PermissionTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+
+  type PermissionEventType
+
+  actorUserId String? @db.Uuid
+  actor       User?   @relation("PermissionEventActor", fields: [actorUserId], references: [id], onDelete: SetNull)
+  actorRole   String? @db.VarChar(30)
+
+  note String? @db.Text
+  data Json?
+
+  createdAt DateTime @default(now()) @db.Timestamptz
+
+  @@index([ticketId, createdAt])
+  @@map("permission_ticket_events")
+}
+
+// ===========================================================================
+// 📂 SECTION 09 — PRÉSENCES & POINTAGE
+// Présences, pauses, corrections, badges, bornes, écrans QR, shifts
+// ===========================================================================
 
 model Attendance {
   id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
@@ -1236,7 +2733,37 @@ enum AttendanceStatus {
   @@map("attendance_status")
 }
 
+enum OvertimeStatus {
+  NONE
+  PENDING_EMPLOYEE // En attente réponse employé (oubli ou HS ?)
+  PENDING_APPROVAL // Employé dit HS, en attente patron
+  APPROVED // Patron a validé
+  REJECTED // Patron a refusé
+  AUTO_CLOSED // Fermé automatiquement à minuit
+
+  @@map("overtime_status")
+}
+
+enum ClosureReason {
+  FORGOT // L'employé a oublié de pointer
+  OVERTIME // Heures supplémentaires déclarées
+  AUTO_CLOSED // Fermé automatiquement à minuit
+
+  @@map("closure_reason")
+}
+
+enum PunchMethod {
+  GPS
+  KIOSK
+  QR_SCAN
+  SECRET_CODE
+  MANUAL
+
+  @@map("punch_method")
+}
+
 // 🆕 Pause de la journée
+
 model AttendanceBreak {
   id           String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   attendanceId String     @unique @db.Uuid
@@ -1383,23 +2910,25 @@ enum CorrectionStatus {
   @@map("correction_status")
 }
 
-enum OvertimeStatus {
-  NONE
-  PENDING_EMPLOYEE // En attente réponse employé (oubli ou HS ?)
-  PENDING_APPROVAL // Employé dit HS, en attente patron
-  APPROVED // Patron a validé
-  REJECTED // Patron a refusé
-  AUTO_CLOSED // Fermé automatiquement à minuit
+model AttendanceDeletionLog {
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
 
-  @@map("overtime_status")
-}
+  companyId      String    @db.Uuid
+  employeeId     String    @db.Uuid
+  attendanceDate String    @db.VarChar(10) // même format que Attendance.date ("2025-12-25")
+  checkIn        DateTime? @db.Timestamptz
+  checkOut       DateTime? @db.Timestamptz
 
-enum ClosureReason {
-  FORGOT // L'employé a oublié de pointer
-  OVERTIME // Heures supplémentaires déclarées
-  AUTO_CLOSED // Fermé automatiquement à minuit
+  deletedBy String   @db.Uuid
+  deletedAt DateTime @default(now()) @db.Timestamptz
 
-  @@map("closure_reason")
+  reason    String  @db.Text
+  ipAddress String? @db.Inet
+  userAgent String? @db.Text
+
+  @@index([companyId])
+  @@index([deletedBy])
+  @@map("attendance_deletion_logs")
 }
 
 enum CheckinCredentialType {
@@ -1464,6 +2993,7 @@ model KioskDeviceCompany {
 // ============================================================================
 // 🆕 POINTAGE PAR SCAN QR DYNAMIQUE (écran d'affichage appairé) + CODE SECRET
 // ============================================================================
+
 enum DisplayScreenStatus {
   PENDING
   APPROVED
@@ -1477,16 +3007,6 @@ enum DisplayScreenScope {
   PORTFOLIO // toutes les entreprises du portefeuille de l'admin propriétaire
 
   @@map("display_screen_scope")
-}
-
-enum PunchMethod {
-  GPS
-  KIOSK
-  QR_SCAN
-  SECRET_CODE
-  MANUAL
-
-  @@map("punch_method")
 }
 
 model DisplayScreen {
@@ -1527,46 +3047,75 @@ model DisplayScreen {
   @@map("display_screens")
 }
 
-// Mot secret / PIN de pointage. On ne stocke QUE l'empreinte HMAC (clé serveur) :
-// impossible de retrouver le mot en base. Unique globalement (identification par le code seul).
-model EmployeeSecret {
-  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  employeeId   String   @unique @db.Uuid
-  employee     Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
-  companyId    String   @db.Uuid
-  company      Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
-  secretLookup String   @unique @db.VarChar(64)
-  setByUserId  String?  @db.Uuid
-  createdAt    DateTime @default(now()) @db.Timestamptz
-  updatedAt    DateTime @updatedAt @db.Timestamptz
-
-  @@index([companyId])
-  @@map("employee_secrets")
-}
-
 // ============================================================================
-// 9️⃣ JOURS FÉRIÉS
+//  NOUVEAUX MODÈLES — Ajouter après model AttendanceCorrection
+//     (Chantier 3 : Shifts / Plannings flexibles)
 // ============================================================================
 
-model PublicHoliday {
-  id   String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  name String @db.VarChar(100)
-  date String @db.VarChar(10)
-  year Int    @db.SmallInt
-
+model WorkShift {
+  id        String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   companyId String  @db.Uuid
   company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
 
-  createdAt DateTime @default(now()) @db.Timestamptz
+  name          String  @db.VarChar(100) // "Matin", "Soir", "Nuit", "Garde"
+  startHour     Int     @db.SmallInt // 8
+  startMinute   Int     @default(0) @db.SmallInt
+  endHour       Int     @db.SmallInt // 16
+  endMinute     Int     @default(0) @db.SmallInt
+  durationHours Decimal @db.Decimal(4, 2) // calculé : 8.0
 
-  @@unique([companyId, date])
-  @@index([companyId, year])
-  @@map("public_holidays")
+  crossesMidnight  Boolean @default(false) // true pour 20h→6h
+  isNightShift     Boolean @default(false)
+  nightPremiumRate Decimal @default(0) @db.Decimal(5, 2) // % prime nuit
+
+  color     String  @default("#0EA5E9") @db.Char(7)
+  isDefault Boolean @default(false) // Shift par défaut de l'entreprise
+  isActive  Boolean @default(true)
+
+  createdAt DateTime @default(now()) @db.Timestamptz
+  updatedAt DateTime @updatedAt @db.Timestamptz
+
+  assignments EmployeeShiftAssignment[]
+
+  @@index([companyId])
+  @@index([isActive])
+  @@map("work_shifts")
 }
 
-// ============================================================================
-// 🔟 RECRUTEMENT - SYSTÈME COMPLET MANUEL + IA
-// ============================================================================
+model EmployeeShiftAssignment {
+  id         String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId  String    @db.Uuid
+  company    Company   @relation(fields: [companyId], references: [id], onDelete: Cascade) // ← AJOUTER
+  employeeId String    @db.Uuid
+  employee   Employee  @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  shiftId    String    @db.Uuid
+  shift      WorkShift @relation(fields: [shiftId], references: [id], onDelete: Cascade)
+
+  // Assignation sur une date précise OU un jour récurrent
+  specificDate String? @db.VarChar(10) // "2025-07-14" si date unique
+  dayOfWeek    Int?    @db.SmallInt // 0-6 si planning récurrent (null = spécifique)
+
+  // Validité du planning récurrent
+  validFrom  DateTime? @db.Date
+  validUntil DateTime? @db.Date
+
+  notes String? @db.Text
+
+  createdAt DateTime @default(now()) @db.Timestamptz
+  updatedAt DateTime @updatedAt @db.Timestamptz
+
+  @@unique([employeeId, specificDate])
+  @@index([employeeId])
+  @@index([companyId])
+  @@index([shiftId])
+  @@index([specificDate])
+  @@map("employee_shift_assignments")
+}
+
+// ===========================================================================
+// 📂 SECTION 10 — RECRUTEMENT
+// Offres, candidats, tests, chercheurs d'emploi
+// ===========================================================================
 
 model JobOffer {
   id           String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
@@ -1875,6 +3424,11 @@ model JobSeeker {
   @@index([email])
   @@map("job_seekers")
 }
+
+// ===========================================================================
+// 📂 SECTION 11 — PERFORMANCE, COMPÉTENCES & CARRIÈRE
+// Objectifs, évaluations, compétences, carrière, promotions, plans de développement
+// ===========================================================================
 
 model Goal {
   id          String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
@@ -2354,10 +3908,10 @@ model DevelopmentAction {
   @@map("development_actions")
 }
 
-
-// ============================================================================
-// 1️⃣2️⃣ FORMATION
-// ============================================================================
+// ===========================================================================
+// 📂 SECTION 12 — FORMATION & ONBOARDING
+// Catalogue de formations, suivi, parcours d'intégration
+// ===========================================================================
 
 model TrainingCourse {
   id          String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
@@ -2461,10 +4015,6 @@ enum TrainingStatus {
   @@map("training_status")
 }
 
-// ============================================================================
-// 1️⃣3️⃣ ONBOARDING
-// ============================================================================
-
 model OnboardingProcess {
   id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
 
@@ -2517,9 +4067,10 @@ model OnboardingTask {
   @@map("onboarding_tasks")
 }
 
-// ============================================================================
-// 1️⃣4️⃣ DOCUMENTS, PRÊTS, AVANCES
-// ============================================================================
+// ===========================================================================
+// 📂 SECTION 13 — DOCUMENTS & IMPORTS
+// Documents employés, mappings d'import
+// ===========================================================================
 
 // ── REMPLACE l'enum DocumentType existant ───────────────────────────────────
 
@@ -2625,332 +4176,135 @@ model Document {
   @@map("documents")
 }
 
-model Loan {
-  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+model ImportMappingPattern {
+  id               String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId        String   @db.Uuid
+  columnsSignature String   @db.Text // Signature des colonnes
+  mappingData      String   @db.Text // JSON des mappings
+  usageCount       Int      @default(1)
+  lastUsedAt       DateTime @default(now()) @db.Timestamptz
+  createdAt        DateTime @default(now()) @db.Timestamptz
 
-  employeeId String   @db.Uuid
-  employee   Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
 
-  amount           Decimal     @db.Decimal(15, 2)
-  monthlyRepayment Decimal     @db.Decimal(15, 2)
-  remainingBalance Decimal     @db.Decimal(15, 2)
-  nature           LoanNature? // ← à ajouter (nullable
-  attachmentUrl    String?     @db.Text // ← ajouté
+  @@unique([companyId, columnsSignature])
+  @@index([companyId])
+  @@index([usageCount])
+  @@map("import_mapping_patterns")
+}
 
-  startDate DateTime @db.Date
-  endDate   DateTime @db.Date
+// ===========================================================================
+// 📂 SECTION 14 — CIRCUITS D'APPROBATION & AVIS
+// Fonctions de validation, circuits, avis, décisions en attente
+// ===========================================================================
 
-  status LoanStatus @default(ACTIVE)
-  type   LoanType   @default(ARGENT)
+// ============================================================================
+// ✅ LOT A — Fonctions de validation (avis) attribuées par l'admin
+// Un utilisateur peut cumuler plusieurs fonctions (ex. RH + DG).
+// `code` = chaîne validée côté code (approvals.constants.ts), pas un enum :
+// ajouter une fonction plus tard ne demande aucune migration.
+// ============================================================================
 
-  reason            String?   @db.Text
-  approvedBy        String?   @db.Uuid
-  approvedAt        DateTime? @db.Timestamptz
-  requestedByUserId String?   @db.Uuid
-  recoverViaPayroll Boolean   @default(true)
-
-  drhDecision  ApprovalDecision?
-  drhDecidedBy String?           @db.Uuid
-  drhDecidedAt DateTime?         @db.Timestamptz
-
-  dgDecision  ApprovalDecision?
-  dgDecidedBy String?           @db.Uuid
-  dgDecidedAt DateTime?         @db.Timestamptz
-
-  // Validation désormais PARALLÈLE (DRH et DG reçoivent en même temps, le
-  // premier présent valide/refuse) — drhDecision/dgDecision sont donc
-  // toujours renseignés ensemble avec la même valeur (conservés pour la
-  // fiche imprimable qui a 2 cases de signature). decidedByRole retient la
-  // casquette (DRH ou DG) de la personne qui a effectivement tranché, pour
-  // affichage/traçabilité dans l'historique.
-  decidedByRole String? @db.VarChar(10)
-
-  rejectionReason       String?   @db.Text
-  notes                 String?   @db.Text
-  printAuthorized       Boolean   @default(false)
-  printAuthorizedBy     String?   @db.Uuid
-  printAuthorizedByUser User?     @relation("LoanPrintAuthorizedBy", fields: [printAuthorizedBy], references: [id], onDelete: SetNull)
-  printAuthorizedAt     DateTime? @db.Timestamptz
-
+model UserApprovalFunction {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId    String   @db.Uuid
+  companyId String   @db.Uuid
+  code      String   @db.VarChar(40)
+  canSign   Boolean  @default(false)
+  createdBy String?  @db.Uuid
   createdAt DateTime @default(now()) @db.Timestamptz
   updatedAt DateTime @updatedAt @db.Timestamptz
 
-  repaymentLogs LoanRepaymentLog[]
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
 
-    // Traçabilité des modifications RH/Admin
-  requestedAmount           Decimal?  @db.Decimal(15, 2)
-  requestedMonthlyRepayment Decimal?  @db.Decimal(15, 2)
-  amountModifiedBy          String?   @db.Uuid
-  amountModifiedAt          DateTime? @db.Timestamptz
-  amendments                DebtAmendment[]
-
-  @@index([employeeId])
-  @@index([status])
-  @@map("loans")
-}
-
-enum LoanNature {
-  SOCIAL
-  SCOLARITE
-  LOGEMENT
-  EXCEPTIONNEL
-  AUTRE
-
-  @@map("loan_nature")
-}
-
-enum LoanStatus {
-  PENDING
-  PENDING_DG // DRH a dit oui, en attente de la décision du Directeur Général
-  ACTIVE
-  PAID
-  REJECTED // refusé par le DRH ou le DG
-  CANCELLED
-
-  @@map("loan_status")
-}
-
-enum LoanType {
-  ARGENT
-  MARCHANDISE
-  AUTRE
-
-  @@map("loan_type")
-}
-
-enum ApprovalDecision {
-  OUI
-  NON
-
-  @@map("approval_decision")
-}
-
-enum RepaymentMethod {
-  PAYROLL // déduit automatiquement sur le bulletin
-  CASH // payé en espèces / présentiel, saisi manuellement
-
-  @@map("repayment_method")
-}
-
-enum DocumentTemplate {
-  DEFAULT
-  ORCA
-  STANDARD // ← ajouté
-
-  @@map("document_template")
+  @@unique([userId, companyId, code])
+  @@index([companyId, code])
+  @@index([userId])
+  @@map("user_approval_functions")
 }
 
 // ============================================================================
-// ➕ AJOUT : MODÈLE ADVANCE REPAYMENT LOG
+// ✅ LOT B — Circuits d'avis, avis, décisions en attente
+// `requestType` = 'LOAN' | 'ADVANCE' | 'ABSENCE' (chaînes validées côté code —
+// les congés viendront ensuite sans migration). Aucune FK vers les demandes
+// (prêts / avances / absences) : l'existant n'est pas touché.
 // ============================================================================
 
-model AdvanceRepaymentLog {
-  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+model ApprovalCircuit {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId   String   @db.Uuid
+  requestType String   @db.VarChar(20)
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now()) @db.Timestamptz
+  updatedAt   DateTime @updatedAt @db.Timestamptz
 
-  advanceId String  @db.Uuid
-  advance   Advance @relation(fields: [advanceId], references: [id], onDelete: Cascade)
+  company Company               @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  steps   ApprovalCircuitStep[]
 
-  month  Int             @db.SmallInt
-  year   Int             @db.SmallInt
-  method RepaymentMethod @default(CASH)
-
-  amount    Decimal  @db.Decimal(15, 2)
-  payrollId String?  @db.Uuid
-  payroll   Payroll? @relation(fields: [payrollId], references: [id], onDelete: SetNull)
-
-  recordedBy String? @db.Uuid
-
-  notes     String?  @db.Text
-  createdAt DateTime @default(now()) @db.Timestamptz
-  updatedAt DateTime @updatedAt @db.Timestamptz
-
-  @@index([advanceId])
-  @@index([payrollId])
-  @@map("advance_repayment_logs")
+  @@unique([companyId, requestType])
+  @@map("approval_circuits")
 }
 
-model LoanRepaymentLog {
-  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+model ApprovalCircuitStep {
+  id           String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  circuitId    String @db.Uuid
+  position     Int
+  functionCode String @db.VarChar(40)
 
-  loanId String @db.Uuid
-  loan   Loan   @relation(fields: [loanId], references: [id], onDelete: Cascade)
+  circuit ApprovalCircuit @relation(fields: [circuitId], references: [id], onDelete: Cascade)
 
-  month Int @db.SmallInt
-  year  Int @db.SmallInt
-
-  amount Decimal         @db.Decimal(15, 2)
-  method RepaymentMethod
-
-  recordedBy String?  @db.Uuid
-  recordedAt DateTime @default(now()) @db.Timestamptz
-
-  @@map("loan_repayment_logs")
+  @@unique([circuitId, functionCode])
+  @@index([circuitId, position])
+  @@map("approval_circuit_steps")
 }
 
-model Advance {
-  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+model ApprovalOpinion {
+  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId    String   @db.Uuid
+  requestType  String   @db.VarChar(20)
+  requestId    String   @db.Uuid
+  functionCode String   @db.VarChar(40)
+  userId       String?  @db.Uuid
+  authorName   String   @db.VarChar(200)
+  opinion      String   @db.VarChar(15) // FAVORABLE | UNFAVORABLE
+  comment      String?  @db.Text
+  signatureUrl String?  @db.VarChar(500)
+  createdAt    DateTime @default(now()) @db.Timestamptz
+  updatedAt    DateTime @updatedAt @db.Timestamptz
 
-  employeeId String   @db.Uuid
-  employee   Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
-
-  amount Decimal @db.Decimal(15, 2)
-
-  month       Int @db.SmallInt
-  year        Int @db.SmallInt
-  deductMonth Int @db.SmallInt
-  deductYear  Int @db.SmallInt
-
-  status   AdvanceStatus @default(PENDING)
-  deducted Boolean       @default(false)
-
-  // Solde restant — permet le remboursement PARTIEL en espèces (comme les
-  // prêts), au lieu du seul "tout payer d'un coup" d'avant.
-  remainingBalance Decimal               @default(0) @db.Decimal(15, 2)
-  repaymentLogs    AdvanceRepaymentLog[]
-
-  requestedByUserId String? @db.Uuid
-  recoverViaPayroll Boolean @default(true)
-
-  rejectedBy      String?   @db.Uuid
-  rejectedAt      DateTime? @db.Timestamptz
-  rejectionReason String?   @db.Text
-
-  approvedBy String?   @db.Uuid
-  approvedAt DateTime? @db.Timestamptz
-
-  reason                String?   @db.Text
-  printAuthorized       Boolean   @default(false)
-  printAuthorizedBy     String?   @db.Uuid
-  printAuthorizedByUser User?     @relation("AdvancePrintAuthorizedBy", fields: [printAuthorizedBy], references: [id], onDelete: SetNull)
-  printAuthorizedAt     DateTime? @db.Timestamptz
-
-  createdAt DateTime @default(now()) @db.Timestamptz
-  updatedAt DateTime @updatedAt @db.Timestamptz
-
-    // Traçabilité des modifications RH/Admin
-  requestedAmount  Decimal?        @db.Decimal(15, 2)
-  amountModifiedBy String?         @db.Uuid
-  amountModifiedAt DateTime?       @db.Timestamptz
-  amendments       DebtAmendment[]
-
-  @@index([employeeId])
-  @@index([status])
-  @@index([deductMonth, deductYear])
-  @@map("advances")
+  @@unique([requestType, requestId, functionCode])
+  @@index([companyId, requestType, requestId])
+  @@map("approval_opinions")
 }
 
-enum AdvanceStatus {
-  PENDING
-  APPROVED
-  REJECTED
-  PAID
-  DEDUCTED
-  CANCELLED
+model ApprovalPendingDecision {
+  id                String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId         String    @db.Uuid
+  requestType       String    @db.VarChar(20)
+  requestId         String    @db.Uuid
+  decision          String    @db.VarChar(10) // APPROVE
+  // WAITING_OPINIONS | NEEDS_CONFIRMATION | FINALIZING | FINALIZED | CANCELLED | SUPERSEDED
+  state             String    @db.VarChar(25)
+  decidedByUserId   String?   @db.Uuid
+  decidedByName     String    @db.VarChar(200)
+  payload           Json?
+  forced            Boolean   @default(false)
+  missingAtDecision Json?
+  finalizedByUserId String?   @db.Uuid
+  finalizedAt       DateTime? @db.Timestamptz
+  createdAt         DateTime  @default(now()) @db.Timestamptz
+  updatedAt         DateTime  @updatedAt @db.Timestamptz
 
-  @@map("advance_status")
+  @@unique([requestType, requestId])
+  @@index([companyId, state])
+  @@map("approval_pending_decisions")
 }
 
-/// Historique des modifications d'un prêt ou d'une avance par RH/Admin
-model DebtAmendment {
-  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-
-  loanId    String?  @db.Uuid
-  loan      Loan?    @relation(fields: [loanId], references: [id], onDelete: Cascade)
-  advanceId String?  @db.Uuid
-  advance   Advance? @relation(fields: [advanceId], references: [id], onDelete: Cascade)
-
-  oldAmount Decimal? @db.Decimal(15, 2)
-  newAmount Decimal? @db.Decimal(15, 2)
-
-  oldMonthlyRepayment Decimal? @db.Decimal(15, 2)
-  newMonthlyRepayment Decimal? @db.Decimal(15, 2)
-
-  oldDeductMonth Int? @db.SmallInt
-  newDeductMonth Int? @db.SmallInt
-  oldDeductYear  Int? @db.SmallInt
-  newDeductYear  Int? @db.SmallInt
-
-  modifiedBy     String? @db.Uuid
-  modifiedByName String? @db.VarChar(200)
-  modifiedByRole String? @db.VarChar(30)
-
-  createdAt DateTime @default(now()) @db.Timestamptz
-
-  @@index([loanId])
-  @@index([advanceId])
-  @@map("debt_amendments")
-}
-
-
-model CompanyDeduction {
-  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-
-  employeeId String   @db.Uuid
-  employee   Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
-
-  companyId String  @db.Uuid
-  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
-
-  label  String  @db.VarChar(150) // "Pharmacie", "Cantine", "Casse matériel"... libre
-  amount Decimal @db.Decimal(15, 2) // montant total dû, fixé à la création — ne change jamais
-
-  // ✅ NOUVEAU — solde restant réellement dû, décrémenté à chaque règlement
-  // (espèces ou paie). Initialisé à `amount` à la création.
-  remainingBalance Decimal @db.Decimal(15, 2)
-
-  // ✅ NOUVEAU — montant que la paie retire à CHAQUE génération tant qu'il
-  // reste un solde (comme la mensualité d'un prêt). Si null : tout le solde
-  // restant part en une fois à la prochaine paie.
-  monthlyDeduction Decimal? @db.Decimal(15, 2)
-
-  month Int @db.SmallInt // référence de création — la paie ne filtre plus dessus
-  year  Int @db.SmallInt
-
-  recoverViaPayroll Boolean                @default(true)
-  status            CompanyDeductionStatus @default(PENDING)
-
-  recordedBy String @db.Uuid
-
-  createdAt DateTime @default(now()) @db.Timestamptz
-  updatedAt DateTime @updatedAt @db.Timestamptz
-
-  repaymentLogs CompanyDeductionRepaymentLog[]
-
-  @@index([employeeId])
-  @@index([companyId, month, year])
-  @@map("company_deductions")
-}
-
-model CompanyDeductionRepaymentLog {
-  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-
-  companyDeductionId String           @db.Uuid
-  companyDeduction   CompanyDeduction @relation(fields: [companyDeductionId], references: [id], onDelete: Cascade)
-
-  month Int @db.SmallInt
-  year  Int @db.SmallInt
-
-  amount Decimal         @db.Decimal(15, 2)
-  method RepaymentMethod // PAYROLL | CASH (enum déjà existant)
-
-  recordedBy String?  @db.Uuid
-  recordedAt DateTime @default(now()) @db.Timestamptz
-
-  @@map("company_deduction_repayment_logs")
-}
-
-enum CompanyDeductionStatus {
-  PENDING // en attente d'être déduite sur une paie
-  DEDUCTED // déjà déduite
-  PAID
-  CANCELLED
-
-  @@map("company_deduction_status")
-}
-
-// ============================================================================
-// 1️⃣5️⃣ NOTIFICATIONS & LOGS
-// ============================================================================
+// ===========================================================================
+// 📂 SECTION 15 — NOTIFICATIONS & PUSH
+// Notifications, déduplication, abonnements et diffusions push
+// ===========================================================================
 
 model Notification {
   id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
@@ -3015,6 +4369,10 @@ enum NotificationType {
   PERMISSION_REQUEST
   PERMISSION_APPROVED
   PERMISSION_REJECTED
+  PERMISSION_RETURN_REQUEST // Employé déclare son retour → admin/RH à valider
+  PERMISSION_RETURN_CONFIRMED // Retour validé → employé
+  PERMISSION_RETURN_REJECTED // Retour non validé → employé
+  PERMISSION_TIMES_EDITED // Heures de sortie/retour corrigées → employé
 
   LOAN_REQUEST
   LOAN_APPROVED
@@ -3032,29 +4390,6 @@ enum NotificationType {
 
   @@map("notification_type")
 }
-
-model ActivityLog {
-  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-
-  userId String @db.Uuid
-  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  action      String  @db.VarChar(100)
-  entity      String  @db.VarChar(50)
-  entityId    String? @db.Uuid
-  description String  @db.Text
-
-  changes  Json?
-  metadata Json?
-
-  createdAt DateTime @default(now()) @db.Timestamptz
-
-  @@index([userId])
-  @@index([entity, entityId])
-  @@index([createdAt])
-  @@map("activity_logs")
-}
-
 
 model PushDelivery {
   id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
@@ -3076,138 +4411,136 @@ model PushDelivery {
   @@map("push_deliveries")
 }
 
+model PushSubscription {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId      String   @db.Uuid
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  token       String   @unique @db.Text
+  deviceLabel String?  @db.VarChar(150)
+  createdAt   DateTime @default(now()) @db.Timestamptz
+  lastUsedAt  DateTime @default(now()) @db.Timestamptz
 
-// ─── Sessions JWT révocables ──────────────────────────────────────────────────
-model UserSession {
-  id        String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  userId    String    @db.Uuid
-  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  jti       String    @unique @db.VarChar(255)
-  expiresAt DateTime  @db.Timestamptz
-  revokedAt DateTime? @db.Timestamptz
-  createdAt DateTime  @default(now()) @db.Timestamptz
+  // 🆕 Identité stable de l'appareil (générée par l'app, survit aux ré-abonnements)
+  deviceId      String?   @db.VarChar(64)
+  userAgent     String?   @db.VarChar(300)
+  // ACTIVE | DISABLED (désactivé par l'utilisateur) | EXPIRED (le service push a répondu 404/410)
+  status        String    @default("ACTIVE") @db.VarChar(12)
+  enabledAt     DateTime  @default(now()) @db.Timestamptz
+  disabledAt    DateTime? @db.Timestamptz
+  lastSuccessAt DateTime? @db.Timestamptz
+  lastFailureAt DateTime? @db.Timestamptz
+  lastError     String?   @db.VarChar(300)
 
+  @@unique([userId, deviceId])
   @@index([userId])
-  @@index([jti])
-  @@index([expiresAt])
-  @@map("user_sessions")
+  @@index([status])
+  @@map("push_subscriptions")
 }
 
-// ─── Erreurs applicatives (Error Tracker) ────────────────────────────────────
-model AppError {
-  id         String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  errorCode  String    @db.VarChar(100)
-  statusCode Int       @db.SmallInt
-  message    String    @db.Text
-  stack      String?   @db.Text
-  method     String    @db.VarChar(10)
-  path       String    @db.Text
-  body       Json?
-  query      Json?
-  userId     String?   @db.Uuid
-  companyId  String?   @db.Uuid
-  ip         String?
-  severity   String    @default("ERROR") @db.VarChar(20)
-  resolved   Boolean   @default(false)
-  resolvedAt DateTime? @db.Timestamptz
-  resolvedBy String?   @db.Uuid
-  note       String?   @db.Text
-  createdAt  DateTime  @default(now()) @db.Timestamptz
+// 🆕 Historique : ENABLED (nouvel appareil) | REACTIVATED | DISABLED | EXPIRED | MOVED
 
-  @@index([statusCode])
-  @@index([companyId])
-  @@index([path])
-  @@index([errorCode])
+model PushDeviceEvent {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId      String   @db.Uuid
+  deviceId    String?  @db.VarChar(64)
+  deviceLabel String?  @db.VarChar(150)
+  type        String   @db.VarChar(20)
+  createdAt   DateTime @default(now()) @db.Timestamptz
+
+  @@index([userId, createdAt])
   @@index([createdAt])
-  @@index([resolved])
-  @@map("app_errors")
+  @@map("push_device_events")
 }
 
-model UserInvitation {
-  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+// 🆕 Envois groupés (rappel de pointage) lancés par le super admin
 
-  email     String   @db.VarChar(255)
-  role      UserRole
-  token     String   @unique @db.VarChar(255)
-  expiresAt DateTime @db.Timestamptz
+model PushBroadcast {
+  id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  createdBy      String    @db.Uuid
+  companyId      String?   @db.Uuid
+  onlyNotPunched Boolean   @default(false)
+  title          String    @db.VarChar(120)
+  body           String    @db.VarChar(300)
+  status         String    @default("RUNNING") @db.VarChar(12) // RUNNING | DONE | FAILED
+  total          Int       @default(0)
+  processed      Int       @default(0)
+  sent           Int       @default(0)
+  failed         Int       @default(0)
+  noDevice       Int       @default(0)
+  error          String?   @db.VarChar(300)
+  createdAt      DateTime  @default(now()) @db.Timestamptz
+  finishedAt     DateTime? @db.Timestamptz
 
-  invitedBy String @db.Uuid
-
-  companyId               String?   @db.Uuid
-  cabinetId               String?   @db.Uuid
-  manageMultipleCompanies Boolean   @default(false)
-  cabinetName             String?   @db.VarChar(255)
-  accepted                Boolean   @default(false)
-  acceptedAt              DateTime? @db.Timestamptz
-
-  createdAt DateTime @default(now()) @db.Timestamptz
-
-  @@index([email])
-  @@index([token])
-  @@index([expiresAt])
-  @@map("user_invitations")
+  @@index([createdAt])
+  @@map("push_broadcasts")
 }
 
-// ============================================================================
-// 1️⃣6️⃣ GESTION DES ACTIFS
-// ============================================================================
+// ===========================================================================
+// 📂 SECTION 16 — CHAT INTERNE
+// Conversations, participants, messages
+// ===========================================================================
 
-model Asset {
-  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-
-  name         String  @db.VarChar(255)
-  category     String  @db.VarChar(100) // ✅ String libre — plus d'enum
-  serialNumber String? @db.VarChar(100)
-
-  purchaseDate  DateTime @db.Date
-  purchasePrice Decimal  @db.Decimal(15, 2)
-  currentValue  Decimal? @db.Decimal(15, 2)
-
-  assignedTo String?   @db.Uuid
-  employee   Employee? @relation("AssignedAssets", fields: [assignedTo], references: [id], onDelete: SetNull)
-
-  status AssetStatus @default(AVAILABLE)
-
+model ChatConversation {
+  id        String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   companyId String  @db.Uuid
   company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
 
+  directKey String @unique @db.VarChar(80)
+
+  lastMessageAt  DateTime? @db.Timestamptz
+  lastPreviewEnc String?   @db.Text
+  lastSenderId   String?   @db.Uuid
+
   createdAt DateTime @default(now()) @db.Timestamptz
-  updatedAt DateTime @updatedAt @db.Timestamptz
 
-  @@index([companyId])
-  @@index([assignedTo])
-  @@index([status])
-  @@index([category]) // ✅ Index pour filtrer par catégorie
-  @@map("assets")
+  participants ChatParticipant[]
+  messages     ChatMessage[]
+
+  @@index([companyId, lastMessageAt])
+  @@map("chat_conversations")
 }
 
-// ✅ AssetCategory enum SUPPRIMÉ — remplacé par String libre dans le modèle
+model ChatParticipant {
+  id             String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  conversationId String           @db.Uuid
+  conversation   ChatConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  userId         String           @db.Uuid
+  user           User             @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-enum AssetStatus {
-  AVAILABLE
-  IN_USE
-  MAINTENANCE
-  RETIRED
+  unreadCount Int       @default(0)
+  lastReadAt  DateTime? @db.Timestamptz
+  lastDeliveredAt DateTime? @db.Timestamptz
+  createdAt   DateTime  @default(now()) @db.Timestamptz
 
-  @@map("asset_status")
+  @@unique([conversationId, userId])
+  @@index([userId])
+  @@map("chat_participants")
 }
 
-model ImportMappingPattern {
-  id               String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  companyId        String   @db.Uuid
-  columnsSignature String   @db.Text // Signature des colonnes
-  mappingData      String   @db.Text // JSON des mappings
-  usageCount       Int      @default(1)
-  lastUsedAt       DateTime @default(now()) @db.Timestamptz
-  createdAt        DateTime @default(now()) @db.Timestamptz
+model ChatMessage {
+  id             String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  seq            BigInt           @unique @default(autoincrement())
+  conversationId String           @db.Uuid
+  conversation   ChatConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  senderId       String           @db.Uuid
+  sender         User             @relation("ChatMessageSender", fields: [senderId], references: [id], onDelete: Cascade)
 
-  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  bodyEnc  String  @map("body_enc") @db.Text
+  // Idempotence : un renvoi réseau avec le même clientId ne crée pas de doublon
+  clientId String? @db.Uuid
 
-  @@unique([companyId, columnsSignature])
-  @@index([companyId])
-  @@index([usageCount])
-  @@map("import_mapping_patterns")
+  createdAt DateTime @default(now()) @db.Timestamptz
+
+  @@unique([senderId, clientId])
+  @@index([conversationId, seq])
+  @@index([createdAt])
+  @@map("chat_messages")
 }
+
+// ===========================================================================
+// 📂 SECTION 17 — ABONNEMENTS & PAIEMENTS (ENTREPRISES)
+// Plans, abonnements, paiements
+// ===========================================================================
 
 // ============================================================================
 // 🆕 SYSTÈME D'ABONNEMENT - POSTGRESQL PRODUCTION
@@ -3355,319 +4688,10 @@ enum PaymentProvider {
   @@map("payment_provider")
 }
 
-// ============================================================================
-// 💰 PRIMES EMPLOYÉS (MANUEL + AUTO)
-// ============================================================================
-
-model EmployeeBonus {
-  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-
-  employeeId String   @db.Uuid
-  employee   Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
-
-  // 🏷️ TYPE DE PRIME
-  bonusType String @db.VarChar(100) // "Prime de transport", "Prime d'ancienneté"
-
-  // 🔧 MODE DE CALCUL
-  calculationType BonusCalculationType @default(FIXED_AMOUNT)
-
-  // 💵 VALEURS
-  fixedAmount     Decimal?   @db.Decimal(15, 2) // Montant fixe (ex: 20 000 FCFA)
-  percentage      Decimal?   @db.Decimal(5, 2) // Pourcentage (ex: 5.00 pour 5%)
-  baseCalculation BonusBase? @default(BASE_SALARY) // BASE_SALARY ou GROSS_SALARY
-
-  // 📅 FRÉQUENCE
-  frequency BonusFrequency @default(MONTHLY)
-
-  // 🤖 ORIGINE
-  isAutomatic Boolean @default(false) // true = calculé par convention, false = manuel
-  ruleId      String? @db.Uuid // Lien vers la règle de convention (si auto)
-
-  // 🟢 ACTIVATION
-  isActive  Boolean   @default(true)
-  startDate DateTime  @default(now()) @db.Date
-  endDate   DateTime? @db.Date
-
-  // 📝 NOTES
-  notes String? @db.Text
-
-  createdAt DateTime @default(now()) @db.Timestamptz
-  updatedAt DateTime @updatedAt @db.Timestamptz
-
-  isTaxable       Boolean       @default(true)
-  isCnss          Boolean       @default(true)
-  isProratized    Boolean       @default(false) // 🆕 Prime réduite si absence
-  fiscalType      String?       @db.VarChar(20)
-  unitAmount      Decimal?      @db.Decimal(15, 2)
-  quantityMode    String?       @db.VarChar(20)
-  defaultQuantity Decimal?      @db.Decimal(8, 2)
-  isInLeaveBase   Boolean       @default(true) // 🆕 Incluse dans moyenne 12 mois
-  bonusCategory   BonusCategory @default(PERFORMANCE) // Catégorie principale
-
-  bonusTemplateId String? @db.Uuid
-
-  monthlyQuantities BonusMonthlyQuantity[]
-  bonusTemplate     BonusTemplate?         @relation(fields: [bonusTemplateId], references: [id])
-
-  @@index([employeeId])
-  @@index([isActive])
-  @@index([isAutomatic])
-  @@index([frequency])
-  @@map("employee_bonuses")
-}
-
-// 🔧 Type de calcul
-enum BonusCalculationType {
-  FIXED_AMOUNT // Montant fixe (20 000 FCFA)
-  PERCENTAGE // Pourcentage (5% du salaire)
-
-  @@map("bonus_calculation_type")
-}
-
-// 📊 Base de calcul (pour les pourcentages)
-enum BonusBase {
-  BASE_SALARY // Salaire de base
-  GROSS_SALARY // Salaire brut
-
-  @@map("bonus_base")
-}
-
-// 📅 Fréquence de la prime
-enum BonusFrequency {
-  MONTHLY // Chaque mois
-  ANNUAL // Une fois par an (ex: 13ème mois)
-  ONE_TIME // Une seule fois (prime exceptionnelle)
-
-  @@map("bonus_frequency")
-}
-
-enum BonusCategory {
-  FRAIS // Indemnité représentative de frais (transport, panier, logement)
-  POSTE // Liée au poste/ancienneté/diplôme — maintenue à 100%
-  PERFORMANCE // Liée à présence/rendement — proratisable
-  EXCEPTIONNELLE // Ponctuelle (13e mois, prime résultat annuel)
-
-  @@map("bonus_category")
-}
-
-// ============================================================================
-// 🤖 RÈGLES DES CONVENTIONS COLLECTIVES (AUTO)
-// ============================================================================
-
-model CollectiveAgreementRule {
-  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-
-  companyId String  @db.Uuid
-  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
-
-  // 🏷️ CONVENTION
-  agreementCode String @db.VarChar(50) // "BTP", "COMMERCE", "BANQUES"
-
-  // 🎯 TYPE DE RÈGLE
-  ruleType CollectiveAgreementRuleType
-
-  // 📋 CATÉGORIE CONCERNÉE (optionnel)
-  professionalCategory String? @db.VarChar(50) // "Cat.3 Éch.4", "A1" (null = toutes)
-
-  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  // RÈGLE: SALAIRE MINIMUM
-  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  minimumSalary Decimal? @db.Decimal(15, 2)
-
-  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  // RÈGLE: PRIME AUTOMATIQUE
-  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  bonusType            String?    @db.VarChar(100) // "Prime d'ancienneté"
-  minMonthsOfService   Int?       @db.SmallInt // Ex: 24 mois = 2 ans
-  maxMonthsOfService   Int?       @db.SmallInt // Ex: 60 mois = 5 ans (plafond)
-  bonusPercentage      Decimal?   @db.Decimal(5, 2) // Ex: 5.00 pour 5%
-  bonusFixedAmount     Decimal?   @db.Decimal(15, 2)
-  bonusBaseCalculation BonusBase? @default(BASE_SALARY)
-
-  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  // RÈGLE: CONGÉS SUPPLÉMENTAIRES
-  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  additionalLeaveDays Int? @db.SmallInt
-
-  // 🟢 ACTIVATION
-  isActive Boolean @default(true)
-
-  createdAt DateTime @default(now()) @db.Timestamptz
-  updatedAt DateTime @updatedAt @db.Timestamptz
-
-  @@index([companyId])
-  @@index([agreementCode])
-  @@index([ruleType])
-  @@index([professionalCategory])
-  @@index([isActive])
-  @@map("collective_agreement_rules")
-}
-
-// 🎯 Types de règles possibles
-enum CollectiveAgreementRuleType {
-  MINIMUM_SALARY // Salaire minimum par catégorie
-  AUTOMATIC_BONUS // Prime automatique (ancienneté, transport...)
-  ADDITIONAL_LEAVE // Jours de congé supplémentaires
-  OVERTIME_RATE // Taux heures sup personnalisé
-
-  @@map("collective_agreement_rule_type")
-}
-
-// ============================================================================
-// 📚 BIBLIOTHÈQUE DES CONVENTIONS PRÉDÉFINIES
-// ============================================================================
-
-model PredefinedConvention {
-  id          String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  code        String  @unique @db.VarChar(50) // "BTP", "COMMERCE"
-  name        String  @db.VarChar(200) // "Bâtiment et Travaux Publics"
-  description String? @db.Text
-  country     String  @default("CG") @db.Char(2)
-
-  // 📄 DOCUMENT OFFICIEL
-  pdfUrl String? @db.Text
-
-  // 📅 DATES
-  effectiveDate DateTime @db.Date
-  lastUpdated   DateTime @default(now()) @db.Timestamptz
-
-  // 🎯 CATÉGORIES PROFESSIONNELLES
-  categories Json // Array de { code: "A1", label: "Manœuvre", minSalary: 95000 }
-
-  // 🤖 RÈGLES PAR DÉFAUT
-  defaultRules Json // Array de règles standard pour cette convention
-
-  createdAt DateTime @default(now()) @db.Timestamptz
-  updatedAt DateTime @updatedAt @db.Timestamptz
-
-  @@index([code])
-  @@index([country])
-  @@map("predefined_conventions")
-}
-
-model BonusTemplate {
-  id                String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  companyId         String   @db.Uuid
-  name              String
-  defaultAmount     Decimal? @db.Decimal(15, 2)
-  defaultPercentage Decimal? @db.Decimal(5, 2)
-  baseCalculation   String? // "BASE_SALARY" | "GROSS_SALARY"
-  isRecurring       Boolean  @default(true)
-  isTaxable         Boolean  @default(true)
-  isCnss            Boolean  @default(true)
-  isNature          Boolean  @default(false)
-  description       String?
-  isActive          Boolean  @default(true)
-  createdAt         DateTime @default(now())
-  updatedAt         DateTime @updatedAt
-
-  fiscalType      String?  @db.VarChar(20)
-  unitAmount      Decimal? @db.Decimal(15, 2)
-  quantityMode    String?  @db.VarChar(20)
-  defaultQuantity Decimal? @db.Decimal(8, 2)
-
-  isProratized  Boolean       @default(false)
-  isInLeaveBase Boolean       @default(true)
-  bonusCategory BonusCategory @default(PERFORMANCE)
-
-  company         Company         @relation(fields: [companyId], references: [id])
-  employeeBonuses EmployeeBonus[]
-
-  @@index([companyId])
-}
-
-model BonusMonthlyQuantity {
-  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-
-  employeeBonusId String        @db.Uuid
-  employeeBonus   EmployeeBonus @relation(fields: [employeeBonusId], references: [id], onDelete: Cascade)
-
-  month Int @db.SmallInt // 1-12
-  year  Int @db.SmallInt // ex: 2026
-
-  /// Quantité saisie (ex: 7 repas, 3 déplacements, 5 opérations)
-  quantity Decimal @db.Decimal(8, 2)
-
-  /// Montant pré-calculé = unitAmount × quantity (stocké pour audit)
-  computedAmount Decimal @db.Decimal(15, 2)
-
-  /// Note optionnelle (ex: "7 repas pris en avril")
-  note String? @db.VarChar(200)
-
-  createdAt DateTime @default(now()) @db.Timestamptz
-  updatedAt DateTime @updatedAt @db.Timestamptz
-
-  @@unique([employeeBonusId, month, year])
-  @@index([employeeBonusId])
-  @@map("bonus_monthly_quantities")
-}
-
-// ============================================================================
-// 💼 TAXES & COTISATIONS CONFIGURABLES PAR ENTREPRISE
-// ============================================================================
-
-model CompanyTax {
-  id        String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  companyId String  @db.Uuid
-  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
-
-  // Identité
-  name        String  @db.VarChar(100) // "TOL", "CAMU", "Taxe apprentissage"
-  code        String  @db.VarChar(20) // "TOL", "CAMU", "TAX_APP"
-  description String? @db.Text
-
-  // Taux — salarié
-  employeeRate  Decimal @default(0) @db.Decimal(6, 4) // ex: 0.0100 = 1%
-  fixedEmployee Decimal @default(0) @db.Decimal(15, 2) // ex: 1000 = TOL fixe
-
-  // Taux — employeur
-  employerRate  Decimal @default(0) @db.Decimal(6, 4) // ex: 0.0100 = 1%
-  fixedEmployer Decimal @default(0) @db.Decimal(15, 2)
-
-  // Base de calcul
-  baseType   CompanyTaxBase @default(GROSS)
-  hasCeiling Boolean        @default(false)
-  ceiling    Decimal?       @db.Decimal(15, 2)
-
-  minSalaryThreshold Decimal?            @db.Decimal(15, 2)
-  // ELIGIBILITY (défaut) = filtre binaire : taxe ignorée si brut < seuil
-  // EXCESS_ONLY           = taxe sur l'excédent : base = max(0, base − seuil)
-  //                         ex CAMU solidarité : (BI − 500 000) × 0,5%
-  thresholdType      CompanyTaxThreshold @default(ELIGIBILITY)
-
-  // Types de contrat concernés (défaut : CDI + CDD)
-  applicableContractTypes ContractType[] @default([CDI, CDD])
-
-  // Périodicité : true = chaque mois ; false = uniquement applicableMonth/applicableYear
-  isRecurring     Boolean @default(true)
-  applicableMonth Int?    @db.SmallInt // 1-12
-  applicableYear  Int?    @db.SmallInt
-
-  // Activation
-  isActive Boolean @default(true)
-
-  createdAt DateTime @default(now()) @db.Timestamptz
-  updatedAt DateTime @updatedAt @db.Timestamptz
-
-  @@index([companyId])
-  @@index([isActive])
-  @@index([code])
-  @@map("company_taxes")
-}
-
-enum CompanyTaxThreshold {
-  ELIGIBILITY // Filtre binaire : taxe ignorée si brut < seuil (défaut)
-  EXCESS_ONLY // Taxe sur l'excédent : base = max(0, base − seuil)
-}
-
-enum CompanyTaxBase {
-  GROSS // Brut total
-  TAXABLE // SBT (brut − CNSS)
-  NET_IMPOSABLE // RNI (après abattement)
-  FIXED // Montant fixe (ex: TOL = 1 000 F)
-
-  @@map("company_tax_base")
-}
+// ===========================================================================
+// 📂 SECTION 18 — MODULE CABINET (MULTI-ENTREPRISES)
+// Cabinets, portefeuille, clôtures par lot, abonnements cabinet
+// ===========================================================================
 
 // ============================================================================
 // 🏢 MODULE CABINET (MULTI-ENTREPRISES)
@@ -3701,6 +4725,13 @@ model Cabinet {
   @@index([subdomain])
   @@index([affiliatedBy])
   @@map("cabinets")
+}
+
+// ─── ENUMS ───────────────────────────────────────────────────────────────────
+
+enum CabinetRole {
+  CABINET_ADMIN
+  GESTIONNAIRE
 }
 
 model CabinetUser {
@@ -3789,6 +4820,16 @@ model CabinetWalletTransaction {
   @@map("cabinet_wallet_transactions")
 }
 
+enum WalletTransactionType {
+  TRIAL_CREDIT
+  PACK_PURCHASE
+  FORFAIT_ACTIVATION
+  BULLETIN_DEBIT
+  BULLETIN_REFUND
+  MANUAL_CREDIT
+  FORFAIT_RESET
+}
+
 // ─── IMPORT MAPPING — mémorise le mapping colonne par PME ────────────────────
 
 model CabinetImportMapping {
@@ -3836,6 +4877,14 @@ model CabinetBatchClosure {
   @@map("cabinet_batch_closures")
 }
 
+enum BatchClosureStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  PARTIAL
+  FAILED
+}
+
 model CabinetBatchClosureItem {
   id      String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   batchId String              @db.Uuid
@@ -3850,6 +4899,14 @@ model CabinetBatchClosureItem {
 
   @@index([batchId])
   @@map("cabinet_batch_closure_items")
+}
+
+enum BatchItemStatus {
+  PENDING
+  RUNNING
+  SUCCESS
+  FAILED
+  SKIPPED
 }
 
 model CabinetSubscription {
@@ -3886,6 +4943,24 @@ model CabinetSubscription {
   @@map("cabinet_subscriptions")
 }
 
+enum CabinetPlan {
+  STARTER // 5 PME / 100 employés — 25 000 F/mois
+  PRO // 15 PME / 500 employés — 65 000 F/mois
+  EXPERT // 50 PME / 2 000 employés — 150 000 F/mois
+
+  @@map("cabinet_plan")
+}
+
+enum CabinetSubStatus {
+  TRIALING
+  ACTIVE
+  PAST_DUE
+  CANCELED
+  PAUSED
+
+  @@map("cabinet_sub_status")
+}
+
 model CabinetPayment {
   id             String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   subscriptionId String              @db.Uuid
@@ -3913,557 +4988,10 @@ model CabinetPayment {
   @@map("cabinet_payments")
 }
 
-// ─── ENUMS ───────────────────────────────────────────────────────────────────
-
-enum CabinetRole {
-  CABINET_ADMIN
-  GESTIONNAIRE
-}
-
-enum WalletTransactionType {
-  TRIAL_CREDIT
-  PACK_PURCHASE
-  FORFAIT_ACTIVATION
-  BULLETIN_DEBIT
-  BULLETIN_REFUND
-  MANUAL_CREDIT
-  FORFAIT_RESET
-}
-
-enum BatchClosureStatus {
-  PENDING
-  RUNNING
-  COMPLETED
-  PARTIAL
-  FAILED
-}
-
-enum BatchItemStatus {
-  PENDING
-  RUNNING
-  SUCCESS
-  FAILED
-  SKIPPED
-}
-
-enum CabinetPlan {
-  STARTER // 5 PME / 100 employés — 25 000 F/mois
-  PRO // 15 PME / 500 employés — 65 000 F/mois
-  EXPERT // 50 PME / 2 000 employés — 150 000 F/mois
-
-  @@map("cabinet_plan")
-}
-
-enum CabinetSubStatus {
-  TRIALING
-  ACTIVE
-  PAST_DUE
-  CANCELED
-  PAUSED
-
-  @@map("cabinet_sub_status")
-}
-
-model CnssDeclaration {
-  id        String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  companyId String  @db.Uuid
-  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
-
-  month Int @db.SmallInt // 1-12
-  year  Int @db.SmallInt
-
-  // Données agrégées de la déclaration
-  effectif       Int     @db.SmallInt // Nombre de salariés déclarés
-  masseSalariale Decimal @db.Decimal(15, 2) // Masse salariale brute totale
-
-  // Cotisations CNSS
-  cotisationSalariale Decimal @db.Decimal(15, 2) // Part salarié (pension 4%)
-  cotisationPatronale Decimal @db.Decimal(15, 2) // Part employeur (pension 8% + famille 10.03% + AT 2.25%)
-  cotisationTotale    Decimal @db.Decimal(15, 2) // Total CNSS = salariale + patronale
-
-  // TUS
-  tusCnss Decimal @db.Decimal(15, 2) // TUS → CNSS (5.475%)
-  tusDgi  Decimal @db.Decimal(15, 2) // TUS → DGI (2.025%)
-
-  // Montants à verser
-  totalAVerserCnss Decimal @db.Decimal(15, 2) // cotisationTotale + tusCnss
-  totalAVerserDgi  Decimal @db.Decimal(15, 2) // tusDgi
-
-  // Statut et workflow
-  status           CnssDeclarationStatus @default(A_DECLARER)
-  declaredAt       DateTime?             @db.Timestamptz // Date effective de dépôt
-  paidAt           DateTime?             @db.Timestamptz // Date de paiement
-  paymentReference String?               @db.VarChar(100) // Référence virement/chèque
-  paymentMode      String?               @db.VarChar(50) // VIREMENT / CHEQUE / GUICHET
-
-  // Pénalités (si retard)
-  isLate        Boolean @default(false)
-  monthsLate    Int     @default(0) @db.SmallInt
-  penaltyAmount Decimal @default(0) @db.Decimal(15, 2)
-
-  // Métadonnées export
-  lastExportedAt DateTime? @db.Timestamptz
-  exportedByUser String?   @db.Uuid
-  warnings       String[]  @default([]) // Ex: ["Dupont: N° CNSS manquant"]
-
-  // Qui a déclaré
-  declaredBy String? @db.Uuid
-  notes      String? @db.Text
-
-  createdAt DateTime @default(now()) @db.Timestamptz
-  updatedAt DateTime @updatedAt @db.Timestamptz
-
-  // Ligne par salarié (snapshot de la déclaration)
-  lines CnssDeclarationLine[]
-
-  @@unique([companyId, month, year])
-  @@index([companyId])
-  @@index([month, year])
-  @@index([status])
-  @@map("cnss_declarations")
-}
-
-model CnssDeclarationLine {
-  id            String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  declarationId String          @db.Uuid
-  declaration   CnssDeclaration @relation(fields: [declarationId], references: [id], onDelete: Cascade)
-
-  employeeId     String       @db.Uuid
-  employee       Employee     @relation(fields: [employeeId], references: [id], onDelete: Cascade)
-  employeeNumber String       @db.VarChar(50)
-  employeeName   String       @db.VarChar(200)
-  cnssNumber     String?      @db.VarChar(50)
-  contractType   ContractType
-
-  brutMensuel      Decimal @db.Decimal(15, 2)
-  pensionSalarial  Decimal @db.Decimal(15, 2) // 4% plaf. 1 200 000
-  pensionPatronal  Decimal @db.Decimal(15, 2) // 8% plaf. 1 200 000
-  familyPatronal   Decimal @db.Decimal(15, 2) // 10.03% plaf. 600 000
-  accidentPatronal Decimal @db.Decimal(15, 2) // 2.25% plaf. 600 000
-  totalCnss        Decimal @db.Decimal(15, 2)
-  tusCnss          Decimal @db.Decimal(15, 2)
-  tusDgi           Decimal @db.Decimal(15, 2)
-
-  @@index([declarationId])
-  @@index([employeeId])
-  @@map("cnss_declaration_lines")
-}
-
-enum CnssDeclarationStatus {
-  A_DECLARER // Bulletins disponibles, déclaration non faite
-  DECLAREE // Déposée à la CNSS (en attente paiement)
-  PAYEE // Payée et quittancée
-  EN_RETARD // Date limite dépassée
-  REGULARISEE // Retard régularisé avec pénalités
-
-  @@map("cnss_declaration_status")
-}
-
-// ============================================================================
-// 🆕 MODEL 2 : EmployeeContract — Contrat complet avec historique
-// (remplace les champs contractType/contractEndDate directement sur Employee)
-// ============================================================================
-
-model EmployeeContract {
-  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  employeeId String   @db.Uuid
-  employee   Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
-  companyId  String   @db.Uuid
-  company    Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
-
-  // Type et durée
-  contractType ContractType
-  startDate    DateTime     @db.Date
-  endDate      DateTime?    @db.Date // null = CDI ou en cours
-  duration     Int?         @db.SmallInt // durée en mois (CDD)
-  isRenewable  Boolean      @default(false)
-  renewalCount Int          @default(0) @db.SmallInt
-
-  // Poste et rémunération au moment de signature
-  position     String  @db.VarChar(100)
-  baseSalary   Decimal @db.Decimal(15, 2)
-  departmentId String  @db.Uuid
-
-  // Période d'essai
-  trialPeriodDays  Int?      @db.SmallInt // durée période essai en jours
-  trialEndDate     DateTime? @db.Date
-  trialConfirmedAt DateTime? @db.Timestamptz
-
-  // Spécifique PRESTATAIRE / CONSULTANT
-  serviceDescription String?  @db.Text // Objet de la prestation
-  dailyRate          Decimal? @db.Decimal(15, 2) // TJM si consultant
-  invoicingMode      String?  @db.VarChar(50) // MENSUEL / À_LA_MISSION / FORFAIT
-
-  // Spécifique INTÉRIM
-  interimAgency    String? @db.VarChar(100)
-  interimAgencyRef String? @db.VarChar(50)
-
-  // Statut
-  status ContractStatus @default(ACTIVE)
-
-  // Document PDF du contrat
-  documentUrl String? @db.Text
-
-  // Métadonnées
-  signedAt    DateTime? @db.Timestamptz
-  signedByEmp Boolean   @default(false) // Contrat signé par l'employé ?
-  notes       String?   @db.Text
-  createdBy   String?   @db.Uuid
-
-  createdAt DateTime @default(now()) @db.Timestamptz
-  updatedAt DateTime @updatedAt @db.Timestamptz
-
-
-  //audit 
-
-  chainId            String            @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  rank               Int               @default(1) @db.SmallInt // 1 = contrat initial, 2 = 1er renouvellement…
-  kind               ContractLinkKind  @default(INITIAL)
-  previousContractId String?           @unique @db.Uuid // @unique : un contrat n'a qu'UN successeur
-  previousContract   EmployeeContract? @relation("ContractChain", fields: [previousContractId], references: [id], onDelete: NoAction)
-  nextContract       EmployeeContract? @relation("ContractChain")
-  cddMotif           String?           @db.VarChar(40) // validé côté code (CDD_MOTIFS), pas d'enum → pas de migration pour en ajouter
-  renewalReason      String?           @db.VarChar(255)
-  renewedAt          DateTime?         @db.Timestamptz // date à laquelle un successeur a pris le relais
-  renewedBy          String?           @db.Uuid
-
-  // Relation rupture de contrat
-  rupture ContractRupture?
-
-  @@unique([chainId, rank])
-  @@index([chainId])
-  @@index([employeeId])
-  @@index([companyId])
-  @@index([contractType])
-  @@index([status])
-  @@index([endDate])
-  @@map("employee_contracts")
-}
-
-enum ContractStatus {
-  ACTIVE
-  EXPIRED // CDD arrivé à terme
-  TERMINATED // Rupture anticipée
-  TRIAL // En période d'essai
-  TRIAL_FAILED // Essai non concluant
-  CONVERTED // CDD converti en CDI
-  SUSPENDED // Suspendu (ex: suspension disciplinaire)
-
-  @@map("contract_status")
-}
-
-// ============================================================================
-// 🆕 MODEL 3 : ContractRupture — Gestion complète de la fin de contrat
-// ============================================================================
-
-model ContractRupture {
-  id          String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  contractId  String           @unique @db.Uuid
-  contract    EmployeeContract @relation(fields: [contractId], references: [id], onDelete: Cascade)
-  employeeId  String           @db.Uuid
-  employee    Employee         @relation(fields: [employeeId], references: [id]) // <--- AJOUTE CETTE LIGNE PRÉCISEMENT
-  companyId   String           @db.Uuid
-  company     Company          @relation(fields: [companyId], references: [id])
-  // Type et cause de rupture
-  ruptureType RuptureType
-  ruptureDate DateTime         @db.Date // Date effective de fin
-  noticeGiven DateTime?        @db.Date // Date de remise du préavis
-
-  // Cause détaillée (obligatoire pour licenciement)
-  causeCode   String? @db.VarChar(50) // Ex: "FAUTE_GRAVE", "MOTIF_ECONOMIQUE"
-  causeLabel  String? @db.VarChar(255)
-  causeDetail String? @db.Text // Description complète
-
-  // Préavis
-  noticePeriodDays Int?    @db.SmallInt // Durée légale du préavis en jours
-  noticeWorked     Boolean @default(true) // Préavis effectué ?
-  noticeWaived     Boolean @default(false) // Préavis dispensé (avec indemnité) ?
-
-  // Ancienneté et calculs
-  yearsOfService           Decimal  @db.Decimal(5, 2) // Années d'ancienneté exactes
-  monthsOfService          Int      @db.SmallInt // Mois d'ancienneté
-  lastMonthlyGross         Decimal  @db.Decimal(15, 2) // Dernier salaire brut de référence
-  avgLast3MonthsGross      Decimal? @db.Decimal(15, 2) // Moyenne 3 derniers mois (parfois utilisée)
-  //   // ✅ AJOUTS — Convention collective
-  conventionCode           String?  @db.VarChar(50) // "COMMERCE", "BTP"...
-  avgLast12MonthsGross     Decimal? @db.Decimal(15, 2) // Base congés art.127 CT
-  categorieConventionnelle Int?     @db.SmallInt // Catégorie numérique 1-11
-  indemLicenciementDetail  String?  @db.Text // Détail barème ex: "2 ans × 30%..."
-  indemGratification       Decimal  @default(0) @db.Decimal(15, 2) // Gratification proratisée
-  brutImposable            Decimal  @default(0) @db.Decimal(15, 2) // Brut soumis ITS
-  indemnitesExonerees      Decimal  @default(0) @db.Decimal(15, 2) // Exonérées ITS (lic + congés)
-  alertes                  Json     @default("[]") // Alertes calcul
-
-  // ── INDEMNITÉS (conformes Code du Travail Congo) ──────────────────────────
-  // Indemnité de licenciement (art. 82 Code Travail Congo)
-  //   = ancienneté × taux selon barème
-  indemLicenciement     Decimal @default(0) @db.Decimal(15, 2)
-  indemLicenciementBase String? @db.VarChar(100) // Ex: "1 mois/an pour les 5 premières années"
-
-  // Indemnité compensatrice de préavis (si préavis non effectué)
-  indemPreavis     Decimal @default(0) @db.Decimal(15, 2)
-  indemPreavisDays Int     @default(0) @db.SmallInt
-
-  // Indemnité compensatrice de congés payés (congés non pris)
-  indemConges     Decimal @default(0) @db.Decimal(15, 2)
-  indemCongesDays Decimal @default(0) @db.Decimal(5, 2)
-
-  // Dernier salaire proratisé (jours travaillés ce mois)
-  dernierSalaireProrata Decimal @default(0) @db.Decimal(15, 2)
-  dernierSalaireDays    Int     @default(0) @db.SmallInt
-
-  // Autres sommes dues (primes, remboursements...)
-  autresSommesDues   Decimal @default(0) @db.Decimal(15, 2)
-  autresSommesDetail String? @db.Text
-
-  // Total net à payer lors de la rupture
-  totalBrut      Decimal @default(0) @db.Decimal(15, 2)
-  totalNet       Decimal @default(0) @db.Decimal(15, 2) // Après déductions éventuelles
-  cnssApplicable Boolean @default(false) // Indemnités soumises à CNSS ?
-  itsApplicable  Boolean @default(false) // Indemnités soumises à ITS ?
-
-  // ── DOCUMENTS ─────────────────────────────────────────────────────────────
-  lettreNotificationUrl String? @db.Text // Lettre de licenciement / démission
-  conventionRuptureUrl  String? @db.Text // Convention rupture conventionnelle
-  recuSoldeUrl          String? @db.Text // Reçu pour solde de tout compte
-
-  cnssAttestationUrl String? // HTML attestation CNSS stocké
-  cnssNotifiedAt     DateTime? // Date envoi effectif à la CNSS
-  // ── WORKFLOW ──────────────────────────────────────────────────────────────
-  status             RuptureStatus @default(EN_COURS)
-  paidAt             DateTime?     @db.Timestamptz
-  paymentRef         String?       @db.VarChar(100)
-
-  processedBy String? @db.Uuid
-  notes       String? @db.Text
-
-  createdAt DateTime @default(now()) @db.Timestamptz
-  updatedAt DateTime @updatedAt @db.Timestamptz
-
-  @@index([employeeId])
-  @@index([companyId])
-  @@index([ruptureType])
-  @@index([status])
-  @@index([ruptureDate])
-  @@map("contract_ruptures")
-}
-
-enum RuptureType {
-  DEMISSION // Démission (initiative employé)
-  LICENCIEMENT_FAUTE_SIMPLE // Licenciement pour faute simple
-  LICENCIEMENT_FAUTE_GRAVE // Licenciement pour faute grave (pas d'indemnités)
-  LICENCIEMENT_FAUTE_LOURDE // Faute lourde (idem + dommages)
-  LICENCIEMENT_ECONOMIQUE // Motif économique
-  RUPTURE_CONVENTIONNELLE // Rupture d'un commun accord
-  FIN_CDD // CDD arrivé à terme normalement
-  FIN_PERIODE_ESSAI // Rupture pendant/à la fin de l'essai
-  RETRAITE // Départ à la retraite
-  DECES // Décès de l'employé
-  FORCE_MAJEURE // Cas de force majeure
-  INVALIDITE // Inaptitude / invalidité reconnue
-
-  @@map("rupture_type")
-}
-
-enum RuptureStatus {
-  EN_COURS // En cours de traitement
-  CALCULE // Indemnités calculées, en attente validation
-  VALIDE // Validé par RH/Admin
-  PAYE // Solde de tout compte payé
-  CONTESTE // Contesté par l'employé
-  ARCHIVE // Archivé
-
-  @@map("rupture_status")
-}
-
-model PSEProcedure {
-  id        String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  companyId String  @db.Uuid
-  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
-  createdBy String  @db.Uuid
-
-  // Statut : OUVERT | EN_COURS | CLOTURE | ANNULE
-  status            String  @default("OUVERT") @db.VarChar(20)
-  motif             String  @db.Text
-  nbPostesSupprimes Int     @db.SmallInt
-  notes             String? @db.Text
-
-  // Étapes légales — Json array
-  // [{ label: string, done: boolean, requis: boolean, date?: string }]
-  etapes Json @default("[]")
-
-  // Dates clés
-  dateOuverture              DateTime  @default(now()) @db.Timestamptz
-  dateNotificationInspection DateTime? @db.Timestamptz
-  dateReunionDP              DateTime? @db.Timestamptz
-  dateCloture                DateTime? @db.Timestamptz
-
-  createdAt DateTime @default(now()) @db.Timestamptz
-  updatedAt DateTime @updatedAt @db.Timestamptz
-
-  salariesConcernes PSESalarie[]
-
-  @@index([companyId])
-  @@index([status])
-  @@map("pse_procedures")
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// [NOUVEAU MODÈLE] PSESalarie — coller juste après PSEProcedure
-// ─────────────────────────────────────────────────────────────────────────────
-
-model PSESalarie {
-  id         String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  pseId      String       @db.Uuid
-  pse        PSEProcedure @relation(fields: [pseId], references: [id], onDelete: Cascade)
-  employeeId String       @db.Uuid
-  employee   Employee     @relation(fields: [employeeId], references: [id])
-
-  // PREVU | CONFIRME | MAINTENU
-  statut    String   @default("PREVU") @db.VarChar(20)
-  createdAt DateTime @default(now()) @db.Timestamptz
-
-  @@unique([pseId, employeeId])
-  @@index([pseId])
-  @@index([employeeId])
-  @@map("pse_salaries")
-}
-
-// ============================================================================
-// 🆕 MODEL 4 : UnpaidSalaryAlert — Suivi salaires impayés
-// ============================================================================
-
-model UnpaidSalaryAlert {
-  id        String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  companyId String  @db.Uuid
-  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
-
-  // Période non payée
-  month Int @db.SmallInt
-  year  Int @db.SmallInt
-
-  // Montants
-  totalNetDu    Decimal @db.Decimal(15, 2) // Total net à payer ce mois
-  employeeCount Int     @db.SmallInt // Nombre d'employés concernés
-
-  // Statut
-  status      UnpaidStatus @default(EN_ATTENTE)
-  daysOverdue Int          @default(0) @db.SmallInt // Jours de retard
-
-  // Alerte envoyée
-  alertSentAt DateTime? @db.Timestamptz
-  alertLevel  Int       @default(1) @db.SmallInt // 1=info, 2=warn, 3=urgent
-
-  // Régularisation
-  partiallyPaidAt DateTime? @db.Timestamptz
-  partialAmount   Decimal?  @db.Decimal(15, 2)
-  fullyPaidAt     DateTime? @db.Timestamptz
-  notes           String?   @db.Text
-
-  createdAt DateTime @default(now()) @db.Timestamptz
-  updatedAt DateTime @updatedAt @db.Timestamptz
-
-  @@unique([companyId, month, year])
-  @@index([companyId])
-  @@index([status])
-  @@map("unpaid_salary_alerts")
-}
-
-enum UnpaidStatus {
-  EN_ATTENTE // Bulletin généré, pas encore payé
-  PAIEMENT_PARTIEL // Paiement partiel reçu
-  PAYE // Entièrement payé
-  EN_LITIGE // Contesté / litige
-
-  @@map("unpaid_status")
-}
-
-// ============================================================================
-//  NOUVEAUX MODÈLES — Ajouter après model AttendanceCorrection
-//     (Chantier 3 : Shifts / Plannings flexibles)
-// ============================================================================
-
-model WorkShift {
-  id        String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  companyId String  @db.Uuid
-  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
-
-  name          String  @db.VarChar(100) // "Matin", "Soir", "Nuit", "Garde"
-  startHour     Int     @db.SmallInt // 8
-  startMinute   Int     @default(0) @db.SmallInt
-  endHour       Int     @db.SmallInt // 16
-  endMinute     Int     @default(0) @db.SmallInt
-  durationHours Decimal @db.Decimal(4, 2) // calculé : 8.0
-
-  crossesMidnight  Boolean @default(false) // true pour 20h→6h
-  isNightShift     Boolean @default(false)
-  nightPremiumRate Decimal @default(0) @db.Decimal(5, 2) // % prime nuit
-
-  color     String  @default("#0EA5E9") @db.Char(7)
-  isDefault Boolean @default(false) // Shift par défaut de l'entreprise
-  isActive  Boolean @default(true)
-
-  createdAt DateTime @default(now()) @db.Timestamptz
-  updatedAt DateTime @updatedAt @db.Timestamptz
-
-  assignments EmployeeShiftAssignment[]
-
-  @@index([companyId])
-  @@index([isActive])
-  @@map("work_shifts")
-}
-
-model EmployeeShiftAssignment {
-  id         String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  companyId  String    @db.Uuid
-  company    Company   @relation(fields: [companyId], references: [id], onDelete: Cascade) // ← AJOUTER
-  employeeId String    @db.Uuid
-  employee   Employee  @relation(fields: [employeeId], references: [id], onDelete: Cascade)
-  shiftId    String    @db.Uuid
-  shift      WorkShift @relation(fields: [shiftId], references: [id], onDelete: Cascade)
-
-  // Assignation sur une date précise OU un jour récurrent
-  specificDate String? @db.VarChar(10) // "2025-07-14" si date unique
-  dayOfWeek    Int?    @db.SmallInt // 0-6 si planning récurrent (null = spécifique)
-
-  // Validité du planning récurrent
-  validFrom  DateTime? @db.Date
-  validUntil DateTime? @db.Date
-
-  notes String? @db.Text
-
-  createdAt DateTime @default(now()) @db.Timestamptz
-  updatedAt DateTime @updatedAt @db.Timestamptz
-
-  @@unique([employeeId, specificDate])
-  @@index([employeeId])
-  @@index([companyId])
-  @@index([shiftId])
-  @@index([specificDate])
-  @@map("employee_shift_assignments")
-}
-
-// ═══════════════════════════════════════════════════════
-// MULTI-SITES DE POINTAGE
-// ═══════════════════════════════════════════════════════
-model CompanySite {
-  id        String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  companyId String  @db.Uuid
-  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
-
-  name      String  @db.VarChar(100)
-  latitude  Decimal @db.Decimal(10, 8)
-  longitude Decimal @db.Decimal(11, 8)
-  radius    Int     @default(100) @db.SmallInt // ≥ 1 mètre
-  isActive  Boolean @default(true)
-
-  createdAt DateTime @default(now()) @db.Timestamptz
-  updatedAt DateTime @updatedAt @db.Timestamptz
-
-  @@index([companyId])
-  @@index([isActive])
-  @@map("company_sites")
-}
+// ===========================================================================
+// 📂 SECTION 19 — AFFILIATION
+// Affiliés, commissions, retraits
+// ===========================================================================
 
 model Affiliate {
   id        String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
@@ -4499,6 +5027,7 @@ model Affiliate {
 }
 
 // Table pivot optionnelle — permet d'avoir des métadonnées sur le lien affilié→entreprise
+
 model AffiliateCompany {
   id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   affiliateId String    @db.Uuid
@@ -4514,6 +5043,7 @@ model AffiliateCompany {
 }
 
 // Une ligne par paiement RÉUSSI — commission calculée au moment du paiement
+
 model AffiliateCommission {
   id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   affiliateId String    @db.Uuid
@@ -4589,6 +5119,7 @@ model AffiliateCabinetCommission {
 }
 
 // 1 ligne par demande de retrait
+
 model AffiliateWithdrawalRequest {
   id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   affiliateId String    @db.Uuid
@@ -4610,30 +5141,19 @@ model AffiliateWithdrawalRequest {
   @@map("affiliate_withdrawal_requests")
 }
 
+// ===========================================================================
+// 📂 SECTION 20 — SITE PUBLIC : BLOG, CONTACT & CONFIG PLATEFORME
+// Blog, likes, quotas, messages de contact, configuration plateforme
+// ===========================================================================
+
 // Config plateforme clé/valeur
+
 model PlatformConfig {
   key       String   @id @db.VarChar(100)
   value     String   @db.Text
   updatedAt DateTime @updatedAt @db.Timestamptz
 
   @@map("platform_config")
-}
-
-model BulletinTemplate {
-  id        String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  companyId String  @unique @db.Uuid
-  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
-
-  // Stocke la config complète en JSON — supporte mode "template" ET mode "canvas"
-  // Mode template : { mode:"template", templateId, style, blocks }
-  // Mode canvas   : { mode:"canvas", canvasLayout: { primaryColor, blocks:[{id,type,variable,...}] } }
-  config Json @default("{}")
-
-  createdAt DateTime @default(now()) @db.Timestamptz
-  updatedAt DateTime @updatedAt @db.Timestamptz
-
-  @@index([companyId])
-  @@map("bulletin_templates")
 }
 
 // ── Nouveaux modèles à coller à la fin ───────────────────────────────────────
@@ -4731,126 +5251,62 @@ model ContactMessage {
   @@map("contact_messages")
 }
 
-model YtdCheckpoint {
-  id            String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  employeeId    String   @db.Uuid
-  employee      Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
-  effectiveDate DateTime @db.Date
-  brut          Decimal  @default(0) @db.Decimal(15, 2)
-  netImp        Decimal  @default(0) @db.Decimal(15, 2)
-  netSalary     Decimal  @default(0) @db.Decimal(15, 2)
-  chargesSal    Decimal  @default(0) @db.Decimal(15, 2)
-  chargesPat    Decimal  @default(0) @db.Decimal(15, 2)
-  createdAt     DateTime @default(now()) @db.Timestamptz
+// ===========================================================================
+// 📂 SECTION 21 — AUDIT, LOGS & SYSTÈME
+// Journaux d'activité, erreurs, audit, métriques serveur, verrous cron
+// ===========================================================================
 
-  @@index([employeeId, effectiveDate])
-  @@map("ytd_checkpoints")
-}
-
-enum GeneratedContractKind {
-  CONTRAT_TRAVAIL
-  PRESTATION_SERVICES
-  CONSULTANT
-  STAGE
-}
-
-enum GeneratedContractStatus {
-  GENERE
-  ARCHIVE
-}
-
-model GeneratedContract {
+model ActivityLog {
   id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
 
-  companyId String  @db.Uuid
-  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  userId String @db.Uuid
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  employeeId String   @db.Uuid
-  employee   Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  action      String  @db.VarChar(100)
+  entity      String  @db.VarChar(50)
+  entityId    String? @db.Uuid
+  description String  @db.Text
 
-  kind             GeneratedContractKind
-  contractDuration String                  @default("INDETERMINEE") @db.VarChar(20)
-  status           GeneratedContractStatus @default(GENERE)
-
-  startDate       DateTime? @db.Date
-  endDate         DateTime? @db.Date
-  trialPeriodText String?   @db.VarChar(100)
-
-  snapshot Json
-
-  baseSalary         Decimal @db.Decimal(15, 2)
-  overSalary         Decimal @default(0) @db.Decimal(15, 2)
-  overtimeFlat       Decimal @default(0) @db.Decimal(15, 2)
-  bonuses            Json    @default("[]")
-  totalGross         Decimal @db.Decimal(15, 2)
-  cnssDeduction      Decimal @default(0) @db.Decimal(15, 2)
-  itsDeduction       Decimal @default(0) @db.Decimal(15, 2)
-  tolDeduction       Decimal @default(0) @db.Decimal(15, 2)
-  transportAllowance Decimal @default(0) @db.Decimal(15, 2)
-  transportIndemnity Decimal @default(0) @db.Decimal(15, 2)
-  allowances         Json    @default("[]")
-  netPay             Decimal @db.Decimal(15, 2)
-
-  fileUrl  String? @db.Text
-  fileName String? @db.VarChar(255)
-
-  generatedByUserId String?
-  generatedAt       DateTime @default(now()) @db.Timestamptz
-  updatedAt         DateTime @updatedAt @db.Timestamptz
-
-  @@index([companyId])
-  @@index([employeeId])
-  @@index([status])
-  @@map("generated_contracts")
-}
-
-model EchelonSuggestion {
-  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-
-  employeeId String   @db.Uuid
-  employee   Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
-  companyId  String   @db.Uuid
-  company    Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
-
-  conventionCode String @db.VarChar(50)
-
-  currentEchelonIndex   Int
-  suggestedEchelonIndex Int
-
-  yearsCompleted  Int
-  anniversaryDate DateTime @db.Date
-
-  scheduledNotifyDate DateTime  @db.Date
-  notifiedAt          DateTime? @db.Timestamptz
-
-  status      EchelonSuggestionStatus @default(PENDING)
-  decidedAt   DateTime?               @db.Timestamptz
-  decidedById String?                 @db.Uuid
+  changes  Json?
+  metadata Json?
 
   createdAt DateTime @default(now()) @db.Timestamptz
-  updatedAt DateTime @updatedAt @db.Timestamptz
 
-  @@index([companyId, status])
-  @@index([employeeId, status])
-  @@index([scheduledNotifyDate, notifiedAt])
-  @@map("echelon_suggestions")
+  @@index([userId])
+  @@index([entity, entityId])
+  @@index([createdAt])
+  @@map("activity_logs")
 }
 
-enum EchelonSuggestionStatus {
-  PENDING
-  ACCEPTED
-  REJECTED
+// ─── Erreurs applicatives (Error Tracker) ────────────────────────────────────
 
-  @@map("echelon_suggestion_status")
-}
+model AppError {
+  id         String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  errorCode  String    @db.VarChar(100)
+  statusCode Int       @db.SmallInt
+  message    String    @db.Text
+  stack      String?   @db.Text
+  method     String    @db.VarChar(10)
+  path       String    @db.Text
+  body       Json?
+  query      Json?
+  userId     String?   @db.Uuid
+  companyId  String?   @db.Uuid
+  ip         String?
+  severity   String    @default("ERROR") @db.VarChar(20)
+  resolved   Boolean   @default(false)
+  resolvedAt DateTime? @db.Timestamptz
+  resolvedBy String?   @db.Uuid
+  note       String?   @db.Text
+  createdAt  DateTime  @default(now()) @db.Timestamptz
 
-enum SystemLogLevel {
-  INFO
-  WARNING
-  ERROR
-  ALERT
-
-  @@map("system_log_level")
+  @@index([statusCode])
+  @@index([companyId])
+  @@index([path])
+  @@index([errorCode])
+  @@index([createdAt])
+  @@index([resolved])
+  @@map("app_errors")
 }
 
 model SystemLog {
@@ -4869,6 +5325,15 @@ model SystemLog {
   @@index([companyId])
   @@index([createdAt])
   @@map("system_logs")
+}
+
+enum SystemLogLevel {
+  INFO
+  WARNING
+  ERROR
+  ALERT
+
+  @@map("system_log_level")
 }
 
 model CronLock {
@@ -4905,307 +5370,6 @@ model DailyUserActivity {
   @@map("daily_user_activity")
 }
 
-model AttendanceDeletionLog {
-  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-
-  companyId      String    @db.Uuid
-  employeeId     String    @db.Uuid
-  attendanceDate String    @db.VarChar(10) // même format que Attendance.date ("2025-12-25")
-  checkIn        DateTime? @db.Timestamptz
-  checkOut       DateTime? @db.Timestamptz
-
-  deletedBy String   @db.Uuid
-  deletedAt DateTime @default(now()) @db.Timestamptz
-
-  reason    String  @db.Text
-  ipAddress String? @db.Inet
-  userAgent String? @db.Text
-
-  @@index([companyId])
-  @@index([deletedBy])
-  @@map("attendance_deletion_logs")
-}
-
-model UserCompany {
-  id        String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  userId    String @db.Uuid
-  companyId String @db.Uuid
-
-  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
-  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
-
-  createdAt DateTime @default(now()) @db.Timestamptz
-
-  @@unique([userId, companyId])
-  @@index([userId])
-  @@index([companyId])
-  @@map("user_companies")
-}
-
-
-model PushSubscription {
-  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  userId      String   @db.Uuid
-  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  token       String   @unique @db.Text
-  deviceLabel String?  @db.VarChar(150)
-  createdAt   DateTime @default(now()) @db.Timestamptz
-  lastUsedAt  DateTime @default(now()) @db.Timestamptz
-
-  // 🆕 Identité stable de l'appareil (générée par l'app, survit aux ré-abonnements)
-  deviceId      String?   @db.VarChar(64)
-  userAgent     String?   @db.VarChar(300)
-  // ACTIVE | DISABLED (désactivé par l'utilisateur) | EXPIRED (le service push a répondu 404/410)
-  status        String    @default("ACTIVE") @db.VarChar(12)
-  enabledAt     DateTime  @default(now()) @db.Timestamptz
-  disabledAt    DateTime? @db.Timestamptz
-  lastSuccessAt DateTime? @db.Timestamptz
-  lastFailureAt DateTime? @db.Timestamptz
-  lastError     String?   @db.VarChar(300)
-
-  @@unique([userId, deviceId])
-  @@index([userId])
-  @@index([status])
-  @@map("push_subscriptions")
-}
-
-
-// 🆕 Historique : ENABLED (nouvel appareil) | REACTIVATED | DISABLED | EXPIRED | MOVED
-model PushDeviceEvent {
-  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  userId      String   @db.Uuid
-  deviceId    String?  @db.VarChar(64)
-  deviceLabel String?  @db.VarChar(150)
-  type        String   @db.VarChar(20)
-  createdAt   DateTime @default(now()) @db.Timestamptz
-
-  @@index([userId, createdAt])
-  @@index([createdAt])
-  @@map("push_device_events")
-}
-
-// 🆕 Envois groupés (rappel de pointage) lancés par le super admin
-model PushBroadcast {
-  id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  createdBy      String    @db.Uuid
-  companyId      String?   @db.Uuid
-  onlyNotPunched Boolean   @default(false)
-  title          String    @db.VarChar(120)
-  body           String    @db.VarChar(300)
-  status         String    @default("RUNNING") @db.VarChar(12) // RUNNING | DONE | FAILED
-  total          Int       @default(0)
-  processed      Int       @default(0)
-  sent           Int       @default(0)
-  failed         Int       @default(0)
-  noDevice       Int       @default(0)
-  error          String?   @db.VarChar(300)
-  createdAt      DateTime  @default(now()) @db.Timestamptz
-  finishedAt     DateTime? @db.Timestamptz
-
-  @@index([createdAt])
-  @@map("push_broadcasts")
-}
-
-
-
-
-
-
-// ============================================================================
-// ✅ LOT A — Fonctions de validation (avis) attribuées par l'admin
-// Un utilisateur peut cumuler plusieurs fonctions (ex. RH + DG).
-// `code` = chaîne validée côté code (approvals.constants.ts), pas un enum :
-// ajouter une fonction plus tard ne demande aucune migration.
-// ============================================================================
-model UserApprovalFunction {
-  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  userId    String   @db.Uuid
-  companyId String   @db.Uuid
-  code      String   @db.VarChar(40)
-  canSign   Boolean  @default(false)
-  createdBy String?  @db.Uuid
-  createdAt DateTime @default(now()) @db.Timestamptz
-  updatedAt DateTime @updatedAt @db.Timestamptz
-
-  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
-  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
-
-  @@unique([userId, companyId, code])
-  @@index([companyId, code])
-  @@index([userId])
-  @@map("user_approval_functions")
-}
-
-// ============================================================================
-// ✅ LOT B — Circuits d'avis, avis, décisions en attente
-// `requestType` = 'LOAN' | 'ADVANCE' | 'ABSENCE' (chaînes validées côté code —
-// les congés viendront ensuite sans migration). Aucune FK vers les demandes
-// (prêts / avances / absences) : l'existant n'est pas touché.
-// ============================================================================
-model ApprovalCircuit {
-  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  companyId   String   @db.Uuid
-  requestType String   @db.VarChar(20)
-  isActive    Boolean  @default(true)
-  createdAt   DateTime @default(now()) @db.Timestamptz
-  updatedAt   DateTime @updatedAt @db.Timestamptz
-
-  company Company               @relation(fields: [companyId], references: [id], onDelete: Cascade)
-  steps   ApprovalCircuitStep[]
-
-  @@unique([companyId, requestType])
-  @@map("approval_circuits")
-}
-
-model ApprovalCircuitStep {
-  id           String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  circuitId    String @db.Uuid
-  position     Int
-  functionCode String @db.VarChar(40)
-
-  circuit ApprovalCircuit @relation(fields: [circuitId], references: [id], onDelete: Cascade)
-
-  @@unique([circuitId, functionCode])
-  @@index([circuitId, position])
-  @@map("approval_circuit_steps")
-}
-
-model ApprovalOpinion {
-  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  companyId    String   @db.Uuid
-  requestType  String   @db.VarChar(20)
-  requestId    String   @db.Uuid
-  functionCode String   @db.VarChar(40)
-  userId       String?  @db.Uuid
-  authorName   String   @db.VarChar(200)
-  opinion      String   @db.VarChar(15) // FAVORABLE | UNFAVORABLE
-  comment      String?  @db.Text
-  signatureUrl String?  @db.VarChar(500)
-  createdAt    DateTime @default(now()) @db.Timestamptz
-  updatedAt    DateTime @updatedAt @db.Timestamptz
-
-  @@unique([requestType, requestId, functionCode])
-  @@index([companyId, requestType, requestId])
-  @@map("approval_opinions")
-}
-
-model ApprovalPendingDecision {
-  id                String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  companyId         String    @db.Uuid
-  requestType       String    @db.VarChar(20)
-  requestId         String    @db.Uuid
-  decision          String    @db.VarChar(10) // APPROVE
-  // WAITING_OPINIONS | NEEDS_CONFIRMATION | FINALIZING | FINALIZED | CANCELLED | SUPERSEDED
-  state             String    @db.VarChar(25)
-  decidedByUserId   String?   @db.Uuid
-  decidedByName     String    @db.VarChar(200)
-  payload           Json?
-  forced            Boolean   @default(false)
-  missingAtDecision Json?
-  finalizedByUserId String?   @db.Uuid
-  finalizedAt       DateTime? @db.Timestamptz
-  createdAt         DateTime  @default(now()) @db.Timestamptz
-  updatedAt         DateTime  @updatedAt @db.Timestamptz
-
-  @@unique([requestType, requestId])
-  @@index([companyId, state])
-  @@map("approval_pending_decisions")
-}
-
-
-model CompanyTrustedIp {
-  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  companyId String   @db.Uuid
-  company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
-
-  label     String   @db.VarChar(100)
-  ip        String   @db.VarChar(64)
-  isActive  Boolean  @default(true)
-  createdAt DateTime @default(now()) @db.Timestamptz
-
-  @@unique([companyId, ip])
-  @@index([companyId])
-  @@map("company_trusted_ips")
-}
-
-
-
-model CompanyIpSighting {
-  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  companyId  String   @db.Uuid
-  company    Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
-  userId     String   @db.Uuid
-  ip         String   @db.VarChar(64)
-  lastSeenAt DateTime @default(now()) @db.Timestamptz
-  blocked    Boolean  @default(false)
- 
-  @@unique([companyId, ip, userId])
-  @@index([companyId, ip, lastSeenAt])
-  @@index([lastSeenAt])
-  @@map("company_ip_sightings")
-}
-
-
-
-
-model ChatConversation {
-  id        String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  companyId String  @db.Uuid
-  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
-
-  directKey String @unique @db.VarChar(80)
-
-  lastMessageAt  DateTime? @db.Timestamptz
-  lastPreviewEnc String?   @db.Text
-  lastSenderId   String?   @db.Uuid
-
-  createdAt DateTime @default(now()) @db.Timestamptz
-
-  participants ChatParticipant[]
-  messages     ChatMessage[]
-
-  @@index([companyId, lastMessageAt])
-  @@map("chat_conversations")
-}
-
-model ChatParticipant {
-  id             String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  conversationId String           @db.Uuid
-  conversation   ChatConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
-  userId         String           @db.Uuid
-  user           User             @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  unreadCount Int       @default(0)
-  lastReadAt  DateTime? @db.Timestamptz
-  lastDeliveredAt DateTime? @db.Timestamptz
-  createdAt   DateTime  @default(now()) @db.Timestamptz
-
-  @@unique([conversationId, userId])
-  @@index([userId])
-  @@map("chat_participants")
-}
-
-model ChatMessage {
-  id             String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  seq            BigInt           @unique @default(autoincrement())
-  conversationId String           @db.Uuid
-  conversation   ChatConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
-  senderId       String           @db.Uuid
-  sender         User             @relation("ChatMessageSender", fields: [senderId], references: [id], onDelete: Cascade)
-
-  bodyEnc  String  @map("body_enc") @db.Text
-  // Idempotence : un renvoi réseau avec le même clientId ne crée pas de doublon
-  clientId String? @db.Uuid
-
-  createdAt DateTime @default(now()) @db.Timestamptz
-
-  @@unique([senderId, clientId])
-  @@index([conversationId, seq])
-  @@index([createdAt])
-  @@map("chat_messages")
-}
-
-
 model ServerMetricSnapshot {
   id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   createdAt DateTime @default(now()) @db.Timestamptz
@@ -5215,21 +5379,6 @@ model ServerMetricSnapshot {
 
   @@index([createdAt])
   @@map("server_metric_snapshots")
-}
-
-
-
-
-
-
-//module et table de l'audit
-
-enum ContractLinkKind {
-  INITIAL        // premier contrat de la chaîne
-  RENEWAL        // renouvellement d'un CDD
-  CONVERSION_CDI // CDD devenu CDI
-
-  @@map("contract_link_kind")
 }
 
 enum AuditSeverity {
@@ -5250,6 +5399,7 @@ enum AuditActorType {
 // Journal d'audit en AJOUT SEUL, chaîné par hash.
 // ⚠️ Volontairement SANS clé étrangère vers User / Company : supprimer un
 // utilisateur ou une entreprise ne doit JAMAIS effacer ni bloquer sa trace.
+
 model AuditEvent {
   id         String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   companyId  String         @db.Uuid
@@ -5280,7 +5430,6 @@ model AuditEvent {
   @@map("audit_events")
 }
 
-
 enum AuditFindingStatus {
   OPEN      // détecté, à traiter
   JUSTIFIED // un humain a examiné et justifié (constat non bloquant)
@@ -5298,14 +5447,8 @@ enum AuditRunTrigger {
   @@map("audit_run_trigger")
 }
 
-enum AuditCheckpointStatus {
-  DONE           // fait, preuve renseignée
-  NOT_APPLICABLE // sans objet ce mois-ci
-
-  @@map("audit_checkpoint_status")
-}
-
 // Une exécution du moteur (traçabilité : qui/quand/combien).
+
 model AuditRun {
   id               String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   companyId        String          @db.Uuid
@@ -5330,6 +5473,7 @@ model AuditRun {
 }
 
 // Un écart détecté. Dédupliqué par `fingerprint` : relancer le contrôle ne crée pas de doublons.
+
 model AuditFinding {
   id              String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   companyId       String             @db.Uuid
@@ -5361,8 +5505,16 @@ model AuditFinding {
   @@map("audit_findings")
 }
 
+enum AuditCheckpointStatus {
+  DONE           // fait, preuve renseignée
+  NOT_APPLICABLE // sans objet ce mois-ci
+
+  @@map("audit_checkpoint_status")
+}
+
 // Les ~10 % humains : contrôles que le logiciel ne peut pas faire seul
 // (dépôt CNSS, déclarations DGI…). Le RH atteste et renseigne la preuve.
+
 model AuditCheckpoint {
   id          String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   companyId   String                @db.Uuid
@@ -5379,4 +5531,5 @@ model AuditCheckpoint {
   @@unique([companyId, code, periodYear, periodMonth])
   @@map("audit_checkpoints")
 }
+
 // <<< FIN SECTION 3

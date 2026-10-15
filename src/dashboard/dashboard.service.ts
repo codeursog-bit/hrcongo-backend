@@ -880,8 +880,18 @@ export class DashboardService {
       this.prisma.absenceRequest.count({
         where: { companyId: user.companyId, status: 'PENDING', ...deptFilter },
       }),
+      // Permissions à traiter : autorisations en attente + (Admin/RH seulement,
+      // seuls habilités à valider) retours déclarés par les employés à confirmer
       this.prisma.permissionTicket.count({
-        where: { companyId: user.companyId, status: 'PENDING', ...deptFilter },
+        where: ['ADMIN', 'SUPER_ADMIN', 'HR_MANAGER'].includes(user.role)
+          ? {
+              companyId: user.companyId,
+              OR: [
+                { status: 'PENDING' },
+                { status: 'APPROVED', returnStatus: 'PENDING_VALIDATION' },
+              ],
+            }
+          : { companyId: user.companyId, status: 'PENDING', ...deptFilter },
       }),
     ]);
 

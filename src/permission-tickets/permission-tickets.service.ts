@@ -17,10 +17,15 @@ import {
 import { PrismaService } from '../prisma/prisma.service';
 import { CreatePermissionTicketDto } from './dto/create-permission-ticket.dto';
 import {
+  ConfirmReturnDto,
+  RejectReturnDto,
+  UpdateTimesDto,
+} from './dto/permission-return.dto';
+import {
   EmployeeNotFoundException,
   CompanyNotFoundException,
 } from '../exceptions/business.exceptions';
-import { NotificationType } from '@prisma/client';
+import { PermissionEventType, Prisma } from '@prisma/client';
 import { NotificationsService } from '../notifications/notifications.service';
 import { SubscriptionGuard } from '../subscriptions/guards/subscription.guard';
 
@@ -82,6 +87,49 @@ export class PermissionTicketsService {
       : type === 'MISSION'
         ? 'Mission d\u2019entreprise'
         : 'Autre';
+  }
+
+  private fmtTime(d: Date): string {
+    // Heure de Brazzaville (UTC+1) — le serveur peut tourner dans un autre fuseau
+    return d.toLocaleTimeString('fr-FR', {
+      hour: '2-digit',
+      minute: '2-digit',
+      timeZone: 'Africa/Brazzaville',
+    });
+  }
+
+  /** Utilisateur (compte) rattaché à la fiche employé — pour le notifier */
+  private async findEmployeeUserId(
+    email: string | null,
+    companyId: string,
+  ): Promise<string | null> {
+    if (!email) return null;
+    const u = await this.prisma.user.findFirst({
+      where: { email, companyId },
+      select: { id: true },
+    });
+    return u?.id ?? null;
+  }
+
+  private isOwner(userEmail: string | null, employeeEmail: string | null) {
+    return (
+      !!userEmail &&
+      !!employeeEmail &&
+      userEmail.trim().toLowerCase() === employeeEmail.trim().toLowerCase()
+    );
+  }
+
+  private parseDate(value: string, label: string): Date {
+    const d = new Date(value);
+    if (isNaN(d.getTime()))
+      throw new BadRequestException(`${label} : date invalide`);
+    return d;
+  }
+
+  /** Une heure « effective » ne peut pas être dans le futur (tolérance 2 min) */
+  private assertNotFuture(d: Date, label: string) {
+    if (d.getTime() > Date.now() + 2 * 60 * 1000)
+      throw new BadRequestException(`${label} ne peut pas être dans le futur`);
   }
 
   // ============================================================================
@@ -154,6 +202,28 @@ export class PermissionTicketsService {
         status: autoApprove ? 'APPROVED' : 'PENDING',
         reviewedBy: autoApprove ? userId : undefined,
         reviewedAt: autoApprove ? new Date() : undefined,
+        events: {
+          create: [
+            {
+              type: PermissionEventType.CREATED,
+              actorUserId: userId,
+              actorRole: user.role,
+              note: isOnBehalf
+                ? 'Ticket créé par l’administration pour le compte de l’employé'
+                : undefined,
+            },
+            ...(autoApprove
+              ? [
+                  {
+                    type: PermissionEventType.APPROVED,
+                    actorUserId: userId,
+                    actorRole: user.role,
+                    note: 'Autorisation automatique (créé par l’administration)',
+                  },
+                ]
+              : []),
+          ],
+        },
       },
     });
 
@@ -236,6 +306,9 @@ export class PermissionTicketsService {
           },
         },
         reviewedByUser: { select: { id: true, email: true } },
+        returnConfirmedByUser: {
+          select: { id: true, email: true, firstName: true, lastName: true },
+        },
         createdByUser: { select: { id: true, email: true, role: true } },
       },
       orderBy: { createdAt: 'desc' },
@@ -251,6 +324,12 @@ export class PermissionTicketsService {
 
     return this.prisma.permissionTicket.findMany({
       where: { employeeId: employee.id, companyId: user.companyId },
+      include: {
+        reviewedByUser: { select: { id: true, email: true } },
+        returnConfirmedByUser: {
+          select: { id: true, email: true, firstName: true, lastName: true },
+        },
+      },
       orderBy: { createdAt: 'desc' },
     });
   }
@@ -281,6 +360,9 @@ export class PermissionTicketsService {
           },
         },
         reviewedByUser: { select: { email: true } },
+        returnConfirmedByUser: {
+          select: { email: true, firstName: true, lastName: true },
+        },
       },
     });
     if (!ticket) throw new NotFoundException('Ticket introuvable');
@@ -337,15 +419,29 @@ export class PermissionTicketsService {
     if (status === 'REJECTED' && !rejectionReason?.trim())
       throw new BadRequestException('Un motif de refus est requis');
 
-    const updated = await this.prisma.permissionTicket.update({
-      where: { id },
-      data: {
-        status,
-        reviewedBy: userId,
-        reviewedAt: new Date(),
-        rejectionReason: status === 'REJECTED' ? rejectionReason : undefined,
-      },
-    });
+    const [updated] = await this.prisma.$transaction([
+      this.prisma.permissionTicket.update({
+        where: { id },
+        data: {
+          status,
+          reviewedBy: userId,
+          reviewedAt: new Date(),
+          rejectionReason: status === 'REJECTED' ? rejectionReason : undefined,
+        },
+      }),
+      this.prisma.permissionTicketEvent.create({
+        data: {
+          ticketId: id,
+          type:
+            status === 'APPROVED'
+              ? PermissionEventType.APPROVED
+              : PermissionEventType.REJECTED,
+          actorUserId: userId,
+          actorRole: user.role,
+          note: status === 'REJECTED' ? rejectionReason?.trim() : undefined,
+        },
+      }),
+    ]);
 
     const employeeUser = await this.prisma.user.findFirst({
       where: { email: ticket.employee.email, companyId: ticket.companyId },
@@ -373,28 +469,440 @@ export class PermissionTicketsService {
   }
 
   // ============================================================================
-  // 🔙 MARQUER LE RETOUR
+  // 🔙 RETOUR — l'employé DÉCLARE, l'admin / RH VALIDE
+  // ----------------------------------------------------------------------------
+  //  • returnDeclaredAt  = heure du clic « Je suis de retour » (déclaratif)
+  //  • actualReturnTime  = heure de retour VALIDÉE par l'administration
+  //  • actualDepartureTime = sortie effective, uniquement si elle a été corrigée
+  //    (sinon departureTime fait foi)
+  // Chaque étape écrit un événement (PermissionTicketEvent) dans la même
+  // transaction que la modification : pas de changement d'heure sans trace.
   // ============================================================================
 
-  async markReturn(id: string, userId: string) {
-    const user = await this.getUserWithCompany(userId);
+  private readonly returnInclude = {
+    returnConfirmedByUser: {
+      select: { id: true, email: true, firstName: true, lastName: true },
+    },
+  };
+
+  private assertHr(role: string) {
+    if (!HR_ROLES.includes(role))
+      throw new ForbiddenException(
+        'Seuls les administrateurs et les RH peuvent valider ou corriger un retour.',
+      );
+  }
+
+  private async loadTicketWithEmployee(id: string, companyId: string) {
     const ticket = await this.prisma.permissionTicket.findUnique({
       where: { id },
+      include: {
+        employee: {
+          select: { id: true, firstName: true, lastName: true, email: true },
+        },
+      },
     });
-
     if (!ticket) throw new NotFoundException('Ticket introuvable');
-    if (ticket.companyId !== user.companyId)
+    if (ticket.companyId !== companyId)
       throw new ForbiddenException('Accès refusé');
+    return ticket;
+  }
+
+  /**
+   * Clic sur « Je suis de retour ».
+   *  - Employé : l'heure est notée, le retour passe « en attente de validation »
+   *    et les admins + RH sont notifiés. Rien n'est validé tant qu'ils n'ont pas confirmé.
+   *  - Admin / RH : ils sont eux-mêmes l'autorité de validation (comme pour la
+   *    création d'un ticket) → le retour est enregistré et confirmé directement.
+   */
+  async markReturn(id: string, userId: string) {
+    const user = await this.getUserWithCompany(userId);
+    const ticket = await this.loadTicketWithEmployee(id, user.companyId);
+
     if (ticket.status !== 'APPROVED')
       throw new BadRequestException(
         'Seul un ticket approuvé peut être clôturé',
       );
-    if (ticket.actualReturnTime)
-      throw new BadRequestException('Le retour a déjà été enregistré');
+    if (ticket.actualReturnTime || ticket.returnStatus === 'CONFIRMED')
+      throw new BadRequestException('Le retour a déjà été validé');
+    if (ticket.returnStatus === 'PENDING_VALIDATION')
+      throw new BadRequestException(
+        'Le retour est déjà déclaré, en attente de validation',
+      );
 
-    return this.prisma.permissionTicket.update({
+    const isHr = HR_ROLES.includes(user.role);
+    const owner = this.isOwner(user.email, ticket.employee.email);
+    if (!isHr && !owner)
+      throw new ForbiddenException(
+        "Seul l'employé concerné ou l'administration peut déclarer ce retour",
+      );
+
+    const now = new Date();
+    const effectiveDeparture = ticket.actualDepartureTime ?? ticket.departureTime;
+    if (now < effectiveDeparture)
+      throw new BadRequestException(
+        "Le retour ne peut pas être enregistré avant l'heure de sortie",
+      );
+
+    const who = `${ticket.employee.firstName} ${ticket.employee.lastName}`;
+
+    // ── Admin / RH : enregistrement direct, déjà validé
+    if (isHr) {
+      const [updated] = await this.prisma.$transaction([
+        this.prisma.permissionTicket.update({
+          where: { id },
+          data: {
+            returnDeclaredAt: now,
+            actualReturnTime: now,
+            returnStatus: 'CONFIRMED',
+            returnConfirmedBy: userId,
+            returnConfirmedAt: now,
+          },
+          include: this.returnInclude,
+        }),
+        this.prisma.permissionTicketEvent.create({
+          data: {
+            ticketId: id,
+            type: PermissionEventType.RETURN_CONFIRMED,
+            actorUserId: userId,
+            actorRole: user.role,
+            note: 'Retour enregistré directement par l’administration',
+            data: {
+              direct: true,
+              returnTime: now.toISOString(),
+              departureTime: effectiveDeparture.toISOString(),
+            },
+          },
+        }),
+      ]);
+
+      if (!owner) {
+        const employeeUserId = await this.findEmployeeUserId(
+          ticket.employee.email,
+          ticket.companyId,
+        );
+        if (employeeUserId) {
+          await this.notificationsService.create({
+            userId: employeeUserId,
+            type: 'PERMISSION_RETURN_CONFIRMED',
+            title: '✅ Retour enregistré',
+            message: `Votre retour a été enregistré : sorti de ${this.fmtTime(effectiveDeparture)} à ${this.fmtTime(now)}`,
+            link: '/presences/permissions/mon-espace',
+            metadata: { ticketId: id },
+          });
+        }
+      }
+      return updated;
+    }
+
+    // ── Employé : déclaration, à valider par l'administration
+    const [updated] = await this.prisma.$transaction([
+      this.prisma.permissionTicket.update({
+        where: { id },
+        data: { returnDeclaredAt: now, returnStatus: 'PENDING_VALIDATION' },
+        include: this.returnInclude,
+      }),
+      this.prisma.permissionTicketEvent.create({
+        data: {
+          ticketId: id,
+          type: PermissionEventType.RETURN_DECLARED,
+          actorUserId: userId,
+          actorRole: user.role,
+          data: { declaredAt: now.toISOString() },
+        },
+      }),
+    ]);
+
+    // 🔔 Admins + RH managers (seuls habilités à valider)
+    await this.notificationsService.createForGroup(
+      ticket.companyId,
+      HR_ROLES,
+      {
+        type: 'PERMISSION_RETURN_REQUEST',
+        title: '🔙 Retour de permission à valider',
+        message: `${who} indique être de retour à ${this.fmtTime(now)} (sortie ${this.fmtTime(effectiveDeparture)}, retour prévu ${this.fmtTime(ticket.expectedReturnTime)}) — à valider`,
+        link: `/presences/permissions?ticket=${id}`,
+        metadata: { ticketId: id, employeeId: ticket.employee.id },
+      },
+    );
+
+    return updated;
+  }
+
+  /** ✅ Confirmer le retour déclaré — Admin / RH. Les heures peuvent être ajustées au passage (motif obligatoire). */
+  async confirmReturn(id: string, dto: ConfirmReturnDto, userId: string) {
+    const user = await this.getUserWithCompany(userId);
+    this.assertHr(user.role);
+    const ticket = await this.loadTicketWithEmployee(id, user.companyId);
+
+    if (ticket.status !== 'APPROVED')
+      throw new BadRequestException('Ce ticket n’est pas approuvé');
+    if (ticket.returnStatus !== 'PENDING_VALIDATION' || !ticket.returnDeclaredAt)
+      throw new BadRequestException(
+        'Aucun retour en attente de validation pour ce ticket',
+      );
+
+    const declared = ticket.returnDeclaredAt;
+    const currentDeparture = ticket.actualDepartureTime ?? ticket.departureTime;
+    const returnTime = dto.actualReturnTime
+      ? this.parseDate(dto.actualReturnTime, 'Heure de retour')
+      : declared;
+    const departure = dto.actualDepartureTime
+      ? this.parseDate(dto.actualDepartureTime, 'Heure de sortie')
+      : currentDeparture;
+
+    this.assertNotFuture(returnTime, "L'heure de retour");
+    if (dto.actualDepartureTime)
+      this.assertNotFuture(departure, "L'heure de sortie");
+    if (returnTime <= departure)
+      throw new BadRequestException(
+        "L'heure de retour doit être après l'heure de sortie",
+      );
+
+    const returnAdjusted =
+      Math.abs(returnTime.getTime() - declared.getTime()) >= 60_000;
+    const departureAdjusted =
+      !!dto.actualDepartureTime &&
+      departure.getTime() !== currentDeparture.getTime();
+    const adjusted = returnAdjusted || departureAdjusted;
+    if (adjusted && !dto.note?.trim())
+      throw new BadRequestException(
+        'Un motif est requis quand les heures diffèrent de la déclaration de l’employé',
+      );
+
+    const now = new Date();
+    const [updated] = await this.prisma.$transaction([
+      this.prisma.permissionTicket.update({
+        where: { id },
+        data: {
+          actualReturnTime: returnTime,
+          actualDepartureTime: departureAdjusted ? departure : undefined,
+          returnStatus: 'CONFIRMED',
+          returnConfirmedBy: userId,
+          returnConfirmedAt: now,
+          timesAdjusted: adjusted ? true : undefined,
+        },
+        include: this.returnInclude,
+      }),
+      this.prisma.permissionTicketEvent.create({
+        data: {
+          ticketId: id,
+          type: PermissionEventType.RETURN_CONFIRMED,
+          actorUserId: userId,
+          actorRole: user.role,
+          note: dto.note?.trim() || undefined,
+          data: {
+            declaredAt: declared.toISOString(),
+            returnTime: returnTime.toISOString(),
+            departureTime: departure.toISOString(),
+            adjusted,
+          },
+        },
+      }),
+    ]);
+
+    const employeeUserId = await this.findEmployeeUserId(
+      ticket.employee.email,
+      ticket.companyId,
+    );
+    if (employeeUserId) {
+      await this.notificationsService.create({
+        userId: employeeUserId,
+        type: 'PERMISSION_RETURN_CONFIRMED',
+        title: '✅ Retour validé',
+        message: `Votre retour a été validé : sorti de ${this.fmtTime(departure)} à ${this.fmtTime(returnTime)}${adjusted ? ' (heures ajustées par l’administration)' : ''}`,
+        link: '/presences/permissions/mon-espace',
+        metadata: { ticketId: id },
+      });
+    }
+    return updated;
+  }
+
+  /** ❌ Retour non validé (déclaré par erreur, incohérent…) — le ticket repasse « pas encore revenu » */
+  async rejectReturn(id: string, dto: RejectReturnDto, userId: string) {
+    const user = await this.getUserWithCompany(userId);
+    this.assertHr(user.role);
+    const ticket = await this.loadTicketWithEmployee(id, user.companyId);
+
+    if (ticket.returnStatus !== 'PENDING_VALIDATION')
+      throw new BadRequestException(
+        'Aucun retour en attente de validation pour ce ticket',
+      );
+    const reason = dto.reason?.trim();
+    if (!reason) throw new BadRequestException('Un motif est requis');
+
+    const [updated] = await this.prisma.$transaction([
+      this.prisma.permissionTicket.update({
+        where: { id },
+        data: { returnStatus: 'NOT_RETURNED', returnDeclaredAt: null },
+        include: this.returnInclude,
+      }),
+      this.prisma.permissionTicketEvent.create({
+        data: {
+          ticketId: id,
+          type: PermissionEventType.RETURN_REJECTED,
+          actorUserId: userId,
+          actorRole: user.role,
+          note: reason,
+          data: { declaredAt: ticket.returnDeclaredAt?.toISOString() ?? null },
+        },
+      }),
+    ]);
+
+    const employeeUserId = await this.findEmployeeUserId(
+      ticket.employee.email,
+      ticket.companyId,
+    );
+    if (employeeUserId) {
+      await this.notificationsService.create({
+        userId: employeeUserId,
+        type: 'PERMISSION_RETURN_REJECTED',
+        title: '⚠️ Retour non validé',
+        message: `Votre déclaration de retour n’a pas été validée : ${reason}. Vous pouvez la refaire quand vous êtes de retour.`,
+        link: '/presences/permissions/mon-espace',
+        metadata: { ticketId: id },
+      });
+    }
+    return updated;
+  }
+
+  /** ✏️ Corriger les heures de sortie / retour (imprévus) — Admin / RH, motif obligatoire, tout est tracé */
+  async updateTimes(id: string, dto: UpdateTimesDto, userId: string) {
+    const user = await this.getUserWithCompany(userId);
+    this.assertHr(user.role);
+    const ticket = await this.loadTicketWithEmployee(id, user.companyId);
+
+    if (ticket.status !== 'APPROVED')
+      throw new BadRequestException(
+        'Seules les heures d’un ticket approuvé peuvent être corrigées',
+      );
+    if (!dto.actualDepartureTime && !dto.actualReturnTime)
+      throw new BadRequestException('Renseignez au moins une heure à corriger');
+    const reason = dto.reason?.trim();
+    if (!reason)
+      throw new BadRequestException('Un motif de correction est requis');
+
+    const currentDeparture = ticket.actualDepartureTime ?? ticket.departureTime;
+    const currentReturn = ticket.actualReturnTime;
+    const newDeparture = dto.actualDepartureTime
+      ? this.parseDate(dto.actualDepartureTime, 'Heure de sortie')
+      : currentDeparture;
+    const newReturn = dto.actualReturnTime
+      ? this.parseDate(dto.actualReturnTime, 'Heure de retour')
+      : currentReturn;
+
+    if (dto.actualDepartureTime)
+      this.assertNotFuture(newDeparture, "L'heure de sortie");
+    if (dto.actualReturnTime && newReturn)
+      this.assertNotFuture(newReturn, "L'heure de retour");
+    if (newReturn && newReturn <= newDeparture)
+      throw new BadRequestException(
+        "L'heure de retour doit être après l'heure de sortie",
+      );
+
+    const departureChanged =
+      !!dto.actualDepartureTime &&
+      newDeparture.getTime() !== currentDeparture.getTime();
+    const returnChanged =
+      !!dto.actualReturnTime &&
+      newReturn!.getTime() !== (currentReturn?.getTime() ?? NaN);
+    if (!departureChanged && !returnChanged)
+      throw new BadRequestException(
+        'Aucune modification : les heures saisies sont identiques',
+      );
+
+    const now = new Date();
+    const data: Prisma.PermissionTicketUncheckedUpdateInput = {
+      timesAdjusted: true,
+    };
+    if (departureChanged) data.actualDepartureTime = newDeparture;
+    if (returnChanged) {
+      data.actualReturnTime = newReturn;
+      // Retour saisi par l'admin/RH alors qu'il n'était pas encore validé → il l'est de fait
+      if (ticket.returnStatus !== 'CONFIRMED') {
+        data.returnStatus = 'CONFIRMED';
+        data.returnConfirmedBy = userId;
+        data.returnConfirmedAt = now;
+        if (!ticket.returnDeclaredAt) data.returnDeclaredAt = now;
+      }
+    }
+
+    const iso = (d: Date | null | undefined) => (d ? d.toISOString() : null);
+    const [updated] = await this.prisma.$transaction([
+      this.prisma.permissionTicket.update({
+        where: { id },
+        data,
+        include: this.returnInclude,
+      }),
+      this.prisma.permissionTicketEvent.create({
+        data: {
+          ticketId: id,
+          type: PermissionEventType.TIMES_EDITED,
+          actorUserId: userId,
+          actorRole: user.role,
+          note: reason,
+          data: {
+            before: { departure: iso(currentDeparture), return: iso(currentReturn) },
+            after: { departure: iso(newDeparture), return: iso(newReturn) },
+            returnDeclaredAt: iso(ticket.returnDeclaredAt),
+          },
+        },
+      }),
+    ]);
+
+    const employeeUserId = await this.findEmployeeUserId(
+      ticket.employee.email,
+      ticket.companyId,
+    );
+    if (employeeUserId) {
+      await this.notificationsService.create({
+        userId: employeeUserId,
+        type: 'PERMISSION_TIMES_EDITED',
+        title: '✏️ Heures de permission corrigées',
+        message: `Vos heures ont été corrigées : sorti à ${this.fmtTime(newDeparture)}${newReturn ? `, retour à ${this.fmtTime(newReturn)}` : ''}. Motif : ${reason}`,
+        link: '/presences/permissions/mon-espace',
+        metadata: { ticketId: id },
+      });
+    }
+    return updated;
+  }
+
+  // ============================================================================
+  // 🧾 HISTORIQUE D'UN TICKET (timeline)
+  // ============================================================================
+
+  async findEvents(id: string, userId: string) {
+    const user = await this.getUserWithCompany(userId);
+    const ticket = await this.prisma.permissionTicket.findUnique({
       where: { id },
-      data: { actualReturnTime: new Date() },
+      include: { employee: { select: { email: true, departmentId: true } } },
+    });
+    if (!ticket) throw new NotFoundException('Ticket introuvable');
+    if (ticket.companyId !== user.companyId)
+      throw new ForbiddenException('Accès refusé');
+
+    let allowed =
+      HR_ROLES.includes(user.role) ||
+      this.isOwner(user.email, ticket.employee.email);
+    if (!allowed && user.role === 'MANAGER') {
+      const deptId = await this.getManagerDepartmentId(userId, user.companyId);
+      allowed = !!deptId && ticket.employee.departmentId === deptId;
+    }
+    if (!allowed) throw new ForbiddenException('Accès refusé');
+
+    return this.prisma.permissionTicketEvent.findMany({
+      where: { ticketId: id },
+      orderBy: { createdAt: 'asc' },
+      include: {
+        actor: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            email: true,
+            role: true,
+          },
+        },
+      },
     });
   }
 
@@ -416,10 +924,21 @@ export class PermissionTicketsService {
         'Seul un ticket en attente peut être annulé',
       );
 
-    return this.prisma.permissionTicket.update({
-      where: { id },
-      data: { status: 'CANCELLED' },
-    });
+    const [cancelled] = await this.prisma.$transaction([
+      this.prisma.permissionTicket.update({
+        where: { id },
+        data: { status: 'CANCELLED' },
+      }),
+      this.prisma.permissionTicketEvent.create({
+        data: {
+          ticketId: id,
+          type: PermissionEventType.CANCELLED,
+          actorUserId: userId,
+          actorRole: user.role,
+        },
+      }),
+    ]);
+    return cancelled;
   }
 
   // ============================================================================
