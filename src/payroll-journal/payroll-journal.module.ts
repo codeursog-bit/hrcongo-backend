@@ -7,11 +7,16 @@ import { PrismaModule } from '../prisma/prisma.module';
 import { PayrollJournalController } from './payroll-journal.controller';
 import { PayrollJournalService } from './payroll-journal.service';
 import { PayrollForeignPayService } from './payroll-foreign-pay.service';
+import { PayrollJournalExportService } from './payroll-journal-export.service';
 
 @Module({
   imports: [PrismaModule],
   controllers: [PayrollJournalController],
-  providers: [PayrollJournalService, PayrollForeignPayService],
+  providers: [
+    PayrollJournalService,
+    PayrollForeignPayService,
+    PayrollJournalExportService,
+  ],
   exports: [PayrollJournalService, PayrollForeignPayService],
 })
 export class PayrollJournalModule {}

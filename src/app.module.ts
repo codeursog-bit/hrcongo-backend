@@ -74,6 +74,8 @@ import { AbsenceTrackingModule } from './absence-tracking/absence-tracking.modul
 import { PortfolioModule } from './portfolio/portfolio.module';
 import { ChatModule } from './chat/chat.module';
 import { WorkforceDashboardModule } from './workforce-dashboard/workforce-dashboard.module';
+import { LoansDashboardModule } from './loans-dashboard/loans-dashboard.module';
+import { AttendanceDashboardModule } from './attendance-dashboard/attendance-dashboard.module';
 
 @Module({
   imports: [
@@ -152,6 +154,8 @@ import { WorkforceDashboardModule } from './workforce-dashboard/workforce-dashbo
     ReportsModule,
     CompanyDeductionsModule,
     WorkforceDashboardModule,
+    LoansDashboardModule,
+    AttendanceDashboardModule,
 
     // ── COMMUNICATION ────────────────────────────────────────────────────────
     MailModule,

@@ -14,22 +14,28 @@
 
 import { Controller, Get, Query, Request, Response, UseGuards } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
+import { IsIn, IsOptional, IsString, Matches } from 'class-validator';
 import { WorkforceDashboardService, WorkforceQuery } from './workforce-dashboard.service';
 import { WorkforceModel } from './workforce-dashboard.types';
 
 const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 
-class QueryDto {
-  companyId?: string;
-  companies?: string;
-  model?: string;
-  mode?: string;
-  month?: string;
-  year?: string;
-  fromMonth?: string;
-  fromYear?: string;
-  toMonth?: string;
-  toYear?: string;
+// ⚠️ Le ValidationPipe global est en whitelist + forbidNonWhitelisted :
+//    toute propriété SANS décorateur class-validator est rejetée
+//    ("property xxx should not exist"). Chaque champ doit donc être décoré.
+const NUM = /^\d{1,4}$/;
+
+export class QueryDto {
+  @IsOptional() @IsString() companyId?: string;
+  @IsOptional() @IsString() companies?: string;
+  @IsOptional() @IsIn(['ORCA', 'POWERMAN']) model?: string;
+  @IsOptional() @IsIn(['MOIS', 'PLAGE', 'ANNEE']) mode?: string;
+  @IsOptional() @Matches(NUM) month?: string;
+  @IsOptional() @Matches(NUM) year?: string;
+  @IsOptional() @Matches(NUM) fromMonth?: string;
+  @IsOptional() @Matches(NUM) fromYear?: string;
+  @IsOptional() @Matches(NUM) toMonth?: string;
+  @IsOptional() @Matches(NUM) toYear?: string;
 }
 
 const toQuery = (q: QueryDto): WorkforceQuery => {
