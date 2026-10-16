@@ -102,7 +102,9 @@ export class AbsenceRequestsController {
    * Données résolues pour le rendu du document imprimable (générique ou Orca).
    */
   @Get(':id/document-data')
-  getDocumentData(@Param('id') id: string) {
+  async getDocumentData(@Param('id') id: string, @Request() req) {
+    // 🔒 Même règle d'accès que la consultation d'une demande (employé concerné, Admin/RH, manager du département)
+    await this.absenceRequestsService.findOne(id, req.user.userId);
     return this.absenceRequestsService.getDocumentData(id);
   }
 
@@ -111,7 +113,9 @@ export class AbsenceRequestsController {
    * fichier .docx original).
    */
   @Get(':id/document.docx')
-  async downloadOrcaDocument(@Param('id') id: string, @Res() res: Response) {
+  async downloadOrcaDocument(@Param('id') id: string, @Request() req, @Res() res: Response) {
+    // 🔒 Même règle d'accès que la consultation d'une demande
+    await this.absenceRequestsService.findOne(id, req.user.userId);
     const buffer = await this.absenceRequestsService.generateOrcaDocument(id);
     res.set({
       'Content-Type': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',

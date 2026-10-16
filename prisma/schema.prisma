@@ -368,6 +368,7 @@ model Company {
   departments              Department[]
   payrolls                 Payroll[]
   payrollSettings          PayrollSettings[]
+  payrollForeignPays       PayrollForeignPay[]
   systemLogs               SystemLog[]
   leaves                   Leave[]
   absenceRequests          AbsenceRequest[]
@@ -692,6 +693,7 @@ model Employee {
   // Relations
   user                 User?
   payrolls             Payroll[]
+  foreignPays          PayrollForeignPay[]
   leaves               Leave[]
   leaveBalances        LeaveBalance[]
   absenceRequests      AbsenceRequest[]
@@ -5530,6 +5532,43 @@ model AuditCheckpoint {
 
   @@unique([companyId, code, periodYear, periodMonth])
   @@map("audit_checkpoints")
+}
+
+
+// Rémunération versée à l'ÉTRANGER pour un employé expatrié (V1).
+// Saisie manuelle du brut et du net, directement en FCFA (aucune conversion
+// de devise en V1). 1 ligne = 1 employé × 1 mois × 1 pays.
+// La part Congo reste calculée par le moteur de paie normal (Payroll).
+model PayrollForeignPay {
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+
+  companyId String  @db.Uuid
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  employeeId String   @db.Uuid
+  employee   Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+
+  month Int @db.SmallInt // 1-12
+  year  Int @db.SmallInt
+
+  countryCode String  @db.Char(2) // ISO 3166-1 alpha-2 (FR, US, ...)
+  countryName String  @db.VarChar(100)
+  payerName   String? @db.VarChar(255) // entité qui paie (ex: société mère)
+
+  grossAmount Decimal @db.Decimal(15, 2) // FCFA
+  netAmount   Decimal @db.Decimal(15, 2) // FCFA
+
+  note String? @db.VarChar(500)
+
+  createdBy String?  @db.Uuid
+  updatedBy String?  @db.Uuid
+  createdAt DateTime @default(now()) @db.Timestamptz
+  updatedAt DateTime @updatedAt @db.Timestamptz
+
+  @@unique([employeeId, year, month, countryCode])
+  @@index([companyId, year, month])
+  @@index([employeeId])
+  @@map("payroll_foreign_pays")
 }
 
 // <<< FIN SECTION 3

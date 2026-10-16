@@ -45,6 +45,7 @@ import { SubscriptionsModule } from './subscriptions/subscriptions.module';
 import { PayrollSettingsModule } from './payroll/settings/settings.module';
 import { FiscalModule } from './payroll/fiscal/fiscal.module';
 import { PayrollsModule } from './payrolls/payrolls.module';
+import { PayrollJournalModule } from './payroll-journal/payroll-journal.module'
 import { AdminModule } from './admin/admin.module';
 import { UserActivityModule } from './user-activity/user-activity.module';
 import { BonusTemplatesModule } from './bonus-templates/bonus-templates.module';
@@ -72,6 +73,7 @@ import { CompanyDeductionsModule } from './company-deductions/company-deductions
 import { AbsenceTrackingModule } from './absence-tracking/absence-tracking.module';
 import { PortfolioModule } from './portfolio/portfolio.module';
 import { ChatModule } from './chat/chat.module';
+import { WorkforceDashboardModule } from './workforce-dashboard/workforce-dashboard.module';
 
 @Module({
   imports: [
@@ -122,6 +124,7 @@ import { ChatModule } from './chat/chat.module';
     PayrollSettingsModule,
     FiscalModule,
     PayrollsModule,
+    PayrollJournalModule,
     LoansModule,
     BonusTemplatesModule,
 
@@ -148,6 +151,7 @@ import { ChatModule } from './chat/chat.module';
     AssetsModule,
     ReportsModule,
     CompanyDeductionsModule,
+    WorkforceDashboardModule,
 
     // ── COMMUNICATION ────────────────────────────────────────────────────────
     MailModule,

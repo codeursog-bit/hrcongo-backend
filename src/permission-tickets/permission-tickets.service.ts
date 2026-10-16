@@ -283,6 +283,12 @@ export class PermissionTicketsService {
 
   async findAll(userId: string, status?: string) {
     const user = await this.getUserWithCompany(userId);
+    // 🔒 La liste de TOUS les tickets de l'entreprise n'est pas pour un simple employé
+    //    (il a findMine → /permission-tickets/me).
+    if (!APPROVER_ROLES.includes(user.role))
+      throw new ForbiddenException(
+        "Vous n'avez pas accès à la liste des tickets de l'entreprise",
+      );
     const whereClause: any = { companyId: user.companyId };
 
     if (user.role === 'MANAGER') {
@@ -345,6 +351,8 @@ export class PermissionTicketsService {
             lastName: true,
             position: true,
             employeeNumber: true,
+            email: true,
+            departmentId: true,
             department: { select: { name: true } },
           },
         },
@@ -368,6 +376,17 @@ export class PermissionTicketsService {
     if (!ticket) throw new NotFoundException('Ticket introuvable');
     if (ticket.companyId !== user.companyId)
       throw new ForbiddenException('Accès refusé');
+
+    // 🔒 Consultation : l'employé concerné, l'administration (Admin / RH) ou le
+    //    manager du département — pas n'importe quel membre de l'entreprise.
+    let allowed =
+      HR_ROLES.includes(user.role) ||
+      this.isOwner(user.email, ticket.employee.email);
+    if (!allowed && user.role === 'MANAGER') {
+      const deptId = await this.getManagerDepartmentId(userId, user.companyId);
+      allowed = !!deptId && ticket.employee.departmentId === deptId;
+    }
+    if (!allowed) throw new ForbiddenException('Accès refusé');
     return ticket;
   }
 
@@ -914,11 +933,28 @@ export class PermissionTicketsService {
     const user = await this.getUserWithCompany(userId);
     const ticket = await this.prisma.permissionTicket.findUnique({
       where: { id },
+      include: { employee: { select: { email: true, departmentId: true } } },
     });
 
     if (!ticket) throw new NotFoundException('Ticket introuvable');
     if (ticket.companyId !== user.companyId)
       throw new ForbiddenException('Accès refusé');
+
+    // 🔒 Droit d'annulation : l'employé concerné, l'auteur du ticket, l'administration
+    //    (Admin / RH) ou le manager du département de l'employé — personne d'autre.
+    let allowed =
+      HR_ROLES.includes(user.role) ||
+      ticket.createdByUserId === userId ||
+      this.isOwner(user.email, ticket.employee.email);
+    if (!allowed && user.role === 'MANAGER') {
+      const deptId = await this.getManagerDepartmentId(userId, user.companyId);
+      allowed = !!deptId && ticket.employee.departmentId === deptId;
+    }
+    if (!allowed)
+      throw new ForbiddenException(
+        "Vous n'avez pas le droit d'annuler le ticket d'un autre employé",
+      );
+
     if (ticket.status !== 'PENDING')
       throw new BadRequestException(
         'Seul un ticket en attente peut être annulé',

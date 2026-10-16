@@ -397,6 +397,11 @@ private async getUserWithCompany(userId: string, overrideCompanyId?: string): Pr
 
   async findAll(userId: string, employeeId?: string, status?: string, overrideCompanyId?: string) {
     const user = await this.getUserWithCompany(userId, overrideCompanyId);
+    // 🔒 La liste de toutes les demandes (motifs maladie compris) n'est pas pour un simple
+    //    employé : il a findMine → /absence-requests/me.
+    if (![...HR_ROLES, 'MANAGER'].includes(user.role)) {
+      throw new ForbiddenException("Vous n'avez pas accès à la liste des demandes de l'entreprise");
+    }
     const whereClause: any = { companyId: user.companyId };
 
     if (user.role === 'MANAGER') {
@@ -440,12 +445,23 @@ private async getUserWithCompany(userId: string, overrideCompanyId?: string): Pr
     const absenceRequest = await this.prisma.absenceRequest.findUnique({
       where:   { id },
       include: {
-        employee: { select: { firstName: true, lastName: true, position: true, employeeNumber: true, department: { select: { name: true } } } },
+        employee: { select: { firstName: true, lastName: true, position: true, employeeNumber: true, email: true, departmentId: true, department: { select: { name: true } } } },
         company:  { select: { legalName: true, tradeName: true, logo: true, rccmNumber: true, taxNumber: true, address: true, phone: true } },
       },
     });
     if (!absenceRequest) throw new NotFoundException('Demande introuvable');
     if (absenceRequest.companyId !== user.companyId) throw new ForbiddenException('Accès refusé');
+
+    // 🔒 Consultation : l'employé concerné, l'administration (Admin / RH) ou le manager du département
+    let allowed =
+      HR_ROLES.includes(user.role) ||
+      (!!user.email && !!absenceRequest.employee.email &&
+        user.email.trim().toLowerCase() === absenceRequest.employee.email.trim().toLowerCase());
+    if (!allowed && user.role === 'MANAGER') {
+      const deptId = await this.getManagerDepartmentId(user.id, user.companyId);
+      allowed = !!deptId && absenceRequest.employee.departmentId === deptId;
+    }
+    if (!allowed) throw new ForbiddenException('Accès refusé');
     return absenceRequest;
   }
 
@@ -518,10 +534,26 @@ private async getUserWithCompany(userId: string, overrideCompanyId?: string): Pr
 
   async cancel(id: string, userId: string, reason?: string, overrideCompanyId?: string) {
     const user = await this.getUserWithCompany(userId, overrideCompanyId);
-    const absenceRequest = await this.prisma.absenceRequest.findUnique({ where: { id } });
+    const absenceRequest = await this.prisma.absenceRequest.findUnique({
+      where: { id },
+      include: { employee: { select: { email: true, departmentId: true } } },
+    });
 
     if (!absenceRequest) throw new NotFoundException('Demande introuvable');
     if (absenceRequest.companyId !== user.companyId) throw new ForbiddenException('Accès refusé');
+
+    // 🔒 Droit d'annulation : l'employé concerné, l'administration (Admin / RH)
+    //    ou le manager du département — personne d'autre dans l'entreprise.
+    let allowed =
+      HR_ROLES.includes(user.role) ||
+      (!!user.email && !!absenceRequest.employee?.email &&
+        user.email.trim().toLowerCase() === absenceRequest.employee.email.trim().toLowerCase());
+    if (!allowed && user.role === 'MANAGER') {
+      const deptId = await this.getManagerDepartmentId(user.id, user.companyId);
+      allowed = !!deptId && absenceRequest.employee?.departmentId === deptId;
+    }
+    if (!allowed) throw new ForbiddenException("Vous ne pouvez annuler que vos propres demandes");
+
     if (absenceRequest.status !== 'PENDING') throw new BadRequestException('Seule une demande en attente peut être annulée');
 
     return this.prisma.absenceRequest.update({
