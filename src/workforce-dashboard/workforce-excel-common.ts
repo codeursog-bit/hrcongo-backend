@@ -241,7 +241,11 @@ export function addEvolutionSheet(
   return charts;
 }
 
-/** Nom lisible + sécurisé pour le fichier téléchargé. */
+/**
+ * Nom lisible + sécurisé pour le fichier téléchargé : <préfixe>_<entreprise>_<période>.xlsx
+ * Aucune marque de modèle (ni « ORCA » ni « POWERMAN ») : uniquement le nom de l'entreprise,
+ * ou « Konza RH » quand le fichier couvre tout le portefeuille.
+ */
 export function exportFileName(prefix: string, data: WorkforceDashboardData): string {
   const clean = (s: string) =>
     s.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^A-Za-z0-9]+/g, '_').replace(/^_|_$/g, '');
@@ -250,5 +254,6 @@ export function exportFileName(prefix: string, data: WorkforceDashboardData): st
     p.months.length === 1
       ? `${String(p.first.month).padStart(2, '0')}_${p.first.year}`
       : `${p.first.key.replace('-', '_')}_a_${p.last.key.replace('-', '_')}`;
-  return `${prefix}_${clean(data.scope.companyName).slice(0, 40)}_${span}.xlsx`;
+  const who = data.scope.multi ? 'Konza RH' : data.scope.companyName;
+  return `${prefix}_${clean(who).slice(0, 40) || 'Konza_RH'}_${span}.xlsx`;
 }

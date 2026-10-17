@@ -8,6 +8,7 @@ import { AttendanceCheckService } from './services/attendance-check.service';
 import { AttendanceReportService } from './services/attendance-report.service';
 import { AttendanceBreakService } from './services/attendance-break.service'; // 🆕 pause
 import { AttendanceBreakController } from './attendance-break.controller'; // 🆕 pause
+import { LiveAttendanceSummaryService } from './live-attendance-summary.service'; // 🆕 dashboards temps réel (lecture seule)
 import { AttendanceCronModule } from './cron/attendance-cron.module'; // 🆕 Import du MODULE
 import { PrismaModule } from '../prisma/prisma.module';
 import { AppGateway } from '../app.gateway';
@@ -30,6 +31,7 @@ import { CompaniesModule } from '../companies/companies.module';
     AttendanceCheckService,
     AttendanceReportService,
     AttendanceBreakService,
+    LiveAttendanceSummaryService, // 🆕 dashboards temps réel (lecture seule, n'écrit rien)
     AppGateway,
   ],
   exports: [
@@ -37,6 +39,7 @@ import { CompaniesModule } from '../companies/companies.module';
     AttendanceSummaryService,
     AttendanceUtilsService,
     AttendanceBreakService, // 🆕 utilisé par les écrans QR / code secret / kiosque
+    LiveAttendanceSummaryService, // 🆕 utilisé par les dashboards présences / effectifs
     AttendanceCronModule, // 🆕 On exporte le module complet
   ],
 })

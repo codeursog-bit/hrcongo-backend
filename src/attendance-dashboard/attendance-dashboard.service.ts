@@ -1,10 +1,12 @@
 // ============================================================================
 // 📁 src/attendance-dashboard/attendance-dashboard.service.ts
-// Charge les données réelles (synthèses de présence, demandes d'absence,
+// Charge les données réelles (présences calculées EN TEMPS RÉEL, demandes d'absence,
 // tickets de permission) et alimente :
 //   • l'écran (JSON : getView)
 //   • l'Excel (generateExport)
 // Une seule source de calcul : l'écran et le fichier ne peuvent pas diverger.
+// 🆕 Les présences ne viennent plus de la table attendance_summaries (périmée / incomplète) mais
+// de LiveAttendanceSummaryService (même moteur de statut que la page Présences, lecture seule).
 // Mêmes règles d'accès que le dashboard effectifs (entreprise vérifiée /
 // appartenance au portefeuille).
 // ============================================================================
@@ -17,13 +19,14 @@ import { PeriodInput, buildPeriod, cleanText } from '../workforce-dashboard/work
 import { WfScope } from '../workforce-dashboard/workforce-dashboard.types';
 import { exportFileName } from '../workforce-dashboard/workforce-excel-common';
 import {
-  ABSENCE_SUBTYPE_LABEL, ABSENCE_TYPE_LABEL, MISSION_LABEL, PERMISSION_TYPE_LABEL, RETURN_LABEL, STATUS_LABEL,
-  absenceStats, departmentRows, evolution, monthKeyOf, permissionStats, round2, topAbsent, topPermissions, totalsOf,
+  ABSENCE_SUBTYPE_LABEL, ABSENCE_TYPE_LABEL, LEAVE_TYPE_LABEL, MISSION_LABEL, PERMISSION_TYPE_LABEL, RETURN_LABEL, STATUS_LABEL,
+  absenceBreakdown, absenceStats, departmentRows, evolution, leaveStats, monthKeyOf, permissionStats, round2, topAbsent, topLate, topLeave, topPermissions, totalsOf,
 } from './attendance-dashboard.calc';
 import {
-  AdAbsence, AdEmployee, AdPermission, AdSummaryRow, AttendanceDashboardData, AttendanceDashboardView,
+  AdAbsence, AdEmployee, AdLeave, AdPermission, AdSummaryRow, AttendanceDashboardData, AttendanceDashboardView,
 } from './attendance-dashboard.types';
 import { buildAttendanceWorkbook } from './attendance-dashboard.excel';
+import { LiveAttendanceSummaryService } from '../attendance/live-attendance-summary.service';
 
 const CONGO_OFFSET_MS = 3600_000; // Africa/Brazzaville = UTC+1 (pas d'heure d'été)
 const DAY_MS = 86_400_000;
@@ -46,6 +49,7 @@ export class AttendanceDashboardService {
   constructor(
     private prisma: PrismaService,
     private membership: PortfolioMembershipService,
+    private live: LiveAttendanceSummaryService,
   ) {}
 
   // ───────────────────────── Périmètre (qui voit quoi) ─────────────────────────
@@ -136,27 +140,22 @@ export class AttendanceDashboardService {
     const idSet = new Set(ids);
 
     const monthKeys = new Set(period.months.map((m) => m.key));
-    const monthOr = period.months.map((m) => ({ month: m.month, year: m.year }));
     const winStart = period.first.bom;
     const winEnd = new Date(period.last.eom.getTime() + DAY_MS); // exclusif
 
-    // ── Présences (synthèses mensuelles) ──
+    // ── Présences (calcul TEMPS RÉEL — même moteur que la page Présences) ──
     const summaries: AdSummaryRow[] = [];
+    let untracked: { companyId: string; key: string }[] = [];
     if (ids.length > 0) {
-      const sums = await this.prisma.attendanceSummary.findMany({
-        where: { employeeId: { in: ids }, OR: monthOr },
-        select: {
-          employeeId: true, month: true, year: true, daysPresent: true, daysRemote: true, daysOnLeave: true,
-          daysAbsentPaid: true, daysAbsentUnpaid: true, daysHoliday: true, daysOffDay: true, daysLate: true,
-        },
-      });
-      for (const s of sums) {
+      const liveRes = await this.live.getRows({ companyIds, employeeIds: ids, months: period.months });
+      untracked = liveRes.untracked;
+      for (const r of liveRes.rows) {
         summaries.push({
-          employeeId: s.employeeId, month: s.month, year: s.year,
-          key: `${s.year}-${String(s.month).padStart(2, '0')}`,
-          present: s.daysPresent, remote: s.daysRemote, leave: s.daysOnLeave,
-          absPaid: s.daysAbsentPaid, absUnpaid: s.daysAbsentUnpaid,
-          holiday: s.daysHoliday, offDay: s.daysOffDay, late: s.daysLate,
+          employeeId: r.employeeId, month: r.month, year: r.year, key: r.key,
+          present: r.present, remote: r.remote, leave: r.leave,
+          absPaid: r.absPaid, absUnpaid: r.absUnpaid,
+          holiday: r.holiday, offDay: r.offDay, late: r.late,
+          absJustified: r.absJustified, absUnjustified: r.absUnjustified, justifiedDetail: r.justifiedDetail,
         });
       }
     }
@@ -186,11 +185,35 @@ export class AttendanceDashboardService {
       }
     }
 
+    // ── Congés (demandes de congé, rattachées au mois de début) ──
+    const leaves: AdLeave[] = [];
+    if (ids.length > 0) {
+      const lv = await this.prisma.leave.findMany({
+        where: { companyId: { in: companyIds }, employeeId: { in: ids }, startDate: { gte: winStart, lt: winEnd } },
+        select: { id: true, employeeId: true, type: true, status: true, startDate: true, endDate: true, daysCount: true, reason: true },
+        orderBy: { startDate: 'asc' },
+      });
+      for (const l of lv) {
+        const mk = monthKeyOf(l.startDate);
+        if (!monthKeys.has(mk) || !idSet.has(l.employeeId)) continue;
+        leaves.push({
+          id: l.id, employeeId: l.employeeId,
+          type: l.type, typeLabel: LEAVE_TYPE_LABEL[l.type] ?? l.type,
+          status: l.status, statusLabel: STATUS_LABEL[l.status] ?? l.status,
+          start: l.startDate, end: l.endDate, days: Number(l.daysCount), reason: cleanText(l.reason), monthKey: mk,
+        });
+      }
+    }
+
     // ── Permissions (rattachées au mois de la sortie) ──
+    // Les mois sont des mois civils congolais (UTC+1) alors que departureTime est stocké en UTC :
+    // on décale la fenêtre, sinon une sortie entre 00h00 et 01h00 le 1er du mois est ratée.
+    const permWinStart = new Date(winStart.getTime() - CONGO_OFFSET_MS);
+    const permWinEnd = new Date(winEnd.getTime() - CONGO_OFFSET_MS);
     const permissions: AdPermission[] = [];
     if (ids.length > 0) {
       const perms = await this.prisma.permissionTicket.findMany({
-        where: { companyId: { in: companyIds }, employeeId: { in: ids }, departureTime: { gte: winStart, lt: winEnd } },
+        where: { companyId: { in: companyIds }, employeeId: { in: ids }, departureTime: { gte: permWinStart, lt: permWinEnd } },
         select: {
           id: true, employeeId: true, type: true, missionType: true, reason: true, destination: true,
           departureTime: true, actualDepartureTime: true, expectedReturnTime: true, actualReturnTime: true,
@@ -219,12 +242,19 @@ export class AttendanceDashboardService {
       }
     }
 
+    // ── Avertissements : uniquement quand une entreprise n'a AUCUN pointage sur un mois ──
+    // (pointage non utilisé / pas encore démarré) : ce mois n'est pas compté dans les taux,
+    // sinon tous les salariés apparaîtraient absents à tort.
     const warnings: string[] = [];
-    const missing = period.months.filter((m) => !summaries.some((s) => s.key === m.key));
-    if (missing.length > 0 && missing.length === period.months.length) {
-      warnings.push('Aucune synthèse de présence sur cette période : les taux de présence et d’absentéisme ne peuvent pas être calculés.');
-    } else if (missing.length > 0) {
-      warnings.push(`Pas de synthèse de présence pour : ${missing.map((m) => m.label.toLowerCase()).join(', ')}. Ces mois ne sont pas comptés dans les taux.`);
+    const labelOf = new Map<string, string>(period.months.map((m) => [m.key, m.label.toLowerCase()] as [string, string]));
+    const byCompany = new Map<string, string[]>();
+    for (const u of untracked) {
+      (byCompany.get(u.companyId) ?? byCompany.set(u.companyId, []).get(u.companyId)!).push(labelOf.get(u.key) ?? u.key);
+    }
+    for (const [cid, months] of byCompany) {
+      const c = byId.get(cid);
+      const who = c ? nameOf(c) : 'Une entreprise';
+      warnings.push(`${who} : aucun pointage enregistré en ${months.join(', ')}. Ces mois ne sont pas comptés dans les taux de présence et d’absentéisme.`);
     }
 
     const chosen = companyIds.map((id) => byId.get(id)).filter((c): c is NonNullable<typeof c> => !!c);
@@ -237,7 +267,7 @@ export class AttendanceDashboardService {
     };
 
     return {
-      data: { scope, period, employees, summaries, absences, permissions, warnings, generatedAt: new Date() },
+      data: { scope, period, employees, summaries, absences, permissions, leaves, warnings, generatedAt: new Date() },
       companies: scopeRes.available.length
         ? scopeRes.available.map((id) => ({ id, name: byId.get(id) ? nameOf(byId.get(id)!) : id }))
         : chosen.map((c) => ({ id: c.id, name: nameOf(c) })),
@@ -260,9 +290,13 @@ export class AttendanceDashboardService {
       totals: totalsOf(data.summaries),
       absences: absenceStats(data.absences),
       permissions: permissionStats(data.permissions),
+      leaves: leaveStats(data.leaves),
       departments: departmentRows(data.employees, data.summaries),
       topAbsent: topAbsent(data),
+      topLate: topLate(data),
+      absenceBreakdown: absenceBreakdown(data.summaries),
       topPermissions: topPermissions(data),
+      topLeave: topLeave(data),
       evolution: evolution(data),
     };
   }

@@ -14,7 +14,7 @@ import { resolveVerifiedCompanyId } from '../common/resolve-verified-company.uti
 import { normalizeNationality } from '../common/utils/nationality.util';
 import {
   AttendanceAgg, NATIONAL_LABEL, PeriodInput, buildPeriod, cleanText, contractLabelPowerman, cspFromCategory,
-  groupContract, CONTRACT_LABEL_ORCA, snapshotFor, toDateOnly,
+  groupContract, CONTRACT_LABEL_ORCA, snapshotFor, toDateOnly, isPresent, makeMonth,
 } from './workforce-calc';
 import {
   WfEmployee, WfScope, WorkforceDashboardData, WorkforceDashboardView, WorkforceModel,
@@ -22,6 +22,7 @@ import {
 import { buildOrcaWorkbook } from './workforce-excel-orca';
 import { buildPowermanWorkbook } from './workforce-excel-powerman';
 import { exportFileName } from './workforce-excel-common';
+import { LiveAttendanceSummaryService } from '../attendance/live-attendance-summary.service';
 
 const FINANCE_ROLES = ['ADMIN', 'SUPER_ADMIN', 'HR_MANAGER']; // voir le net des salariés
 
@@ -49,6 +50,7 @@ export class WorkforceDashboardService {
   constructor(
     private prisma: PrismaService,
     private membership: PortfolioMembershipService,
+    private live: LiveAttendanceSummaryService,
   ) {}
 
   // ───────────────────────── Périmètre (qui voit quoi) ─────────────────────────
@@ -181,21 +183,29 @@ export class WorkforceDashboardService {
     const ids = employees.map((e) => e.id);
     const monthOr = period.months.map((m) => ({ month: m.month, year: m.year }));
 
-    // ── Présences (absentéisme) ──
+    // ── Présences (absentéisme) — TEMPS RÉEL, même moteur que la page Présences ──
+    // Plus de lecture de attendance_summaries (incomplète : les jours sans pointage n'y sont jamais absents).
     const attendance: AttendanceAgg = {};
     if (ids.length > 0) {
-      const sums = await this.prisma.attendanceSummary.findMany({
-        where: { employeeId: { in: ids }, OR: monthOr },
-        select: { month: true, year: true, daysPresent: true, daysRemote: true, daysAbsentPaid: true, daysAbsentUnpaid: true },
-      });
-      for (const s of sums) {
-        const key = `${s.year}-${String(s.month).padStart(2, '0')}`;
-        const a = (attendance[key] ??= { present: 0, remote: 0, absPaid: 0, absUnpaid: 0, absentEmployees: 0 })!;
-        a.present += s.daysPresent;
-        a.remote += s.daysRemote;
-        a.absPaid += s.daysAbsentPaid;
-        a.absUnpaid += s.daysAbsentUnpaid;
-        if (s.daysAbsentPaid + s.daysAbsentUnpaid > 0) a.absentEmployees++;
+      const liveRes = await this.live.getRows({ companyIds, employeeIds: ids, months: period.months });
+      for (const r of liveRes.rows) {
+        const a = (attendance[r.key] ??= { present: 0, remote: 0, absPaid: 0, absUnpaid: 0, absentEmployees: 0 })!;
+        a.present += r.present + r.late; // un retard est un jour travaillé (même définition que le dashboard Présences)
+        a.remote += r.remote;
+        a.absPaid += r.absPaid;
+        a.absUnpaid += r.absUnpaid;
+        if (r.absPaid + r.absUnpaid > 0) a.absentEmployees++;
+      }
+      // Mois sans aucun jour à travailler → pas de taux (n/d) plutôt qu'un faux 0 %.
+      for (const k of Object.keys(attendance)) {
+        const a = attendance[k]!;
+        if (a.present + a.remote + a.absPaid + a.absUnpaid === 0) delete attendance[k];
+      }
+      if (liveRes.untracked.length > 0) {
+        const labels = new Map<string, string>(period.months.map((m) => [m.key, m.label.toLowerCase()] as [string, string]));
+        const names = [...new Set(liveRes.untracked.map((u) => (byId.get(u.companyId) ? nameOf(byId.get(u.companyId)!) : 'Une entreprise')))];
+        const months = [...new Set(liveRes.untracked.map((u) => labels.get(u.key) ?? u.key))];
+        warnings.push(`Aucun pointage enregistré (${names.join(', ')}) en ${months.join(', ')} : absentéisme et présence non calculés pour ces mois.`);
       }
     }
 
@@ -213,6 +223,31 @@ export class WorkforceDashboardService {
     }
 
     const snapshots = period.months.map((m) => snapshotFor(employees, m, attendance, period.months));
+
+    // 🆕 TURN-OVER cohérent : départs de l'ANNÉE CIVILE (1er janvier → fin du mois) / effectif moyen de la
+    // MÊME année. Avant : les départs d'avant la période n'étaient pas chargés et l'effectif moyen n'était
+    // calculé que sur les mois affichés (ex. « Ce mois » → moyenne = effectif du mois → 4/55,0).
+    {
+      const minYear = Math.min(...period.months.map((m) => m.year));
+      const yearRows = await this.prisma.employee.findMany({
+        where: {
+          companyId: { in: companyIds },
+          hireDate: { lte: period.last.eom },
+          OR: [{ terminationDate: null }, { terminationDate: { gte: new Date(Date.UTC(minYear, 0, 1)) } }],
+        },
+        select: { hireDate: true, terminationDate: true },
+      });
+      const people = yearRows.map((r) => ({ hireDate: r.hireDate as Date, exitDate: (r.terminationDate as Date | null) ?? null }));
+      for (const s of snapshots) {
+        const yStart = new Date(Date.UTC(s.month.year, 0, 1));
+        const yMonths = Array.from({ length: s.month.month }, (_, i) => makeMonth(i + 1, s.month.year));
+        const departuresYtd = people.filter((p) => p.exitDate && p.exitDate >= yStart && p.exitDate <= s.month.eom).length;
+        const avg = yMonths.reduce((sum, mm) => sum + people.filter((p) => isPresent(p, mm.eom)).length, 0) / yMonths.length;
+        s.indicators.departuresYtd = departuresYtd;
+        s.indicators.avgHeadcountYtd = avg;
+        s.indicators.turnover = avg > 0 ? departuresYtd / avg : 0;
+      }
+    }
 
     // ── Libellé / logo du périmètre ──
     const chosen = companyIds.map((id) => byId.get(id)).filter((c): c is CompanyLite => !!c);

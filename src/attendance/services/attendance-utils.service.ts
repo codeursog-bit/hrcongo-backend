@@ -62,6 +62,7 @@ export interface DayStatus {
   status: DayStatusEnum;
   leaveType?: string;
   absenceType?: string;
+  absenceSubType?: string; // 🆕 motif (MARIAGE, DECES, MALADIE…) de la demande d'absence validée
   isPaid?: boolean;
   checkIn?: Date;
   checkOut?: Date;

@@ -405,6 +405,8 @@ export class AttendanceService {
             employeeNumber: true,
             position: true,
             phone: true,
+            hireDate: true, // 🆕 pas d'absence avant l'embauche
+            terminationDate: true,
             department: { select: { name: true } },
           },
         }),
@@ -463,6 +465,14 @@ export class AttendanceService {
       allAbsenceRequests,
     );
 
+    // 🆕 Règle unique : absent dès l'heure officielle (ou le début du shift) AUJOURD'HUI,
+    //    jamais avant l'embauche ni après la sortie — identique aux dashboards et au suivi des absences.
+    const todayStrRule = this.utils.getTodayString();
+    const todayCutoffs =
+      startDateStr <= todayStrRule && endDateStr >= todayStrRule
+        ? await this.calculation.getTodayCutoffs(user.companyId, employees.map((e) => e.id))
+        : new Map<string, number>();
+
     const dayStatuses = employees.map((emp) =>
       this.calculation.calculateDayStatusesOptimized(
         emp.id,
@@ -473,6 +483,11 @@ export class AttendanceService {
         holidayDates,
         workDays,
         absenceDatesByEmp.get(emp.id),
+        {
+          hireDateStr: emp.hireDate ? this.utils.formatDate(emp.hireDate) : null,
+          exitDateStr: emp.terminationDate ? this.utils.formatDate(emp.terminationDate) : null,
+          todayCutoffMin: todayCutoffs.get(emp.id),
+        },
       ),
     );
 

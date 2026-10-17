@@ -19,6 +19,8 @@ import { normalizeWorkDays } from '../common/utils/work-days';
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { calculateWorkingDays, loadCoveredDatesMap } from '../common/working-days.util';
+// 🆕 Règle unique d'absence (embauche / heure officielle du jour) — même que la page Présences
+import { loadTodayAbsenceCutoffs, nowCongoMinutes } from '../common/absence-rules.util';
 // ✅ Réutilise EXACTEMENT la même notion de "jour ouvré" que la page
 //    Présences (DailyView / attendance-calculation.service), pour que les
 //    deux modules soient toujours d'accord sur qui est absent aujourd'hui.
@@ -182,8 +184,8 @@ export class AbsenceTrackingService {
       }) : Promise.resolve([] as { employeeId: string; date: string; status: string }[]),
       wantAttendance ? this.prisma.employee.findMany({
         where: { companyId, status: 'ACTIVE' },
-        select: { id: true },
-      }) : Promise.resolve([]),
+        select: { id: true, hireDate: true },
+      }) : Promise.resolve([] as { id: string; hireDate: Date }[]),
       wantAttendance ? this.prisma.payrollSettings.findFirst({
         where: { companyId },
         orderBy: { effectiveDate: 'desc' },
@@ -256,8 +258,19 @@ export class AbsenceTrackingService {
       ]);
       const allDays = this.expandToDays(rangeStart, rangeEnd, rangeStart, rangeEnd);
 
+      // 🆕 Aujourd'hui : absent seulement à partir de l'heure officielle / du début du shift
+      const todayStrRule = this.utils.getTodayString();
+      const todayCutoffs =
+        rangeStartStr <= todayStrRule && todayStrRule <= rangeEndStr
+          ? await loadTodayAbsenceCutoffs(this.prisma, companyId, activeEmployees.map((e) => e.id))
+          : new Map<string, number>();
+      const nowMinRule = nowCongoMinutes();
+
       for (const emp of activeEmployees) {
+        const hireStr = emp.hireDate ? this.utils.formatDate(emp.hireDate) : null;
         for (const day of allDays) {
+          if (hireStr && day < hireStr) continue; // 🆕 pas d'absence avant l'embauche
+          if (day === todayStrRule && nowMinRule < (todayCutoffs.get(emp.id) ?? 0)) continue; // 🆕 journée pas encore due
           const dayDate = this.utils.createLocalDate(day);
           if (dayDate > today) continue; // jour futur — pas encore "absent"
           if (holidaySet.has(day)) continue; // férié

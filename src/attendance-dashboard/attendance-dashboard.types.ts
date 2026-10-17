@@ -31,6 +31,10 @@ export interface AdSummaryRow {
   holiday: number;
   offDay: number;
   late: number;
+  // 🆕 absences justifiées (demande validée) / non justifiées + détail par motif
+  absJustified?: number;
+  absUnjustified?: number;
+  justifiedDetail?: Record<string, number>; // « TYPE|SOUS-TYPE|P|U » → jours
 }
 
 export interface AdAbsence {
@@ -69,6 +73,21 @@ export interface AdPermission {
   monthKey: string; // mois de la sortie
 }
 
+/** Demande de congé (table leaves) — rattachée au mois de début. */
+export interface AdLeave {
+  id: string;
+  employeeId: string;
+  type: string; // ANNUAL | ANNUAL_ANTICIPATED | COMPENSATORY | SICK | MATERNITY | PATERNITY | UNPAID
+  typeLabel: string;
+  status: string; // PENDING | APPROVED | REJECTED | CANCELLED
+  statusLabel: string;
+  start: Date;
+  end: Date;
+  days: number; // jours de congé de la demande (daysCount)
+  reason: string;
+  monthKey: string; // mois de début
+}
+
 export interface AttendanceDashboardData {
   scope: WfScope;
   period: WfPeriod;
@@ -76,6 +95,7 @@ export interface AttendanceDashboardData {
   summaries: AdSummaryRow[];
   absences: AdAbsence[];
   permissions: AdPermission[];
+  leaves: AdLeave[];
   warnings: string[];
   generatedAt: Date;
 }
@@ -99,6 +119,8 @@ export interface AdTotals {
   offDay: number;
   workedDays: number; // present + remote + late
   absenceDays: number; // payée + non payée
+  absJustified: number; // 🆕 dont justifiées (demande d'absence validée)
+  absUnjustified: number; // 🆕 dont non justifiées
   theoreticalDays: number; // workedDays + absenceDays
   absentEmployees: number; // salariés avec ≥ 1 jour d'absence sur la période
   presenceRate: number; // 0..1
@@ -106,6 +128,29 @@ export interface AdTotals {
   lateRate: number; // retards / jours travaillés
   remoteRate: number; // télétravail / jours travaillés
   avgAbsenceDuration: number; // jours par salarié absent
+  leaveRate: number; // jours de congé / (jours à travailler + jours de congé)
+  leaveEmployees: number; // salariés avec ≥ 1 jour de congé sur la période
+}
+
+/** 🆕 Un motif d'absence justifiée (ex. Mariage — Exceptionnelle). */
+export interface AdAbsenceMotif {
+  key: string;
+  label: string; // Mariage, Décès, Maladie…
+  typeLabel: string; // Exceptionnelle, Conventionnelle, Maladie, Sans demande
+  days: number;
+  paidDays: number;
+  unpaidDays: number;
+  employees: number;
+}
+
+/** 🆕 Absences justifiées / non justifiées sur la période. */
+export interface AdAbsenceBreakdown {
+  total: number;
+  justified: number;
+  unjustified: number;
+  justifiedEmployees: number;
+  unjustifiedEmployees: number;
+  motifs: AdAbsenceMotif[]; // triés par nombre de jours décroissant
 }
 
 export interface AdDepartmentRow {
@@ -141,6 +186,8 @@ export interface AdMonthPoint {
   absenteeismRate: number;
   absenceRequests: number;
   permissions: number;
+  leaveDays: number; // jours de congé du mois (synthèses de présence)
+  leaveRequests: number; // congés approuvés commençant ce mois
 }
 
 export interface AdAbsenceStats {
@@ -172,6 +219,17 @@ export interface AdPermissionStats {
   byStatus: AdCount[];
 }
 
+export interface AdLeaveStats {
+  total: number;
+  approved: number;
+  pending: number;
+  rejected: number;
+  cancelled: number;
+  approvedDays: number; // jours des congés approuvés
+  byType: AdCount[]; // congés approuvés (count = demandes, days = jours)
+  byStatus: AdCount[];
+}
+
 export interface AttendanceDashboardView {
   companyName: string;
   city: string;
@@ -183,8 +241,12 @@ export interface AttendanceDashboardView {
   totals: AdTotals;
   absences: AdAbsenceStats;
   permissions: AdPermissionStats;
+  leaves: AdLeaveStats;
   departments: AdDepartmentRow[];
   topAbsent: AdTopEmployee[];
+  topLate: AdTopEmployee[]; // 🆕 salariés les plus en retard
+  absenceBreakdown: AdAbsenceBreakdown; // 🆕 absences justifiées / non justifiées, par motif
   topPermissions: AdTopEmployee[];
+  topLeave: AdTopEmployee[];
   evolution: AdMonthPoint[];
 }

@@ -15,12 +15,24 @@ import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { EmployeeNotFoundException } from '../../exceptions/business.exceptions';
 import * as WorkingDays from '../../common/working-days.util';
+import { loadTodayAbsenceCutoffs, nowCongoMinutes } from '../../common/absence-rules.util';
 import {
   AttendanceUtilsService,
   DayStatus,
   DayStatusEnum,
   DEFAULT_WORK_DAYS,
 } from './attendance-utils.service';
+
+/**
+ * 🆕 Règles d'inférence d'une absence (jour ouvré passé SANS pointage) — optionnelles.
+ *  - hireDateStr / exitDateStr : pas d'absence avant l'embauche ni après la sortie (statut FUTURE = case vide)
+ *  - todayCutoffMin : AUJOURD'HUI, pas d'absence avant cette minute du jour (heure officielle / début du shift)
+ */
+export interface AbsenceRuleOpts {
+  hireDateStr?: string | null;
+  exitDateStr?: string | null;
+  todayCutoffMin?: number;
+}
 
 @Injectable()
 export class AttendanceCalculationService {
@@ -32,6 +44,11 @@ export class AttendanceCalculationService {
   // ============================================================================
   // ✅ CALCUL DES STATUTS — version async (un employé à la fois)
   // ============================================================================
+  /** 🆕 Heure (minute du jour, Congo) à partir de laquelle l'absence compte AUJOURD'HUI, par salarié. */
+  async getTodayCutoffs(companyId: string, employeeIds: string[]): Promise<Map<string, number>> {
+    return loadTodayAbsenceCutoffs(this.prisma, companyId, employeeIds);
+  }
+
   async calculateDayStatuses(
     employeeId: string,
     startDate: Date,
@@ -39,7 +56,7 @@ export class AttendanceCalculationService {
   ): Promise<DayStatus[]> {
     const employee = await this.prisma.employee.findUnique({
       where: { id: employeeId },
-      select: { companyId: true },
+      select: { companyId: true, hireDate: true, terminationDate: true },
     });
     if (!employee) throw new EmployeeNotFoundException(employeeId);
 
@@ -48,7 +65,17 @@ export class AttendanceCalculationService {
     const endDateStr = this.utils.formatDate(endDate);
 
     const now = new Date();
-    const today = this.utils.createLocalDate(this.utils.getTodayString()); // 🕐 jour du Congo
+    const todayStr = this.utils.getTodayString();
+    const today = this.utils.createLocalDate(todayStr); // 🕐 jour du Congo
+
+    // 🆕 Règles d'absence : embauche / sortie / heure officielle du jour
+    const ruleOpts: AbsenceRuleOpts = {
+      hireDateStr: employee.hireDate ? this.utils.formatDate(employee.hireDate) : null,
+      exitDateStr: employee.terminationDate ? this.utils.formatDate(employee.terminationDate) : null,
+    };
+    if (startDateStr <= todayStr && endDateStr >= todayStr) {
+      ruleOpts.todayCutoffMin = (await this.getTodayCutoffs(companyId, [employeeId])).get(employeeId);
+    }
 
     const payrollSettings = await this.prisma.payrollSettings.findFirst({
       where: { companyId },
@@ -118,6 +145,7 @@ export class AttendanceCalculationService {
           current,
           isFuture,
           absenceDates,
+          ruleOpts,
         );
         result.push(
           this.buildDayStatus(dateStr, status, att, leaveDates, absenceDates),
@@ -146,7 +174,9 @@ export class AttendanceCalculationService {
     holidayDates: Set<string>,
     workDays: number[],
     // 🆕 optionnel — jours justifiés de cet employé (voir buildAbsenceDatesByEmployee)
-    absenceDates?: Map<string, { type: string; isPaid: boolean }>,
+    absenceDates?: Map<string, { type: string; isPaid: boolean; subType?: string | null }>,
+    // 🆕 optionnel — embauche / sortie / heure officielle du jour (voir AbsenceRuleOpts)
+    ruleOpts?: AbsenceRuleOpts,
   ): DayStatus[] {
     const now = new Date();
     const today = this.utils.createLocalDate(this.utils.getTodayString()); // 🕐 jour du Congo
@@ -176,6 +206,7 @@ export class AttendanceCalculationService {
         current,
         isFuture,
         absenceDates,
+        ruleOpts,
       );
       result.push(this.buildDayStatus(dateStr, status, att, leaveDates, absenceDates));
 
@@ -208,8 +239,8 @@ export class AttendanceCalculationService {
   private buildAbsenceDates(
     absenceRequests: any[],
     coveredMap: Map<string, Set<string> | null>,
-  ): Map<string, { type: string; isPaid: boolean }> {
-    const absenceDates = new Map<string, { type: string; isPaid: boolean }>();
+  ): Map<string, { type: string; isPaid: boolean; subType?: string | null }> {
+    const absenceDates = new Map<string, { type: string; isPaid: boolean; subType?: string | null }>();
     absenceRequests.forEach((ar) => {
       const covered = coveredMap.get(ar.id) ?? null;
       const current = new Date(ar.startDate);
@@ -217,7 +248,7 @@ export class AttendanceCalculationService {
       while (current <= end) {
         const ds = this.utils.formatDate(current);
         if (!covered || covered.has(ds)) {
-          absenceDates.set(ds, { type: ar.type, isPaid: ar.isPaid });
+          absenceDates.set(ds, { type: ar.type, isPaid: ar.isPaid, subType: ar.subType ?? null });
         }
         current.setDate(current.getDate() + 1);
       }
@@ -232,7 +263,7 @@ export class AttendanceCalculationService {
   async buildAbsenceDatesByEmployee(
     companyId: string,
     absenceRequests: any[],
-  ): Promise<Map<string, Map<string, { type: string; isPaid: boolean }>>> {
+  ): Promise<Map<string, Map<string, { type: string; isPaid: boolean; subType?: string | null }>>> {
     const coveredMap = await WorkingDays.loadCoveredDatesMap(
       this.prisma,
       companyId,
@@ -243,7 +274,7 @@ export class AttendanceCalculationService {
       if (!grouped.has(ar.employeeId)) grouped.set(ar.employeeId, []);
       grouped.get(ar.employeeId)!.push(ar);
     });
-    const byEmployee = new Map<string, Map<string, { type: string; isPaid: boolean }>>();
+    const byEmployee = new Map<string, Map<string, { type: string; isPaid: boolean; subType?: string | null }>>();
     grouped.forEach((list, employeeId) => {
       byEmployee.set(employeeId, this.buildAbsenceDates(list, coveredMap));
     });
@@ -258,7 +289,8 @@ export class AttendanceCalculationService {
     workDays: number[],
     current: Date,
     isFuture: boolean,
-    absenceDates?: Map<string, { type: string; isPaid: boolean }>,
+    absenceDates?: Map<string, { type: string; isPaid: boolean; subType?: string | null }>,
+    ruleOpts?: AbsenceRuleOpts,
   ): DayStatusEnum {
     if (holidayDates.has(dateStr)) return DayStatusEnum.HOLIDAY;
     if (!this.utils.isWorkingDay(current, workDays))
@@ -307,6 +339,21 @@ export class AttendanceCalculationService {
     }
 
     if (isFuture) return DayStatusEnum.FUTURE;
+
+    // 🆕 Aucun pointage ce jour ouvré → absent, SAUF :
+    //   • avant la date d'embauche / après la date de sortie (le salarié n'était pas dans l'entreprise)
+    //   • AUJOURD'HUI avant l'heure officielle de début (journée pas encore « due »)
+    if (ruleOpts) {
+      if (ruleOpts.hireDateStr && dateStr < ruleOpts.hireDateStr) return DayStatusEnum.FUTURE;
+      if (ruleOpts.exitDateStr && dateStr > ruleOpts.exitDateStr) return DayStatusEnum.FUTURE;
+      if (
+        ruleOpts.todayCutoffMin !== undefined &&
+        dateStr === this.utils.getTodayString() &&
+        nowCongoMinutes() < ruleOpts.todayCutoffMin
+      ) {
+        return DayStatusEnum.FUTURE;
+      }
+    }
     return DayStatusEnum.ABSENT_UNPAID;
   }
 
@@ -318,7 +365,7 @@ export class AttendanceCalculationService {
     status: DayStatusEnum,
     att: any,
     leaveDates: Map<string, string>,
-    absenceDates?: Map<string, { type: string; isPaid: boolean }>,
+    absenceDates?: Map<string, { type: string; isPaid: boolean; subType?: string | null }>,
   ): DayStatus {
     const absence = absenceDates?.get(dateStr);
     return {
@@ -326,6 +373,7 @@ export class AttendanceCalculationService {
       status,
       leaveType: leaveDates.get(dateStr),
       absenceType: absence?.type,
+      absenceSubType: absence?.subType ?? undefined,
       isPaid: absence?.isPaid,
       checkIn: att?.checkIn ?? undefined,
       checkOut: att?.checkOut ?? undefined,
