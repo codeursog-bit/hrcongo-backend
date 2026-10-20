@@ -912,10 +912,29 @@ export class EmployeesService {
       }
       const phoneTaken = await this.prisma.employee.findFirst({
         where: { phone: normalizedPhone }, // ✅ global, pas par entreprise : le login cherche aussi tous employés confondus
+        select: {
+          companyId: true,
+          firstName: true,
+          lastName: true,
+          employeeNumber: true,
+          status: true,
+        },
       });
       if (phoneTaken) {
+        // Message précis : l'utilisateur ne doit pas croire « personne n'a ce numéro »
+        // alors qu'il est tenu par un ancien employé ou par une AUTRE entreprise
+        // (l'unicité est globale sur toute la plateforme).
+        if (phoneTaken.companyId === user.companyId) {
+          const ancien =
+            phoneTaken.status === 'TERMINATED'
+              ? ' (fiche clôturée — retirez ou modifiez son numéro pour le réutiliser)'
+              : '';
+          throw new ConflictException(
+            `Le numéro "${normalizedPhone}" est déjà utilisé par ${phoneTaken.firstName} ${phoneTaken.lastName} (${phoneTaken.employeeNumber})${ancien}.`,
+          );
+        }
         throw new ConflictException(
-          `Le numéro "${normalizedPhone}" est déjà utilisé par un autre employé.`,
+          `Le numéro "${normalizedPhone}" est déjà enregistré sur un autre compte entreprise de la plateforme. Un numéro de téléphone ne peut être rattaché qu'à une seule fiche (il sert à la connexion).`,
         );
       }
       createEmployeeDto.phone = normalizedPhone;
@@ -982,7 +1001,7 @@ export class EmployeesService {
     } else {
       let isUnique = false;
       let attempt = 0;
-      while (!isUnique && attempt < 10) {
+      while (!isUnique && attempt < 50) {
         const count = await this.prisma.employee.count({
           where: { companyId: user.companyId },
         });
@@ -994,9 +1013,9 @@ export class EmployeesService {
         if (!existing) isUnique = true;
         else attempt++;
       }
-      if (!employeeNumber)
+      if (!isUnique)
         throw new ConflictException(
-          'Impossible de générer un matricule unique.',
+          'Impossible de générer un matricule unique. Saisissez un matricule manuellement.',
         );
     }
 
@@ -1105,18 +1124,35 @@ export class EmployeesService {
       });
     } catch (error: any) {
       if (error.code === 'P2002') {
-        const field = error.meta?.target?.[0];
-        if (field === 'nationalIdNumber')
+        const target = error.meta?.target;
+        const fields: string = Array.isArray(target)
+          ? target.join(',')
+          : String(target ?? '');
+        if (fields.includes('nationalIdNumber'))
           throw new ConflictException('Ce numéro CNI est déjà enregistré.');
-        if (field === 'cnssNumber')
+        if (fields.includes('cnssNumber'))
           throw new ConflictException('Ce numéro CNSS est déjà enregistré.');
+        if (fields.includes('phone'))
+          throw new ConflictException(
+            'Ce numéro de téléphone est déjà enregistré sur une autre fiche.',
+          );
+        if (fields.includes('employeeNumber'))
+          throw new ConflictException(
+            'Ce matricule est déjà utilisé dans cette entreprise.',
+          );
         throw new ConflictException(
-          'Un employé avec ces informations existe déjà.',
+          `Un employé avec ces informations existe déjà${fields ? ` (champ : ${fields})` : ''}.`,
         );
       }
-      if (error.code === 'P2000' || error.code === 'P2003') {
+      if (error.code === 'P2000') {
         throw new BadRequestException({
-          message: 'Erreur de validation',
+          message: `Une valeur est trop longue${error.meta?.column_name ? ` (champ : ${error.meta.column_name})` : ''}.`,
+          details: error.meta,
+        });
+      }
+      if (error.code === 'P2003') {
+        throw new BadRequestException({
+          message: `Référence invalide${error.meta?.field_name ? ` (champ : ${error.meta.field_name})` : ''}.`,
           details: error.meta,
         });
       }

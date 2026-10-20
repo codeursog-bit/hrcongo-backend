@@ -2256,8 +2256,29 @@ export class PayrollsService {
     // d'une autre entreprise. Le rôle reste vérifié par @Roles côté route.
     await assertCompanyAccess(this.prisma, userId, payroll.companyId);
     if (payroll.status === 'PAID') throw new PayrollAlreadyPaidException();
-    await this.prisma.payroll.delete({ where: { id } });
-    return { success: true, message: 'Bulletin supprimé avec succès' };
+
+    // ♻️ Supprimer un bulletin ANNULE ses déductions : prêts, avances et
+    // retenues diverses prélevés sur ce bulletin sont remis (solde + statut)
+    // dans la même transaction que la suppression. Sans ça, la régénération
+    // prélevait la mensualité suivante au lieu de celle du mois supprimé.
+    const restored = await this.prisma.$transaction(
+      async (tx) => {
+        const r = await this.deductionsService.restoreDebtsForDeletedPayroll(
+          tx,
+          payroll.employeeId,
+          payroll.month,
+          payroll.year,
+        );
+        await tx.payroll.delete({ where: { id } });
+        return r;
+      },
+      { timeout: 30000 },
+    );
+    return {
+      success: true,
+      message: 'Bulletin supprimé avec succès',
+      restoredDebts: restored,
+    };
   }
 
   // ============================================================================

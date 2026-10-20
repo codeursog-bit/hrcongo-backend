@@ -384,6 +384,92 @@ export class PayrollDeductionsService {
   }
 
   /**
+   * ♻️ RESTAURER LES DETTES D'UN BULLETIN SUPPRIMÉ
+   * Quand un bulletin non payé est supprimé, tout ce qu'il avait prélevé sur
+   * les prêts, avances et retenues diverses doit être REMIS, sinon la
+   * régénération du même mois prélève la mensualité SUIVANTE (et le journal
+   * PAYROLL resté en base empêche même d'enregistrer la nouvelle déduction).
+   * On relit les journaux PAYROLL de CE mois précis pour CET employé (ce que
+   * la génération a réellement prélevé), on rend le montant au solde (sans
+   * jamais dépasser le montant d'origine), on remet le statut d'avant
+   * (PAID → ACTIVE, DEDUCTED → APPROVED / PENDING) puis on supprime le
+   * journal. Les remboursements en espèces (méthode CASH) ne sont jamais
+   * touchés.
+   * ⚠️ À appeler dans la MÊME transaction que la suppression du bulletin.
+   */
+  async restoreDebtsForDeletedPayroll(
+    tx: any,
+    employeeId: string,
+    month: number,
+    year: number,
+  ) {
+    const restored = { loans: 0, advances: 0, companyDeductions: 0, totalAmount: 0 };
+
+    // ── Prêts ──────────────────────────────────────────────────────────────
+    const loanLogs = await tx.loanRepaymentLog.findMany({
+      where: { method: 'PAYROLL', month, year, loan: { employeeId } },
+      include: { loan: { select: { id: true, amount: true, remainingBalance: true, status: true } } },
+    });
+    for (const log of loanLogs) {
+      const loan = log.loan;
+      const back = Number(log.amount);
+      const newBalance = Math.min(Number(loan.amount), Number(loan.remainingBalance) + back);
+      const data: any = { remainingBalance: newBalance };
+      if (loan.status === 'PAID' && newBalance > 0) data.status = 'ACTIVE';
+      await tx.loan.update({ where: { id: loan.id }, data });
+      await tx.loanRepaymentLog.delete({ where: { id: log.id } });
+      restored.loans++;
+      restored.totalAmount += back;
+    }
+
+    // ── Avances ────────────────────────────────────────────────────────────
+    const advanceLogs = await tx.advanceRepaymentLog.findMany({
+      where: { method: 'PAYROLL', month, year, advance: { employeeId } },
+      include: { advance: { select: { id: true, amount: true, remainingBalance: true, status: true } } },
+    });
+    for (const log of advanceLogs) {
+      const adv = log.advance;
+      const back = Number(log.amount);
+      const newBalance = Math.min(Number(adv.amount), Number(adv.remainingBalance) + back);
+      const data: any = { remainingBalance: newBalance };
+      // Une avance déduite passe à DEDUCTED : on la remet à approuvée pour
+      // que la prochaine génération la reprenne (getApprovedAdvances).
+      if (adv.status === 'DEDUCTED' && newBalance > 0) {
+        data.status = 'APPROVED';
+        data.deducted = false;
+      }
+      await tx.advance.update({ where: { id: adv.id }, data });
+      await tx.advanceRepaymentLog.delete({ where: { id: log.id } });
+      restored.advances++;
+      restored.totalAmount += back;
+    }
+
+    // ── Retenues diverses (pharmacie, cantine, casse matériel...) ─────────
+    const cdLogs = await tx.companyDeductionRepaymentLog.findMany({
+      where: { method: 'PAYROLL', month, year, companyDeduction: { employeeId } },
+      include: { companyDeduction: { select: { id: true, amount: true, remainingBalance: true, status: true } } },
+    });
+    for (const log of cdLogs) {
+      const d = log.companyDeduction;
+      const back = Number(log.amount);
+      const newBalance = Math.min(Number(d.amount), Number(d.remainingBalance) + back);
+      const data: any = { remainingBalance: newBalance };
+      if (d.status === 'DEDUCTED' && newBalance > 0) data.status = 'PENDING';
+      await tx.companyDeduction.update({ where: { id: d.id }, data });
+      await tx.companyDeductionRepaymentLog.delete({ where: { id: log.id } });
+      restored.companyDeductions++;
+      restored.totalAmount += back;
+    }
+
+    if (restored.totalAmount > 0) {
+      this.logger.log(
+        `♻️ Bulletin ${month}/${year} supprimé — dettes restaurées : ${restored.loans} prêt(s), ${restored.advances} avance(s), ${restored.companyDeductions} retenue(s) (${restored.totalAmount} FCFA)`,
+      );
+    }
+    return restored;
+  }
+
+  /**
    * 📊 CALCULER LE TOTAL DES DÉDUCTIONS
    */
   calculateTotalDeductions(loans: any[], advances: any[]) {
