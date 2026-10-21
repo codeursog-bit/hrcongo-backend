@@ -114,6 +114,35 @@ export const LEAVE_SENIORITY_CONVENTIONS: LeaveConventionDefinition[] = [
     ],
   },
   {
+    key: 'NTIC',
+    label:
+      'Convention Collective des Entreprises de Télécommunication et des Technologies Associées (Art.88)',
+    // Art.88 : jours supplémentaires ouvrables après 5 / 10 / 15 / 20 / 25 ans
+    // de service effectif (en plus des 26 jours de base, Art.87).
+    brackets: [
+      { minYears: 5, days: 5 },
+      { minYears: 10, days: 8 },
+      { minYears: 15, days: 10 },
+      { minYears: 20, days: 12 },
+      { minYears: 25, days: 14 },
+    ],
+  },
+  {
+    key: 'BANQUE',
+    label:
+      'Convention Collective des travailleurs des Banques, Assurances et Assureur-conseils (Art.41)',
+    // Art.41 : jours supplémentaires ouvrables après 5 / 10 / 15 / 20 / 25 / 30 ans
+    // de service (en plus du congé légal, Art.40).
+    brackets: [
+      { minYears: 5, days: 5 },
+      { minYears: 10, days: 8 },
+      { minYears: 15, days: 10 },
+      { minYears: 20, days: 12 },
+      { minYears: 25, days: 14 },
+      { minYears: 30, days: 16 },
+    ],
+  },
+  {
     key: 'BTP',
     label:
       'Convention Collective du Bâtiment, TP et Activités Connexes (Art.41)',

@@ -122,6 +122,43 @@ export const ABSENCE_MOTIFS_GRILLE: Record<string, AbsenceMotifGrille> = {
       { label: 'Retrait de deuil (conjoint, descendant, ascendant ou collatéral en ligne directe)', subType: 'RETRAIT_DEUIL', days: 1 },
     ],
   },
+  NTIC: {
+    // Art.90 — limite globale de 10 jours par année civile.
+    // ⚠️ Dans le texte extrait du PDF, la colonne des montants est décalée par
+    // rapport aux libellés : l'appariement a été déduit par l'ordre (8 montants
+    // pour 8 lignes) — à confirmer sur le PDF, surtout les deux lignes baptême.
+    annualCeiling: 10,
+    rows: [
+      { label: 'Mariage du salarié', subType: 'MARIAGE', days: 3 },
+      { label: "Mariage d'un enfant, d'un frère ou d'une sœur", subType: 'MARIAGE', days: 1 },
+      { label: 'Décès du conjoint légitime', subType: 'DECES', days: 5 },
+      { label: "Décès d'un descendant, ascendant, frère ou sœur", subType: 'DECES', days: 3 },
+      { label: "Accouchement de l'épouse légitime", subType: 'NAISSANCE', days: 2 },
+      { label: 'Retrait de deuil (salarié, conjoint, descendant, ascendant ou collatéral direct)', subType: 'RETRAIT_DEUIL', days: 2 },
+      { label: "Baptême ou première communion d'un enfant ou du conjoint", subType: 'AUTRE', days: 1 },
+      { label: 'Baptême et/ou première communion du salarié', subType: 'AUTRE', days: 2 },
+    ],
+  },
+  BANQUE: {
+    // Art.44 — total limité à 20 jours ouvrables par an, sans retenue sur la
+    // rémunération et sans imputation sur les congés annuels. Si l'événement a
+    // lieu hors du lieu d'emploi, les délais ne comprennent pas la durée du voyage.
+    // (Art.43, congé pour enfants malades : 9 j pour 2 enfants, 12 j pour 3 et +,
+    // à plein traitement — règle distincte, non incluse dans cette table.)
+    annualCeiling: 20,
+    rows: [
+      { label: 'Mariage du travailleur', subType: 'MARIAGE', days: 7 },
+      { label: "Mariage d'un enfant", subType: 'MARIAGE', days: 3 },
+      { label: "Mariage d'un frère", subType: 'MARIAGE', days: 1 },
+      { label: "Décès du conjoint ou d'un enfant", subType: 'DECES', days: 10 },
+      { label: 'Décès du père ou de la mère', subType: 'DECES', days: 8 },
+      { label: "Décès d'un membre de la famille (frère, sœur, beau-frère, beau-père, belle-mère, belle-sœur, tante ou oncle directs)", subType: 'DECES', days: 3 },
+      { label: "Accouchement de l'épouse", subType: 'NAISSANCE', days: 4 },
+      { label: "Baptême d'un enfant", subType: 'AUTRE', days: 2 },
+      { label: 'Première communion', subType: 'AUTRE', days: 1 },
+      { label: 'Déménagement', subType: 'DEMENAGEMENT', days: 3 },
+    ],
+  },
   BTP: {
     annualCeiling: 15,
     rows: [

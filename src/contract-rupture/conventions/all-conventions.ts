@@ -1195,14 +1195,22 @@ export class PresseConvention implements IConvention {
 }
 
 // ============================================================================
-// ntic.convention.ts — Barème MOIS_PAR_AN avec plafond 36 mois
+// ntic.convention.ts — Convention Collective des Entreprises de
+// Télécommunication et des Technologies Associées (10/07/2003)
+// Barème MOIS_PAR_AN avec plafond 36 mois (Art.50).
+// Sources : Art.50 (préavis, licenciement), Art.57 (retraite), Art.58 (décès).
 // ============================================================================
 export class NTICConvention implements IConvention {
   code = 'NTIC';
-  nom = 'Convention Collective NTIC';
+  nom =
+    'Convention Collective des Entreprises de Télécommunication et des Technologies Associées';
   secteurs = [
-    'informatique',
     'télécommunications',
+    'télécommunication',
+    'télécoms',
+    'telecom',
+    'technologies associées',
+    'informatique',
     'numérique',
     'tech',
     'NTIC',
@@ -1210,49 +1218,64 @@ export class NTICConvention implements IConvention {
 
   baremeLicenciement: ConventionBaremeLicenciement = {
     format: 'MOIS_PAR_AN',
+    // Art.50 : indemnité "après confirmation dans son emploi" (donc hors
+    // période d'essai) — pas de seuil d'ancienneté chiffré dans le texte.
     seuilMoisAnciennete: 0,
     paliers: [
-      { anneeMin: 0, anneeMax: 3, valeur: 1.0 },
-      { anneeMin: 3, anneeMax: 10, valeur: 1.5 },
-      { anneeMin: 10, anneeMax: 15, valeur: 2.0 },
-      { anneeMin: 15, anneeMax: 999, valeur: 2.5 },
+      { anneeMin: 0, anneeMax: 3, valeur: 1.0 }, // 3 premières années
+      { anneeMin: 3, anneeMax: 10, valeur: 1.5 }, // 4e à 10e année
+      { anneeMin: 10, anneeMax: 15, valeur: 2.0 }, // 11e à 15e année
+      { anneeMin: 15, anneeMax: 999, valeur: 2.5 }, // à compter de la 16e année
     ],
     baseCalcul: 'avg12',
-    fractionsMinJours: 0,
-    plafondMois: 36,
+    fractionsMinJours: 0, // "il doit être tenu compte des fractions d'années"
+    plafondMois: 36, // plafonnée à 36 mois de salaire moyen
   };
 
   baremeRetraite: ConventionBaremeRetraite = {
     paliers: [],
+    // Art.57 : % du salaire annuel brut (moyenne des 12 derniers mois × 12),
+    // après 5 / 10 / 20 / 30 ans d'ancienneté révolus. Rien avant 5 ans.
     paliersPourcent: [
       { anneeMin: 5, anneeMax: 10, pourcent: 0.1 },
       { anneeMin: 10, anneeMax: 20, pourcent: 0.2 },
       { anneeMin: 20, anneeMax: 30, pourcent: 0.4 },
       { anneeMin: 30, anneeMax: 999, pourcent: 0.6 },
     ],
-    baseCalcul: 'annuel', // % du salaire annuel brut
+    baseCalcul: 'annuel',
   };
 
   preavis: ConventionPreavis = {
+    // Art.50 : 1 mois Ouvriers/Employés (cat.1-8), 2 mois Agents de maîtrise
+    // (cat.9D, 9, 10), 3 mois Cadres (cat.11D, 11, 12, 13).
+    // 9D et 11D se lisent 9 et 11 (ConventionsService._parseCategorieNum) :
+    // même durée que leur catégorie principale.
     dureeParCategorie: {
       1: 30,
       2: 30,
       3: 30,
       4: 30,
-      5: 60,
-      6: 60,
-      7: 60,
-      8: 90,
-      9: 90,
+      5: 30,
+      6: 30,
+      7: 30,
+      8: 30,
+      9: 60,
+      10: 60,
+      11: 90,
+      12: 90,
+      13: 90,
     },
     dureeDefaut: 90,
     uniteJours: 'calendaires',
+    // Art.50 : pas de doublement de l'indemnité (le texte prévoit seulement
+    // une notification 1 mois avant un départ en congé — autre règle).
     doubleementSiRupturePendantConge: false,
     baseIndemCompensatrice: 'avg12',
+    // Art.50 : 2 jours par semaine pour chercher un emploi, payés à plein salaire.
     heuresRechercheEmploi: { type: 'jours_semaine', valeur: 2 },
   };
 
-  conges: ConventionConges = { joursParAn: 26, baseCalcul: 'avg12' };
+  conges: ConventionConges = { joursParAn: 26, baseCalcul: 'avg12' }; // Art.87
 
   fiscalite: ConventionFiscalite = {
     indemLicenciementExonereITS: true,
@@ -1268,6 +1291,10 @@ export class NTICConvention implements IConvention {
   };
 
   decesConfig: ConventionDecesConfig = {
+    // Art.58 : indemnité due EN PLUS des salaires de présence, allocation de
+    // congé et indemnités acquis. Le texte laisse des trous entre tranches
+    // ("0 à 5", "6 à 15", "16 à 20", "plus de 20") — retenu ici : les
+    // tranches changent aux années pleines 5 / 15 / 20.
     ancienneteMinMois: 0,
     type: 'PROGRESSIF',
     paliers: [
@@ -1284,7 +1311,9 @@ export class NTICConvention implements IConvention {
     return this.preavis.dureeParCategorie[cat] ?? this.preavis.dureeDefaut;
   }
   getSalaireMinimum(_c: number): number {
-    return 70000;
+    // Plancher réel du barème (Cat.1, Éch.1) — la grille complète est dans
+    // conventions/ntic-grille.ts (utilisée côté paie/RH).
+    return 104916;
   }
   getCategorieFromPoste(_p: string): number | null {
     return null;
@@ -1306,7 +1335,7 @@ export class NTICConvention implements IConvention {
         `${n.toFixed(2)}a × ${p.valeur} mois × ${_fmt(avg12)} = ${_fmt(c)}`,
       );
     }
-    const plafond = avg12 * 36;
+    const plafond = avg12 * (this.baremeLicenciement.plafondMois ?? 36);
     if (montant > plafond)
       return {
         montant: Math.round(plafond),
@@ -1322,11 +1351,17 @@ export class NTICConvention implements IConvention {
     yearsExact: number,
     avg12: number,
   ): { montant: number; detail: string } {
-    const p =
-      this.baremeRetraite.paliersPourcent?.find(
-        (x) => yearsExact >= x.anneeMin && yearsExact < x.anneeMax,
-      ) ?? this.baremeRetraite.paliersPourcent?.at(-1);
-    if (!p) return { montant: 0, detail: 'Ancienneté < 5 ans' };
+    // ✅ Corrigé : l'ancienne version retombait sur le DERNIER palier (60 %)
+    // quand aucune tranche ne correspondait, donc un salarié < 5 ans touchait
+    // 60 % du salaire annuel. Avant 5 ans : aucune indemnité (Art.57).
+    const p = this.baremeRetraite.paliersPourcent?.find(
+      (x) => yearsExact >= x.anneeMin && yearsExact < x.anneeMax,
+    );
+    if (!p)
+      return {
+        montant: 0,
+        detail: "Ancienneté < 5 ans : pas d'indemnité de départ à la retraite (Art.57)",
+      };
     const salAnnuel = avg12 * 12;
     const montant = Math.round(salAnnuel * p.pourcent);
     return {
@@ -1347,6 +1382,203 @@ export class NTICConvention implements IConvention {
     return {
       montant,
       detail: `${p.moisSalaire} mois × ${_fmt(avg12)} = ${_fmt(montant)} FCFA`,
+    };
+  }
+}
+
+// ============================================================================
+// banque.convention.ts — Convention Collective des travailleurs des Banques,
+// Assurances et Assureur-conseils (juin 2011)
+// Barème MOIS_PAR_AN avec plafond 40 mois (Art.27).
+// Sources : Art.26 (préavis), Art.27 (licenciement), Art.29 (fin de carrière),
+// Art.31 (décès). Numérotation interne des codes : voir banque-grille.ts
+// (catégories 3-9 → 3..9 ; classes 1-10 → 11..20 ; hors classe → 21).
+// ============================================================================
+export class BanqueConvention implements IConvention {
+  code = 'BANQUE';
+  nom =
+    'Convention Collective des travailleurs des Banques, Assurances et Assureur-conseils';
+  secteurs = [
+    'banque',
+    'banques',
+    'assurance',
+    'assurances',
+    'assureur-conseils',
+    'assureur conseil',
+    'établissement de crédit',
+    'crédit',
+    'finance',
+    'microfinance',
+  ];
+
+  baremeLicenciement: ConventionBaremeLicenciement = {
+    format: 'MOIS_PAR_AN',
+    // Art.27 : droit à l'indemnité "lorsqu'il accomplit une durée de service
+    // égale à un (1) an".
+    seuilMoisAnciennete: 12,
+    paliers: [
+      { anneeMin: 0, anneeMax: 3, valeur: 1.5 }, // 3 premières années
+      { anneeMin: 3, anneeMax: 10, valeur: 2.5 }, // années 4 à 10
+      { anneeMin: 10, anneeMax: 15, valeur: 3.5 }, // années 11 à 15
+      { anneeMin: 15, anneeMax: 999, valeur: 4.5 }, // au-delà de 15 ans
+    ],
+    // Pas de barème distinct pour motif économique (Art.28 renvoie à la loi).
+    baseCalcul: 'avg12', // "salaire brut moyen des douze derniers mois"
+    fractionsMinJours: 0, // texte muet sur les fractions d'année : toutes comptées
+    plafondMois: 40, // "ne peut dépasser 40 mois de salaire brut moyen"
+  };
+
+  baremeRetraite: ConventionBaremeRetraite = {
+    // Art.29 : 3 mois de salaire brut PAR TRANCHE COMPLÈTE de 5 ans de présence.
+    // (affichage en paliers ; le calcul utilise floor(années / 5) × 3 mois)
+    paliers: [
+      { anneeMin: 5, anneeMax: 10, moisSalaire: 3 },
+      { anneeMin: 10, anneeMax: 15, moisSalaire: 6 },
+      { anneeMin: 15, anneeMax: 20, moisSalaire: 9 },
+      { anneeMin: 20, anneeMax: 25, moisSalaire: 12 },
+      { anneeMin: 25, anneeMax: 30, moisSalaire: 15 },
+      { anneeMin: 30, anneeMax: 35, moisSalaire: 18 },
+      { anneeMin: 35, anneeMax: 40, moisSalaire: 21 },
+      { anneeMin: 40, anneeMax: 999, moisSalaire: 24 },
+    ],
+    baseCalcul: 'avg12',
+  };
+
+  preavis: ConventionPreavis = {
+    // Art.26 (= durée de la période d'essai, Art.17) : 1 mois personnel de
+    // service et employés (catégories 3-9), 2 mois gradés (classes 1-5),
+    // 3 mois cadres (classes 6-10). Numéros internes : classe n = 10 + n.
+    // Hors classe (21) : non précisé dans le texte → traité comme cadre.
+    dureeParCategorie: {
+      3: 30,
+      4: 30,
+      5: 30,
+      6: 30,
+      7: 30,
+      8: 30,
+      9: 30,
+      11: 60,
+      12: 60,
+      13: 60,
+      14: 60,
+      15: 60,
+      16: 90,
+      17: 90,
+      18: 90,
+      19: 90,
+      20: 90,
+      21: 90,
+    },
+    dureeDefaut: 90,
+    uniteJours: 'calendaires',
+    doubleementSiRupturePendantConge: false,
+    baseIndemCompensatrice: 'avg12',
+    // Art.26 : 2 jours par semaine, sans réduction de salaire.
+    heuresRechercheEmploi: { type: 'jours_semaine', valeur: 2 },
+  };
+
+  conges: ConventionConges = { joursParAn: 26, baseCalcul: 'avg12' }; // Art.40 : réglementation en vigueur
+
+  fiscalite: ConventionFiscalite = {
+    indemLicenciementExonereITS: true,
+    indemPreavisImposableITS: true,
+    indemCongesImposableITS: true,
+    indemGratificationImposable: true,
+    TAUX_CNSS_SALARIE: 0.04,
+    indemLicenciementExonereCNSS: true,
+    preavisAssietteCNSS: true,
+    congesAssietteCNSS: true,
+    dernierSalaireAssietteCNSS: true,
+    gratificationAssietteCNSS: true,
+  };
+
+  decesConfig: ConventionDecesConfig = {
+    // Art.31 : si ≥ 1 an d'ancienneté → indemnité égale à l'indemnité de
+    // licenciement (Art.27) ; EN OUTRE prime de 75 000 FCFA par enfant à charge
+    // (sans condition d'ancienneté).
+    ancienneteMinMois: 12,
+    type: 'EGAL_LICENCIEMENT',
+    primeFixeParEnfant: 75000,
+  };
+
+  grilleSalariale: GrilleSalariale = { categories: {} };
+
+  getPreavisDays(cat: number): number {
+    return this.preavis.dureeParCategorie[cat] ?? this.preavis.dureeDefaut;
+  }
+  getSalaireMinimum(_c: number): number {
+    // Plancher réel du barème (Cat.3 Éch.1 : indice 95 × 805) — la grille
+    // complète est dans conventions/banque-grille.ts.
+    return 76475;
+  }
+  getCategorieFromPoste(_p: string): number | null {
+    return null;
+  }
+
+  calcIndemLicenciement(
+    yearsExact: number,
+    avg12: number,
+  ): { montant: number; detail: string } {
+    let montant = 0;
+    const lignes: string[] = [];
+    for (const p of this.baremeLicenciement.paliers) {
+      if (yearsExact <= p.anneeMin) break;
+      const n = Math.min(yearsExact, p.anneeMax) - p.anneeMin;
+      if (n <= 0) continue;
+      const c = avg12 * p.valeur * n;
+      montant += c;
+      lignes.push(
+        `${n.toFixed(2)}a × ${p.valeur} mois × ${_fmt(avg12)} = ${_fmt(c)}`,
+      );
+    }
+    const plafond = avg12 * (this.baremeLicenciement.plafondMois ?? 40);
+    if (montant > plafond)
+      return {
+        montant: Math.round(plafond),
+        detail: `Plafonné 40 mois : ${_fmt(plafond)} FCFA`,
+      };
+    return {
+      montant: Math.round(montant),
+      detail: lignes.join(' + ') + ` = ${_fmt(montant)} FCFA`,
+    };
+  }
+
+  calcIndemRetraite(
+    yearsExact: number,
+    avg12: number,
+  ): { montant: number; detail: string } {
+    // Art.29 : 3 mois de salaire brut par tranche COMPLÈTE de 5 ans.
+    // ⚠️ "sous déduction des avances, acomptes et prêts de toute nature" :
+    // la déduction n'est pas calculée ici (à traiter avec le module prêts).
+    const tranches = Math.floor(yearsExact / 5);
+    if (tranches < 1)
+      return {
+        montant: 0,
+        detail: "Ancienneté < 5 ans : pas d'indemnité de fin de carrière (Art.29)",
+      };
+    const mois = tranches * 3;
+    const montant = Math.round(avg12 * mois);
+    return {
+      montant,
+      detail: `${tranches} tranche(s) de 5 ans × 3 mois = ${mois} mois × ${_fmt(avg12)} = ${_fmt(montant)} FCFA`,
+    };
+  }
+
+  calcIndemDeces(
+    yearsExact: number,
+    avg12: number,
+    nbEnfants = 0,
+  ): { montant: number; detail: string } {
+    const lic =
+      yearsExact * 12 >= this.decesConfig.ancienneteMinMois
+        ? this.calcIndemLicenciement(yearsExact, avg12).montant
+        : 0;
+    const primeEnfants =
+      (this.decesConfig.primeFixeParEnfant ?? 0) * Math.max(0, nbEnfants);
+    const montant = lic + primeEnfants;
+    return {
+      montant,
+      detail: `Indemnité licenciement si ≥1 an (${_fmt(lic)}) + ${nbEnfants} enfant(s) × ${_fmt(this.decesConfig.primeFixeParEnfant ?? 0)} (${_fmt(primeEnfants)}) = ${_fmt(montant)} FCFA`,
     };
   }
 }

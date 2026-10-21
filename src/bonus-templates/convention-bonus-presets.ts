@@ -138,6 +138,67 @@ const MINE_PRESETS: ConventionBonusPreset[] = [
 ];
 
 // ─────────────────────────────────────────────────────────────────────────
+// 📡 NTIC (Télécommunications) — Art.65 à 74. La prime d'ancienneté (Art.64)
+// est gérée via buildNticAncienneteRules() (ntic-grille.ts), pas ici.
+//
+// Non incluses (volontairement) :
+//  - Art.67 majoration pour langue : texte dit qu'elle "ne répond plus aux
+//    contraintes" — maintenue seulement pour ceux qui l'ont déjà (avantage acquis).
+//  - Art.73 prime exceptionnelle (discrétion de la Direction) et Art.75
+//    (technicité, risque, rendement, budget/bilan, rentrée scolaire, arbre de
+//    Noël, stage, déménagement) : montants fixés d'accord parties par
+//    entreprise, aucun chiffre dans le texte.
+//  - Art.77 frais de mission : fixés d'accord parties.
+//
+// ⚠️ À vérifier sur le PDF : la liste Art.71 (prime de caisse) se termine par
+// un ';' après "caisses secondaires" dans le texte extrait — une ligne
+// "caisse principale" a pu être perdue au changement de page (p.36→37).
+// ─────────────────────────────────────────────────────────────────────────
+const NTIC_PRESETS: ConventionBonusPreset[] = [
+  { name: "Prime de fin d'année", bonusCategory: 'EXCEPTIONNELLE', defaultAmount: null, defaultPercentage: 100, baseCalculation: 'BASE_SALARY', isRecurring: false, isTaxable: true, isCnss: true, isProratized: true, isInLeaveBase: false, description: "Art.65 — un mois de salaire de base augmenté de la prime d'ancienneté, versé au salarié présent du 1er janvier au 31 décembre (prorata si ≥1 an d'ancienneté et licencié en cours d'année pour diminution d'activité/réorganisation). Versement subordonné à l'objectif annuel fixé par la Direction Générale ; peut être réduite ou supprimée en cas de sanction (blâme au minimum). Cadence annuelle à paramétrer manuellement." },
+  { name: 'Majoration diplôme (BEPC)', bonusCategory: 'POSTE', defaultAmount: 8500, defaultPercentage: null, baseCalculation: null, isRecurring: true, isTaxable: true, isCnss: true, isProratized: false, isInLeaveBase: true, description: "Art.66 — 8 500 FCFA/mois pour BEPC, BEMG, BEMT, BEP ou diplôme équivalent." },
+  { name: 'Majoration diplôme (Bac)', bonusCategory: 'POSTE', defaultAmount: 12500, defaultPercentage: null, baseCalculation: null, isRecurring: true, isTaxable: true, isCnss: true, isProratized: false, isInLeaveBase: true, description: "Art.66 — 12 500 FCFA/mois pour Baccalauréat, DEUG, BTS, DUT, Capacité en droit ou diplôme équivalent." },
+  { name: 'Majoration diplôme (Licence+)', bonusCategory: 'POSTE', defaultAmount: 22500, defaultPercentage: null, baseCalculation: null, isRecurring: true, isTaxable: true, isCnss: true, isProratized: false, isInLeaveBase: true, description: "Art.66 — 22 500 FCFA/mois pour Licence, Maîtrise, DESS, diplôme d'ingénieur, diplôme de Grandes Écoles, Doctorat ou diplôme équivalent." },
+  { name: 'Indemnité de transport (Exécution)', bonusCategory: 'FRAIS', defaultAmount: 30000, defaultPercentage: null, baseCalculation: null, isRecurring: true, isTaxable: false, isCnss: false, isProratized: true, isInLeaveBase: false, description: "Art.68 — 30 000 FCFA/mois minimum, collège Exécution. Due si l'employeur n'assure pas le transport du salarié ; révisable avec le coût des transports urbains. L'indemnité kilométrique pour usage du véhicule personnel est fixée d'accord parties dans l'entreprise (non incluse ici)." },
+  { name: 'Indemnité de transport (Maîtrise)', bonusCategory: 'FRAIS', defaultAmount: 55000, defaultPercentage: null, baseCalculation: null, isRecurring: true, isTaxable: false, isCnss: false, isProratized: true, isInLeaveBase: false, description: "Art.68 — 55 000 FCFA/mois minimum, collège Maîtrise. Due si l'employeur n'assure pas le transport du salarié ; révisable avec le coût des transports urbains. L'indemnité kilométrique pour usage du véhicule personnel est fixée d'accord parties dans l'entreprise (non incluse ici)." },
+  { name: 'Indemnité de transport (Cadre)', bonusCategory: 'FRAIS', defaultAmount: 100000, defaultPercentage: null, baseCalculation: null, isRecurring: true, isTaxable: false, isCnss: false, isProratized: true, isInLeaveBase: false, description: "Art.68 — 100 000 FCFA/mois minimum, collège Cadre. Due si l'employeur n'assure pas le transport du salarié ; révisable avec le coût des transports urbains. L'indemnité kilométrique pour usage du véhicule personnel est fixée d'accord parties dans l'entreprise (non incluse ici)." },
+  { name: "Prime d'astreinte (Exécution)", bonusCategory: 'POSTE', defaultAmount: 20000, defaultPercentage: null, baseCalculation: null, isRecurring: true, isTaxable: true, isCnss: true, isProratized: true, isInLeaveBase: true, description: "Art.69 — 20 000 FCFA/mois, collège Exécution. Rémunère la disponibilité du salarié ; payée au prorata des journées d'astreinte effectuées dans le mois (sauf dispositions particulières du contrat)." },
+  { name: "Prime d'astreinte (Maîtrise)", bonusCategory: 'POSTE', defaultAmount: 40000, defaultPercentage: null, baseCalculation: null, isRecurring: true, isTaxable: true, isCnss: true, isProratized: true, isInLeaveBase: true, description: "Art.69 — 40 000 FCFA/mois, collège Maîtrise. Rémunère la disponibilité du salarié ; payée au prorata des journées d'astreinte effectuées dans le mois (sauf dispositions particulières du contrat)." },
+  { name: "Prime d'astreinte (Cadre)", bonusCategory: 'POSTE', defaultAmount: 70000, defaultPercentage: null, baseCalculation: null, isRecurring: true, isTaxable: true, isCnss: true, isProratized: true, isInLeaveBase: true, description: "Art.69 — 70 000 FCFA/mois, collège Cadre. Rémunère la disponibilité du salarié ; payée au prorata des journées d'astreinte effectuées dans le mois (sauf dispositions particulières du contrat)." },
+  { name: 'Prime de panier', bonusCategory: 'FRAIS', defaultAmount: 5000, defaultPercentage: null, baseCalculation: null, isRecurring: true, isTaxable: false, isCnss: false, isProratized: true, isInLeaveBase: false, description: "Art.70 — 5 000 FCFA, due quand une prolongation exceptionnelle de la séance de travail (plus d'une heure) empêche de prendre le repas à l'heure habituelle et de rentrer chez soi. Peut être remplacée par un repas gratuit offert par l'entreprise." },
+  { name: 'Prime de caisse (auxiliaire)', bonusCategory: 'POSTE', defaultAmount: 16000, defaultPercentage: null, baseCalculation: null, isRecurring: true, isTaxable: true, isCnss: true, isProratized: false, isInLeaveBase: true, description: "Art.71 — 16 000 FCFA/mois pour une caisse auxiliaire (responsabilité de la tenue d'une caisse)." },
+  { name: 'Prime de caisse (secondaire)', bonusCategory: 'POSTE', defaultAmount: 30000, defaultPercentage: null, baseCalculation: null, isRecurring: true, isTaxable: true, isCnss: true, isProratized: false, isInLeaveBase: true, description: "Art.71 — 30 000 FCFA/mois pour une caisse secondaire (responsabilité de la tenue d'une caisse)." },
+  { name: 'Prime de représentation', bonusCategory: 'FRAIS', defaultAmount: 30000, defaultPercentage: null, baseCalculation: null, isRecurring: true, isTaxable: false, isCnss: false, isProratized: true, isInLeaveBase: false, description: "Art.72 — 30 000 FCFA/mois minimum, pour les salariés occupant des emplois spécifiques (prise en charge des frais engagés dans le cadre de leur activité)." },
+  { name: 'Indemnité de logement (Exécution)', bonusCategory: 'FRAIS', defaultAmount: 25000, defaultPercentage: null, baseCalculation: null, isRecurring: true, isTaxable: true, isCnss: false, isProratized: false, isInLeaveBase: true, description: "Art.74 — 25 000 FCFA/mois, collège Exécution. Due hors le cas où l'entreprise est tenue d'assurer le logement ; sauf conditions plus favorables dans l'entreprise." },
+  { name: 'Indemnité de logement (Maîtrise)', bonusCategory: 'FRAIS', defaultAmount: 50000, defaultPercentage: null, baseCalculation: null, isRecurring: true, isTaxable: true, isCnss: false, isProratized: false, isInLeaveBase: true, description: "Art.74 — 50 000 FCFA/mois, collège Maîtrise. Due hors le cas où l'entreprise est tenue d'assurer le logement ; sauf conditions plus favorables dans l'entreprise." },
+  { name: 'Indemnité de logement (Cadre)', bonusCategory: 'FRAIS', defaultAmount: 75000, defaultPercentage: null, baseCalculation: null, isRecurring: true, isTaxable: true, isCnss: false, isProratized: false, isInLeaveBase: true, description: "Art.74 — 75 000 FCFA/mois, collège Cadre. Due hors le cas où l'entreprise est tenue d'assurer le logement ; sauf conditions plus favorables dans l'entreprise." },
+];
+
+// ─────────────────────────────────────────────────────────────────────────
+// 🏦 BANQUE (Banques, Assurances et Assureur-conseils) — Art.52 à 59. La prime
+// d'ancienneté (Art.50) est gérée via buildBanqueAncienneteRules()
+// (banque-grille.ts), pas ici.
+//
+// Non incluses (volontairement) : prime de bilan (Art.51, selon performances,
+// accords d'établissement ou organes sociaux), primes de travaux spécifiques
+// (Art.54), indemnité de sous-sol / salle forte (Art.39), frais de mission
+// (Art.57), gratification supplémentaire (Art.56) — montants fixés par accord
+// d'établissement, aucun chiffre dans le texte.
+// ─────────────────────────────────────────────────────────────────────────
+const BANQUE_PRESETS: ConventionBonusPreset[] = [
+  { name: "Gratification de fin d'année", bonusCategory: 'EXCEPTIONNELLE', defaultAmount: null, defaultPercentage: 100, baseCalculation: 'BASE_SALARY', isRecurring: false, isTaxable: true, isCnss: true, isProratized: true, isInLeaveBase: false, description: "Art.56 — au moins le montant du dernier mois de salaire brut, pour le personnel ayant 1 an de présence minimum ; au prorata du temps pour les autres, y compris démissionnaire ou licencié avec droits en cours d'année. Une gratification supplémentaire peut être fixée par accord d'établissement. Calculée ici sur le salaire de base : à ajuster si le dernier salaire brut inclut des primes. Cadence annuelle à paramétrer manuellement." },
+  { name: 'Prime de diplôme (Moyennes)', bonusCategory: 'POSTE', defaultAmount: 8500, defaultPercentage: null, baseCalculation: null, isRecurring: true, isTaxable: true, isCnss: true, isProratized: false, isInLeaveBase: true, description: "Art.52 — 8 500 FCFA/mois, Catégorie A — diplômes d'études moyennes. La liste des diplômes n'est pas limitative. Cumul exclu : seul le diplôme le plus élevé est pris en compte." },
+  { name: 'Prime de diplôme (Secondaires)', bonusCategory: 'POSTE', defaultAmount: 12500, defaultPercentage: null, baseCalculation: null, isRecurring: true, isTaxable: true, isCnss: true, isProratized: false, isInLeaveBase: true, description: "Art.52 — 12 500 FCFA/mois, Catégorie B — diplômes d'études secondaires. La liste des diplômes n'est pas limitative. Cumul exclu : seul le diplôme le plus élevé est pris en compte." },
+  { name: 'Prime de diplôme (Supérieures)', bonusCategory: 'POSTE', defaultAmount: 22500, defaultPercentage: null, baseCalculation: null, isRecurring: true, isTaxable: true, isCnss: true, isProratized: false, isInLeaveBase: true, description: "Art.52 — 22 500 FCFA/mois, Catégorie C — diplômes d'enseignement supérieur. La liste des diplômes n'est pas limitative. Cumul exclu : seul le diplôme le plus élevé est pris en compte." },
+  { name: 'Prime de logement (minimum)', bonusCategory: 'FRAIS', defaultAmount: 40000, defaultPercentage: null, baseCalculation: null, isRecurring: true, isTaxable: true, isCnss: false, isProratized: false, isInLeaveBase: true, description: "Art.53 — 20 % du salaire de base avec un minimum de 40 000 FCFA, pour tout travailleur non logé par l'établissement. Ce modèle applique le minimum ; au-dessus de 200 000 FCFA de salaire de base, utiliser le modèle « 20 % » (le plus élevé des deux s'applique)." },
+  { name: 'Prime de logement (20 %)', bonusCategory: 'FRAIS', defaultAmount: null, defaultPercentage: 20, baseCalculation: 'BASE_SALARY', isRecurring: true, isTaxable: true, isCnss: false, isProratized: false, isInLeaveBase: true, description: "Art.53 — 20 % du salaire de base, avec un minimum de 40 000 FCFA (à garantir manuellement si le salaire de base est inférieur à 200 000 FCFA), pour tout travailleur non logé par l'établissement." },
+  { name: 'Indemnité de transport', bonusCategory: 'FRAIS', defaultAmount: 35000, defaultPercentage: null, baseCalculation: null, isRecurring: true, isTaxable: false, isCnss: false, isProratized: true, isInLeaveBase: false, description: "Art.55 — 35 000 FCFA/mois minimum pour tout travailleur ; conditions plus favorables possibles dans l'entreprise." },
+  { name: 'Indemnité véhicule (voiture)', bonusCategory: 'FRAIS', defaultAmount: 60000, defaultPercentage: null, baseCalculation: null, isRecurring: true, isTaxable: false, isCnss: false, isProratized: true, isInLeaveBase: false, description: "Art.55 — 60 000 FCFA/mois, révisable, pour le travailleur qui utilise en permanence sa voiture personnelle pour le service sur ordre de mission de la direction." },
+  { name: 'Indemnité véhicule (2 roues)', bonusCategory: 'FRAIS', defaultAmount: 15000, defaultPercentage: null, baseCalculation: null, isRecurring: true, isTaxable: false, isCnss: false, isProratized: true, isInLeaveBase: false, description: "Art.55 — 15 000 FCFA/mois, révisable, pour le travailleur qui utilise en permanence son engin à moteur à deux roues pour le service sur ordre de mission de la direction." },
+  { name: "Prime d'installation", bonusCategory: 'EXCEPTIONNELLE', defaultAmount: null, defaultPercentage: 200, baseCalculation: 'BASE_SALARY', isRecurring: false, isTaxable: true, isCnss: true, isProratized: false, isInLeaveBase: false, description: "Art.59 — 2 mois de salaire brut, versés au travailleur muté (déplacé) qui n'est pas logé. Calculée ici sur le salaire de base : à ajuster si le salaire brut inclut des primes." },
+];
+
+// ─────────────────────────────────────────────────────────────────────────
 // 🏗️ BTP — Art.52 à 61. Grille de 1990 (voir btp-grille.ts). Indemnité de
 // déplacement (Art.59, basée sur le SMIG horaire) et véhicule automobile
 // (Art.56, forfait contractuel) exclues — pas de montant fixe donné.
@@ -174,6 +235,8 @@ export const CONVENTION_BONUS_PRESETS: Record<string, ConventionBonusPreset[]> =
   PHARMACIE: PHARMACIE_PRESETS,
   BTP: BTP_PRESETS,
   MINE: MINE_PRESETS,
+  NTIC: NTIC_PRESETS,
+  BANQUE: BANQUE_PRESETS,
 };
 
 export function getConventionBonusPresets(

@@ -52,6 +52,14 @@ import {
   buildMineCategories,
   buildMineAncienneteRules,
 } from './mine-grille';
+import {
+  buildNticCategories,
+  buildNticAncienneteRules,
+} from './ntic-grille';
+import {
+  buildBanqueCategories,
+  buildBanqueAncienneteRules,
+} from './banque-grille';
 
 export interface PredefinedConvention {
   code: string;
@@ -238,34 +246,33 @@ export class ConventionsService {
       },
 
       // ========================================================================
-      // 💻 NTIC
+      // 📡 NTIC — Télécommunications et Technologies Associées (10/07/2003)
+      // Remplace l'ancien placeholder (catégories N1-N11 à 0 FCFA, ancienneté
+      // générique 3%). Grille Annexe 2 + ancienneté Art.64 : voir ntic-grille.ts.
+      // Le code reste "NTIC" (déjà stocké sur les entreprises, présent dans les
+      // deux registres backend et dans le catalogue front).
       // ========================================================================
       {
         code: 'NTIC',
-        name: "NTIC - Nouvelles Technologies de l'Information",
-        description: 'Convention Collective NTIC — République du Congo',
-        categories: [
-          { code: 'N1', label: 'Cat.1 — Ouvriers/Employés', minSalary: 0 },
-          { code: 'N2', label: 'Cat.2 — Ouvriers/Employés', minSalary: 0 },
-          { code: 'N3', label: 'Cat.3 — Ouvriers/Employés', minSalary: 0 },
-          { code: 'N4', label: 'Cat.4 — Ouvriers/Employés', minSalary: 0 },
-          { code: 'N5', label: 'Cat.5 — Agents de Maîtrise', minSalary: 0 },
-          { code: 'N6', label: 'Cat.6 — Agents de Maîtrise', minSalary: 0 },
-          { code: 'N7', label: 'Cat.7 — Agents de Maîtrise', minSalary: 0 },
-          { code: 'N8', label: 'Cat.8 — Cadres', minSalary: 0 },
-          { code: 'N9', label: 'Cat.9 — Cadres', minSalary: 0 },
-          { code: 'N10', label: 'Cat.10 — Cadres Sup.', minSalary: 0 },
-          { code: 'N11', label: 'Cat.11 — Direction', minSalary: 0 },
-        ],
-        defaultRules: [
-          {
-            ruleType: 'AUTOMATIC_BONUS',
-            bonusType: "Prime d'ancienneté",
-            bonusPercentage: 3,
-            bonusBaseCalculation: 'BASE_SALARY',
-            minMonthsOfService: 24,
-          },
-        ],
+        name: 'NTIC - Télécommunications et Technologies Associées',
+        description:
+          "Convention collective des Entreprises de Télécommunication et des Technologies Associées en République du Congo (signée 10/07/2003, Brazzaville) — grille salariale Annexe 2 (13 catégories + 9D/11D, 10 échelons)",
+        categories: buildNticCategories(),
+        defaultRules: buildNticAncienneteRules(),
+      },
+
+      // ========================================================================
+      // 🏦 BANQUE — Banques, Assurances et Assureur-conseils (juin 2011)
+      // Grille Annexe 2 en indices × valeur du point (805 FCFA) + ancienneté
+      // Art.50 : voir banque-grille.ts.
+      // ========================================================================
+      {
+        code: 'BANQUE',
+        name: 'BANQUE - Banques, Assurances et Assureur-conseils',
+        description:
+          "Convention collective des travailleurs des Banques, Assurances et Assureur-conseils (juin 2011) — grille Annexe 2 : catégories 3 à 9, classes 1 à 10 et hors classe, salaire = indice × valeur du point (805 FCFA)",
+        categories: buildBanqueCategories(),
+        defaultRules: buildBanqueAncienneteRules(),
       },
     ];
   }

@@ -100,6 +100,8 @@ export interface ConventionDecesConfig {
   moisForfait?: number;
   // Majoration par enfant à charge (Presse : +15 jours)
   majorationJoursParEnfant?: number;
+  // Prime FIXE par enfant à charge, en FCFA (Banque : 75 000 F, Art.31)
+  primeFixeParEnfant?: number;
 }
 
 export interface GrilleSalariale {

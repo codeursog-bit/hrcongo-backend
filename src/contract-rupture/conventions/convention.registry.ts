@@ -13,6 +13,7 @@ import {
   PresseConvention,
   NTICConvention,
   MineConvention,
+  BanqueConvention,
 } from './all-conventions';
 
 const registry: Record<string, IConvention> = {
@@ -26,6 +27,7 @@ const registry: Record<string, IConvention> = {
   PRESSE: new PresseConvention(),
   NTIC: new NTICConvention(),
   MINE: new MineConvention(),
+  BANQUE: new BanqueConvention(),
 };
 
 export function getConvention(code: string): IConvention {
