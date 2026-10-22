@@ -53,6 +53,25 @@ export class AbsenceRequestsController {
   }
 
   /**
+   * 🆕 Solde du plafond annuel de permissions exceptionnelles (année civile).
+   *  - employé : son propre solde (?year=2026)
+   *  - RH/Admin : ?employeeId=… pour consulter celui d'un employé
+   * ⚠️ Doit rester AVANT ':id'.
+   */
+  @Get('ceiling-balance')
+  getCeilingBalance(
+    @Request() req,
+    @Query('year') year?: string,
+    @Query('employeeId') employeeId?: string,
+  ) {
+    return this.absenceRequestsService.getCeilingBalance(
+      req.user.userId,
+      year ? parseInt(year, 10) : undefined,
+      employeeId || undefined,
+    );
+  }
+
+  /**
    * Calcule automatiquement la date de retour à partir d'une date de départ
    * et d'un nombre de jours ouvrables.
    * ⚠️ Doit rester AVANT ':id' — sinon interprété comme un id.

@@ -232,28 +232,23 @@ private async getUserWithCompany(userId: string, overrideCompanyId?: string): Pr
     const subType = motif ? (motif.subType as any) : dto.subType!;
     const reason = motif ? motif.label : dto.reason!;
 
-    // ✅ Plafond annuel (convention collective) — seulement quand la
-    // demande vient du catalogue ET que la convention en définit un.
-    // Comportement DEFAULT (motif texte libre) jamais concerné.
-    if (motif) {
+    // ✅ Plafond annuel (convention collective) — seulement quand la demande vient
+    // du catalogue ET que la convention en définit un. Le compteur repart à zéro
+    // chaque année civile (année de la date de DÉPART de la demande) : les jours
+    // de 2025 ne comptent jamais pour 2026.
+    // 🔓 Exception : un ADMIN / RH (HR_ROLES) n'est jamais bloqué par le plafond,
+    // il peut enregistrer autant de demandes qu'il veut (le solde affiché peut
+    // alors devenir négatif = dépassement).
+    if (motif && !HR_ROLES.includes(user.role)) {
       const ceiling = getAnnualCeiling(companyConvention);
       if (ceiling != null) {
-        const yearStart = new Date(new Date(dto.startDate).getFullYear(), 0, 1);
-        const yearEnd = new Date(new Date(dto.startDate).getFullYear(), 11, 31, 23, 59, 59);
-        const usedRows = await this.prisma.absenceRequest.findMany({
-          where: {
-            employeeId: employee.id,
-            type: 'EXCEPTIONNELLE',
-            status: { in: ['PENDING', 'APPROVED'] },
-            startDate: { gte: yearStart, lte: yearEnd },
-          },
-          select: { workingDays: true, coveredDays: true },
-        });
+        const year = new Date(dto.startDate).getUTCFullYear();
         // On compte les jours JUSTIFIÉS (droit consommé), pas la durée demandée
-        const already = usedRows.reduce((sum, r) => sum + Number(r.coveredDays ?? r.workingDays), 0);
+        const already = await this.getCeilingUsage(employee.id, year);
         if (already + motif.days > ceiling) {
+          const left = Math.max(0, Math.round((ceiling - already) * 100) / 100);
           throw new BadRequestException(
-            `Plafond annuel de permissions exceptionnelles dépassé : ${already} jour(s) déjà pris/en attente sur ${ceiling} autorisés cette année, cette demande (${motif.days}j) le dépasserait.`,
+            `Plafond annuel de permissions exceptionnelles dépassé pour ${year} : ${already} jour(s) déjà pris/en attente sur ${ceiling} autorisés cette année, cette demande (${motif.days}j) le dépasserait. Il vous reste ${left} jour(s) pour ${year}.`,
           );
         }
       }
@@ -658,6 +653,87 @@ private async getUserWithCompany(userId: string, overrideCompanyId?: string): Pr
       },
       responsableName,
       company: request.company,
+    };
+  }
+
+  // ============================================================================
+  // 📊 SOLDE DU PLAFOND ANNUEL (permissions exceptionnelles)
+  // ============================================================================
+
+  /**
+   * Jours de plafond consommés par un employé sur UNE année civile.
+   * Règle unique, partagée par le blocage (create) et l'affichage du solde,
+   * pour que le chiffre montré soit toujours celui qui décide du refus.
+   * Compte les demandes EXCEPTIONNELLE en attente ou approuvées dont la date
+   * de départ tombe dans l'année (refusées/annulées exclues).
+   */
+  private async getCeilingUsage(employeeId: string, year: number): Promise<number> {
+    const yearStart = new Date(Date.UTC(year, 0, 1));
+    const yearEnd = new Date(Date.UTC(year, 11, 31, 23, 59, 59, 999));
+    const rows = await this.prisma.absenceRequest.findMany({
+      where: {
+        employeeId,
+        type: 'EXCEPTIONNELLE',
+        status: { in: ['PENDING', 'APPROVED'] },
+        startDate: { gte: yearStart, lte: yearEnd },
+      },
+      select: { workingDays: true, coveredDays: true },
+    });
+    const total = rows.reduce((sum, r) => sum + Number(r.coveredDays ?? r.workingDays), 0);
+    return Math.round(total * 100) / 100;
+  }
+
+  /**
+   * Solde du plafond annuel pour l'employé connecté, ou — pour un RH/Admin —
+   * pour l'employé `employeeId`. `year` = année civile (défaut : année en cours).
+   * `ceiling` = null quand la convention de l'entreprise n'a pas de plafond.
+   * `viewerExempt` = true pour un RH/Admin : aucun blocage pour lui.
+   */
+  async getCeilingBalance(
+    userId: string,
+    year?: number,
+    employeeId?: string,
+    overrideCompanyId?: string,
+  ) {
+    const user = await this.getUserWithCompany(userId, overrideCompanyId);
+    const viewerExempt = HR_ROLES.includes(user.role);
+    const y = Number.isInteger(year) && year! >= 2000 && year! <= 2100
+      ? year!
+      : new Date().getUTCFullYear();
+
+    let employee: { id: string } | null;
+    if (employeeId) {
+      if (!viewerExempt) {
+        throw new ForbiddenException("Vous n'êtes pas autorisé à consulter le solde d'un autre employé");
+      }
+      employee = await this.prisma.employee.findFirst({
+        where: { id: employeeId, companyId: user.companyId },
+        select: { id: true },
+      });
+    } else {
+      employee = await this.prisma.employee.findFirst({
+        where: { email: user.email ?? undefined, companyId: user.companyId },
+        select: { id: true },
+      });
+    }
+    if (!employee) throw new EmployeeNotFoundException(employeeId);
+
+    const company = await this.prisma.company.findUnique({
+      where: { id: user.companyId },
+      select: { collectiveAgreement: true },
+    });
+    const ceiling = getAnnualCeiling(company?.collectiveAgreement ?? null);
+    const used = await this.getCeilingUsage(employee.id, y);
+    const remaining = ceiling != null ? Math.round((ceiling - used) * 100) / 100 : null;
+
+    return {
+      year: y,
+      employeeId: employee.id,
+      ceiling: ceiling ?? null,
+      used,
+      remaining, // peut être négatif (dépassement enregistré par un RH/Admin)
+      exceeded: ceiling != null && used > ceiling,
+      viewerExempt,
     };
   }
 
