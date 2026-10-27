@@ -34,6 +34,10 @@ export interface CalculatedBonus {
   isRecurring: boolean;
   description?: string | null;
   isProratized: boolean;
+  // ✅ Fréquence de la prime (MONTHLY / ANNUAL / ONE_TIME) — sert à
+  // l'affichage bulletin : une prime ANNUAL (13e mois) est proratisée en
+  // MOIS, jamais en jours, donc pas de « Nombre × Base » en jours.
+  frequency?: string | null;
   isInLeaveBase: boolean;
   bonusCategory: string;
   // ✅ base et rate — pour affichage bulletin (base journalière/salariale, taux %)
@@ -258,6 +262,7 @@ export class PayrollBonusesService {
         isRecurring: b.frequency !== 'ONE_TIME',
         description: b.notes,
         isProratized,
+        frequency: b.frequency ?? null,
         isInLeaveBase: (b as any).isInLeaveBase ?? true,
         bonusCategory: (b as any).bonusCategory ?? 'PERFORMANCE',
         // ✅ Mode quantité libre — pour affichage "unitAmount × quantité" sur le bulletin

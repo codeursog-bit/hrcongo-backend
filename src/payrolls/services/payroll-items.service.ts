@@ -8,6 +8,12 @@
 // ✅ Affichage prorata des primes sur le bulletin
 // ✅ Taxes custom (CTAX_*) visibles ligne par ligne dans le bulletin
 //
+// ✅ Affichage « Nombre × Base = Gain » sur tout ce qui dépend du temps :
+//    quantity = nb de jours (ou d'unités), base = valeur d'UNE unité
+//    (ex. 26 × 1 000 = 26 000). Calculé ICI — le front ne recalcule rien.
+//    Base arrondie à 2 décimales (colonne Decimal(15,2)) pour que
+//    Nombre × Base retombe sur le montant à moins d'1 FCFA.
+//
 // ✅ NOUVEAU : base + quantity + empRate + empAmount sur chaque item
 //    → le front affiche sans aucun calcul
 //    base     = base journalière ou taux horaire (selon le type)
@@ -52,6 +58,10 @@ export class PayrollItemsService {
     // (pharmacie, cantine, casse matériel...) déjà résolues au montant à
     // déduire CE mois — voir PayrollDeductionsService.prepareCompanyDeductionsForCalc.
     companyDeductionEntries: { id: string; amount: number; label: string }[] = [],
+    // ✅ NOUVEAU — jours théoriques du mois quand ils diffèrent de
+    // settings.workDaysPerMonth (paie en masse avec « jours pour tous »,
+    // customWorkDays). Optionnel : sans lui, on retombe sur les réglages.
+    workDaysOverride?: number,
   ) {
     const items: any[] = [];
     let order = 0;
@@ -61,10 +71,23 @@ export class PayrollItemsService {
     const isBncWorker =
       contractType === 'CONSULTANT' || contractType === 'PRESTATAIRE';
 
-    // ✅ Plus de taux journalier calculé ici — SAL_BASE, ABS_DEDUCT et
-    // ABS_CONGE affichent chacun directement leur montant réel (déjà
-    // calculé par le vrai moteur), sans reconstruire base×quantity. Le
-    // nombre de jours reste visible dans le libellé de chaque ligne.
+    // ── Affichage Nombre × Base (bulletins salariés uniquement) ──────────
+    // Les contrats facturés (stage, consultant, prestataire, intérim) ont
+    // leurs propres gabarits « facture » : on n'y touche pas.
+    const isDaySplitContract =
+      !isStagiaire && !isBncWorker && contractType !== 'INTERIM';
+    const theoWorkDays =
+      Number(workDaysOverride) > 0
+        ? Number(workDaysOverride)
+        : Number(settings?.workDaysPerMonth) || 26;
+    const paidDays = Math.max(0, Number(summary?.daysToPay) || 0);
+    const round2 = (n: number) => Math.round(n * 100) / 100;
+
+    // ✅ Chaque ligne basée sur le temps expose maintenant quantity (nombre)
+    // et base (valeur d'une unité) : SAL_BASE, ABS_DEDUCT, ABS_CONGE,
+    // INDEM_CONGE, CONGE_SUPP, primes proratisées, heures sup. Le montant
+    // reste TOUJOURS celui du vrai moteur — base et quantity ne servent
+    // qu'à l'affichage, jamais à recalculer.
 
     // ─── 1. Salaire de base ───────────────────────────────────────────────────
     // ✅ On affiche TOUJOURS le salaire plein (jours théoriques) avec base journalière.
@@ -77,22 +100,27 @@ export class PayrollItemsService {
         : 'Salaire de base';
 
     // ✅ Le montant affiché est TOUJOURS le vrai salaire de base stocké
-    // (emp.baseSalary), tel quel — jamais recalculé en base×taux.
-    // ✅ Sur CETTE ligne précise (SAL_BASE) : ni base ni quantity affichés
-    // — juste le montant. Comme ça, personne ne peut refaire le calcul
-    // lui-même à partir des colonnes et tomber sur un chiffre différent à
-    // cause d'un arrondi interne. base/quantity restent utilisés
-    // normalement sur les AUTRES lignes (absence, congé, heures sup...).
+    // (emp.baseSalary), tel quel — jamais recalculé en base×nombre.
+    // ✅ Affichage : Nombre = jours théoriques du mois, Base = valeur d'un
+    // jour (salaire ÷ jours), Gain = salaire plein. Ex. 26 × 1 000 = 26 000.
+    // La base garde 2 décimales quand la division n'est pas ronde
+    // (473 470 ÷ 26 = 18 210,38) pour que 26 × base retombe sur le gain.
+    // Si absence → la déduction apparaît sur ABS_DEDUCT juste en dessous,
+    // avec la MÊME base journalière.
     const fullBaseSalary = Number(emp.baseSalary);
+    const dailyBase =
+      isDaySplitContract && theoWorkDays > 0
+        ? round2(fullBaseSalary / theoWorkDays)
+        : null;
 
     items.push({
       payrollId,
       code: 'SAL_BASE',
       label: salaryLabel,
       type: 'GAIN',
-      base: null,
+      base: dailyBase,
       rate: null,
-      quantity: null,
+      quantity: dailyBase != null ? theoWorkDays : null,
       amount: Math.round(fullBaseSalary), // ✅ TOUJOURS le salaire plein
       isTaxable: true,
       isCnss: !isStagiaire && !isBncWorker,
@@ -100,24 +128,21 @@ export class PayrollItemsService {
     });
 
     // ─── 2. Déduction absence — JUSTE APRÈS SAL_BASE si absence ─────────────
-    // ✅ Le nombre de jours est déjà dans le libellé ("Déduction absences (2
-    // jours)") — pas de base/quantity affichés, pour la même raison que
-    // SAL_BASE : le taux journalier affiché est arrondi pour la
-    // présentation, donc base×quantity ne redonne pas exactement le
-    // montant réel (calculé, lui, sur la valeur exacte en interne).
+    // ✅ Nombre = jours d'absence, Base = valeur d'un jour (identique à
+    // SAL_BASE), Retenue = déduction réelle du moteur. Ex. 6 × 1 000.
     // Ne s'affiche PAS si c'est un congé (géré plus bas par ABS_CONGE).
     if (
       calc.absenceDeduction > 0 &&
       (!leaveData || leaveData.leaveDays === 0)
     ) {
-      const absenceDays = settings.workDaysPerMonth - summary.daysToPay;
+      const absenceDays = round2(theoWorkDays - paidDays);
       if (absenceDays > 0) {
         items.push({
           payrollId,
           code: 'ABS_DEDUCT',
           label: 'Déduction absences',
           type: 'DEDUCTION',
-          base: null,
+          base: dailyBase, // ✅ même valeur d'un jour que SAL_BASE
           rate: null,
           // ✅ Le nombre de jours reste visible — via la colonne Nombre,
           // plus besoin de le répéter entre parenthèses dans le libellé.
@@ -140,7 +165,7 @@ export class PayrollItemsService {
         code: 'ABS_CONGE',
         label: `Absence ${leaveData.isPaidLeave ? 'congé payé' : 'congé sans solde'}`,
         type: 'DEDUCTION',
-        base: null,
+        base: round2(leaveData.absenceDeduction / leaveData.leaveDays),
         rate: null,
         // ✅ Nombre de jours visible via la colonne Nombre plutôt qu'entre
         // parenthèses dans le libellé.
@@ -169,7 +194,7 @@ export class PayrollItemsService {
         code: 'INDEM_CONGE',
         label: leaveData.leaveLabel, // ✅ "Indemnité de congé" — la base/taux suffit, pas besoin d'un "Xj" en plus
         type: 'GAIN',
-        base: null,
+        base: baseDaysForLabel > 0 ? round2(baseAmount / baseDaysForLabel) : null,
         rate: null,
         quantity: baseDaysForLabel,
         amount: baseAmount,
@@ -187,7 +212,10 @@ export class PayrollItemsService {
           code: 'CONGE_SUPP',
           label: 'Congé supplémentaire',
           type: 'GAIN',
-          base: null,
+          base:
+            seniorityDaysForLabel > 0
+              ? round2(seniorityAmount / seniorityDaysForLabel)
+              : null,
           rate: null,
           quantity: seniorityDaysForLabel,
           amount: seniorityAmount,
@@ -234,6 +262,24 @@ export class PayrollItemsService {
         // Ancienneté AUTO — base = salaire contractuel, rate = % décimal
         bonusBase = Number(emp.baseSalary);
         bonusRate = bonus._seniorityRate / 100;
+      } else if (
+        isDaySplitContract &&
+        theoWorkDays > 0 &&
+        bonus.isProratized &&
+        bonus.frequency !== 'ANNUAL' && // 13e mois = prorata en MOIS, pas en jours
+        bonus.rate == null &&
+        bonus.base == null
+      ) {
+        // ✅ Prime à montant fixe proratisée selon les jours travaillés :
+        // Nombre = jours payés, Base = valeur d'un jour (montant plein ÷
+        // jours théoriques), Gain = montant réel du moteur.
+        // Ex. 25 000 sur 26 j, 20 j payés → 20 × 961,54 = 19 231.
+        const fullAmount = Number(bonus._originalAmount ?? bonus.amount);
+        if (fullAmount > 0) {
+          bonusBase = round2(fullAmount / theoWorkDays);
+          bonusQuantity = Math.min(paidDays, theoWorkDays);
+          bonusRate = null;
+        }
       } else {
         // Toutes les autres primes — lire directement depuis CalculatedBonus
         bonusBase = bonus.base != null ? Number(bonus.base) : null;
