@@ -80,8 +80,23 @@ export class PayrollItemsService {
       Number(workDaysOverride) > 0
         ? Number(workDaysOverride)
         : Number(settings?.workDaysPerMonth) || 26;
-    const paidDays = Math.max(0, Number(summary?.daysToPay) || 0);
     const round2 = (n: number) => Math.round(n * 100) / 100;
+
+    // ✅ Jours d'absence = ce que le MOTEUR a réellement déduit, jamais
+    // `summary.daysToPay` : selon l'appelant (bulletin unique avec jours saisis
+    // à la main, par ex.), `summary` est le résumé de pointage brut (ex. 1 j)
+    // alors que le calcul s'est fait sur les jours réellement payés (ex. 18 j).
+    // déduction réelle ÷ valeur d'un jour = nombre de jours déduits, exact.
+    const dailyFull =
+      theoWorkDays > 0 ? Number(emp.baseSalary) / theoWorkDays : 0;
+    const engineAbsenceDeduction = Math.max(
+      0,
+      Number(calc?.absenceDeduction) || 0,
+    );
+    const absenceDaysShown =
+      isDaySplitContract && dailyFull > 0
+        ? round2(engineAbsenceDeduction / dailyFull)
+        : round2(theoWorkDays - (Number(summary?.daysToPay) || 0));
 
     // ✅ Chaque ligne basée sur le temps expose maintenant quantity (nombre)
     // et base (valeur d'une unité) : SAL_BASE, ABS_DEDUCT, ABS_CONGE,
@@ -135,7 +150,7 @@ export class PayrollItemsService {
       calc.absenceDeduction > 0 &&
       (!leaveData || leaveData.leaveDays === 0)
     ) {
-      const absenceDays = round2(theoWorkDays - paidDays);
+      const absenceDays = absenceDaysShown;
       if (absenceDays > 0) {
         items.push({
           payrollId,
@@ -274,10 +289,16 @@ export class PayrollItemsService {
         // Nombre = jours payés, Base = valeur d'un jour (montant plein ÷
         // jours théoriques), Gain = montant réel du moteur.
         // Ex. 25 000 sur 26 j, 20 j payés → 20 × 961,54 = 19 231.
+        // Nombre = montant réellement versé ÷ valeur d'un jour (donc les jours
+        // réellement appliqués à CETTE prime, quel que soit `summary`).
         const fullAmount = Number(bonus._originalAmount ?? bonus.amount);
         if (fullAmount > 0) {
-          bonusBase = round2(fullAmount / theoWorkDays);
-          bonusQuantity = Math.min(paidDays, theoWorkDays);
+          const unit = fullAmount / theoWorkDays;
+          bonusBase = round2(unit);
+          bonusQuantity = Math.min(
+            theoWorkDays,
+            round2(Number(bonus.amount) / unit),
+          );
           bonusRate = null;
         }
       } else {

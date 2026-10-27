@@ -297,6 +297,7 @@ export class SalaryEstimateService {
       cnssSalarial: cnss,
       revenuNetImposable,
       isSubjectToIrpp: employee.isSubjectToIrpp,
+      isSubjectToCnss: employee.isSubjectToCnss, // exonéré CNSS → pas de TOL
       tolZone: employee.tolZone,
     });
 

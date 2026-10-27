@@ -315,6 +315,7 @@ export class PayrollCalculatorService {
         cnssSalarial,
         revenuNetImposable: irppResult?.revenuNetImposable,
         isSubjectToIrpp: employee?.isSubjectToIrpp,
+        isSubjectToCnss: employee?.isSubjectToCnss, // exonéré CNSS → pas de TOL
         tolZone: employee?.tolZone,
       },
       (msg) => this.logger.log(msg),

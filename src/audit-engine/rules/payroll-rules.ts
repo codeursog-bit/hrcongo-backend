@@ -8,7 +8,7 @@
 // bulletin doit respecter (plafonds, taux, zone, cohérence). Quand le calcul
 // exact est possible sans ambiguïté, on le fait ; sinon on borne.
 // ============================================================================
-import { tolAmountForZone } from '../../company-taxes/custom-tax.calculator';
+import { isTolExempt, tolAmountForZone } from '../../company-taxes/custom-tax.calculator';
 import { ChainLink, evaluateChainCompliance } from '../../contract-chain/contract-chain.rules';
 import {
   CNSS, FISCAL_PARTS, ROUNDING_TOLERANCE, SALARIED_PERMANENT, smigAt, TUS, VARIATION_THRESHOLD,
@@ -282,14 +282,21 @@ export function ruleTus(c: PayrollCtx): RuleHit[] {
 }
 
 export function ruleTol(c: PayrollCtx): RuleHit[] {
-  const due = SALARIED_PERMANENT.includes(c.employee.contractType);
+  const permanent = SALARIED_PERMANENT.includes(c.employee.contractType);
+  // TOL non due si l'employé est exonéré de la CNSS ou de l'ITS/IRPP (même règle que le calcul de paie).
+  const exempt = isTolExempt(c.employee);
+  const due = permanent && !exempt;
   const zone = c.employee.tolZone === 'PERIPHERIE' ? 'périphérie' : 'ville';
   const actual = c.payroll.items.filter((i) => i.code === 'CTAX_TOL' && i.type === 'DEDUCTION').reduce((s, i) => s + i.amount, 0);
   if (!due) {
-    return actual > 0 ? [mk(c, 'TOL_AMOUNT', {
+    if (actual <= 0) return [];
+    return [mk(c, 'TOL_AMOUNT', {
       severity: 'WARN', blocking: false,
-      message: `TOL de ${fcfa(actual)} retenue sur un contrat ${c.employee.contractType} (réservée aux CDI et CDD).`, expected: '0 FCFA', actual: fcfa(actual),
-    })] : [];
+      message: permanent
+        ? `TOL de ${fcfa(actual)} retenue alors que l'employé est exonéré de la CNSS ou de l'ITS : recalculez le bulletin.`
+        : `TOL de ${fcfa(actual)} retenue sur un contrat ${c.employee.contractType} (réservée aux CDI et CDD).`,
+      expected: '0 FCFA', actual: fcfa(actual),
+    })];
   }
   const expected = tolAmountForZone(c.employee.tolZone);
   if (actual === 0) return [mk(c, 'TOL_AMOUNT', { message: `TOL absente du bulletin (zone ${zone} : ${fcfa(expected)}).`, expected: fcfa(expected), actual: '0 FCFA' })];

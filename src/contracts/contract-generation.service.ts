@@ -81,6 +81,7 @@ export class ContractGenerationService {
     companyTaxes?: any[]; // taxes actives RÉCURRENTES de l'entreprise
     contractType?: 'CDI' | 'CDD'; // pour filtrer les taxes par type de contrat
     isSubjectToIrpp?: boolean | null;
+    isSubjectToCnss?: boolean | null; // exonéré CNSS → pas de TOL
   }) {
     const sursalaire = input.sursalaire || 0;
     const heuresSupplementaires = input.heuresSupplementaires || 0;
@@ -123,6 +124,7 @@ export class ContractGenerationService {
         cnssSalarial: cnssDeduction,
         revenuNetImposable: irppResult.revenuNetImposable,
         isSubjectToIrpp: input.isSubjectToIrpp,
+        isSubjectToCnss: input.isSubjectToCnss,
         tolZone: input.tolZone,
       });
       for (const d of custom.details) {
@@ -198,6 +200,7 @@ export class ContractGenerationService {
       companyTaxes,
       contractType: input.contractDuration === 'DETERMINEE' ? 'CDD' : 'CDI',
       isSubjectToIrpp: (employee as any).isSubjectToIrpp,
+      isSubjectToCnss: (employee as any).isSubjectToCnss,
     });
 
     const indemnitesTotal = (input.indemnites || []).reduce((s, i) => s + (i.amount || 0), 0);
@@ -320,6 +323,7 @@ export class ContractGenerationService {
         companyTaxes,
         contractType: dto.contractDuration === 'DETERMINEE' ? 'CDD' : 'CDI',
         isSubjectToIrpp: (employee as any).isSubjectToIrpp,
+        isSubjectToCnss: (employee as any).isSubjectToCnss,
       });
       const indemnitesTotal = (dto.indemnites || []).reduce((s, i) => s + (i.amount || 0), 0);
       totalGross = breakdown.totalGross;

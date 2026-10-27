@@ -18,6 +18,16 @@ export const TOL_CONTRACTS = ['CDI', 'CDD'];
 export const tolAmountForZone = (zone?: string | null): number =>
   zone === 'PERIPHERIE' ? 1000 : 5000;
 
+/**
+ * TOL : non due si l'employé est exonéré de la CNSS OU de l'ITS/IRPP.
+ * (Règle unique, partagée par le bulletin, l'estimation de salaire, le
+ * contrat et l'audit — pour que les quatre donnent la même réponse.)
+ */
+export const isTolExempt = (ctx: {
+  isSubjectToCnss?: boolean | null;
+  isSubjectToIrpp?: boolean | null;
+}): boolean => ctx.isSubjectToCnss === false || ctx.isSubjectToIrpp === false;
+
 export interface CustomTaxContext {
   contractType: string;
   grossSalary: number;
@@ -26,6 +36,8 @@ export interface CustomTaxContext {
   /** Revenu net imposable (résultat ITS) ; défaut : brut. */
   revenuNetImposable?: number | null;
   isSubjectToIrpp?: boolean | null;
+  /** Soumis à la CNSS salariale ? false = exonéré (→ pas de TOL). */
+  isSubjectToCnss?: boolean | null;
   tolZone?: string | null;
 }
 
@@ -75,6 +87,13 @@ export function computeCustomTaxes(
     // TOL : réservée aux CDI/CDD, même si l'admin coche un autre contrat.
     if (tax.code === 'TOL' && !TOL_CONTRACTS.includes(contractType)) {
       log(`⏭️ TOL ignorée — contrat ${contractType} non éligible (CDI/CDD uniquement)`);
+      continue;
+    }
+    // TOL : non due si l'employé est exonéré de la CNSS ou de l'ITS/IRPP.
+    if (tax.code === 'TOL' && isTolExempt(ctx)) {
+      log(
+        `⏭️ TOL ignorée — employé exonéré (CNSS: ${ctx.isSubjectToCnss !== false ? 'non' : 'oui'}, ITS: ${ctx.isSubjectToIrpp !== false ? 'non' : 'oui'})`,
+      );
       continue;
     }
     // Seuil minimum de salaire (mode ELIGIBILITY)
@@ -144,7 +163,7 @@ export function computeCustomTaxes(
 
   // TOL NATIVE — taxe fixe obligatoire, sauf si déjà configurée dans les taxes
   const hasTolInCompanyTaxes = (taxes ?? []).some((t: any) => t.code === 'TOL');
-  if (!hasTolInCompanyTaxes && TOL_CONTRACTS.includes(contractType)) {
+  if (!hasTolInCompanyTaxes && TOL_CONTRACTS.includes(contractType) && !isTolExempt(ctx)) {
     const tolAmount = tolAmountForZone(ctx.tolZone);
     employeeTotal += tolAmount;
     details.push({
