@@ -38,8 +38,14 @@
 
 import * as path from 'path';
 import * as fs from 'fs';
+import * as fsp from 'fs/promises';
+import * as os from 'os';
+import { exec } from 'child_process';
+import { promisify } from 'util';
 import PizZip from 'pizzip';
 import Docxtemplater from 'docxtemplater';
+
+const execAsync = promisify(exec);
 
 // Chemin vers les templates stockés dans le projet
 const TEMPLATES_DIR = path.join(__dirname, 'templates');
@@ -177,7 +183,9 @@ export async function fillDnmsTemplate(
     { col: 'J', kind: 'num', value: emp.salaireSOumisCotisation }, // min(brut, 1 200 000)
     { col: 'K', kind: 'num', value: emp.cotisationDeclaree }, // cnssSalarial 4%
     { col: 'L', kind: 'num', value: emp.nbrJoursTravailles },
-    { col: 'M', kind: 'num', value: emp.nbrHeuresTravaillees },
+    // Colonne M (Nb heures travaillées) volontairement laissée VIDE : on ne
+    // déclare que le nombre de jours. La cellule n'est pas écrite du tout,
+    // l'en-tête officiel reste intact.
   ]);
 
   return patchXlsxSheet1(templatePath, rows, 'M');
@@ -436,4 +444,36 @@ export async function fillDgcTemplate(
   }
 
   return doc.getZip().generate({ type: 'nodebuffer' });
+}
+
+// ─── VARIANTE PDF DU DGC ──────────────────────────────────────────────────
+// Même contenu que fillDgcTemplate, converti en PDF via LibreOffice headless
+// (binaire `soffice`) — même mécanisme que loans-orca-export.service.ts.
+// Rendu garanti identique quel que soit le lecteur ; le .docx reste la
+// version à privilégier quand le RH doit encore modifier un champ.
+// ⚠️ Nécessite `libreoffice` dans l'image Docker du backend.
+export async function fillDgcTemplatePdf(
+  recap: Parameters<typeof fillDgcTemplate>[0],
+  month: number,
+  year: number,
+  options?: { ville?: string; acompte?: number },
+): Promise<Buffer> {
+  const docxBuffer = await fillDgcTemplate(recap, month, year, options);
+
+  const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'dgc-pdf-'));
+  const docxPath = path.join(tmpDir, 'document.docx');
+  try {
+    await fsp.writeFile(docxPath, docxBuffer);
+    await execAsync(
+      `soffice --headless --nologo --nofirststartwizard --convert-to pdf --outdir "${tmpDir}" "${docxPath}"`,
+      { timeout: 30000 },
+    );
+    return await fsp.readFile(path.join(tmpDir, 'document.pdf'));
+  } catch (err) {
+    throw new Error(
+      `Conversion PDF (LibreOffice) échouée : ${(err as Error).message}. Le téléchargement Word reste disponible.`,
+    );
+  } finally {
+    await fsp.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+  }
 }

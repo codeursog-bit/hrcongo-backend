@@ -128,6 +128,34 @@ export class CnssDeclarationController {
     res.end(buffer);
   }
 
+  // GET /cnss-declaration/export/dgc-pdf?month=7&year=2026
+  // Même DGC, en PDF (rendu figé, via LibreOffice côté serveur)
+  @Get('export/dgc-pdf')
+  async exportDgcPdf(
+    @Req() req: any,
+    @Query(
+      'month',
+      new DefaultValuePipe(new Date().getMonth() + 1),
+      ParseIntPipe,
+    )
+    month: number,
+    @Query('year', new DefaultValuePipe(new Date().getFullYear()), ParseIntPipe)
+    year: number,
+    @Res() res: Response,
+  ) {
+    const { buffer, filename, warnings } =
+      await this.cnssService.exportDgcTemplatePdf(req.user.id, month, year);
+
+    res.set({
+      'Content-Type': 'application/pdf',
+      'Content-Disposition': `attachment; filename="${filename}"`,
+      'Content-Length': String(buffer.length),
+      'X-Warnings':
+        warnings.length > 0 ? encodeURIComponent(warnings.join(' | ')) : '',
+    });
+    res.end(buffer);
+  }
+
   // GET /cnss-declaration/export/excel?month=7&year=2026
   // Export Excel custom 3 feuilles (DNMS + TUS + DGC) — pour usage interne
   @Get('export/excel')

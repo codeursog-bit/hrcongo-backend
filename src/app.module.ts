@@ -77,6 +77,8 @@ import { WorkforceDashboardModule } from './workforce-dashboard/workforce-dashbo
 import { LoansDashboardModule } from './loans-dashboard/loans-dashboard.module';
 import { AttendanceDashboardModule } from './attendance-dashboard/attendance-dashboard.module';
 
+import { FinanceModule } from './finance/finance.module';
+
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
@@ -174,6 +176,7 @@ import { AttendanceDashboardModule } from './attendance-dashboard/attendance-das
     DisplayScreensModule, // 🆕 pointage par scan QR dynamique + code secret
     ApprovalsModule,
     ChatModule,
+    FinanceModule,
   ],
   controllers: [AppController],
   providers: [

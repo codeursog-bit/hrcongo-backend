@@ -16,6 +16,20 @@ import {
   ConventionCategory,
 } from '../conventions/conventions.service';
 import { normalizePhone } from '../common/utils/phone.util';
+import {
+  BonusColumnPlan,
+  ColumnBonusInfo,
+  ImportBonusSummary,
+  ImportedBonusAssignment,
+  applyBonusSuggestions,
+  describeColumnsForBonus,
+  emptyBonusSummary,
+  ensureBonusTemplates,
+  isBonusField,
+  normalizeBonusMappings,
+  parseBonusAmount,
+  planBonusColumns,
+} from './import-bonuses';
 
 export interface ColumnMapping {
   excelColumn: string;
@@ -30,6 +44,8 @@ export interface ImportAnalysis {
   suggestedMappings: ColumnMapping[];
   warnings: string[];
   cleanedPreview?: any[];
+  /** 🆕 Aide au choix de la nature fiscale, par colonne (catalogue existant, indice « frais ») */
+  bonusColumnInfo?: Record<string, ColumnBonusInfo>;
 }
 export interface ValidationResult {
   isValid: boolean;
@@ -37,12 +53,18 @@ export interface ValidationResult {
   warnings: string[];
   validRows: number;
   invalidRows: number;
+  /** 🆕 Primes/indemnités détectées : ce qui sera créé / réutilisé dans le catalogue */
+  bonusPlan?: BonusColumnPlan[];
+  /** 🆕 Avertissements propres aux primes (conflits avec le catalogue, colonnes « total »…) */
+  bonusWarnings?: string[];
 }
 export interface ImportResult {
   success: boolean;
   imported: number;
   skipped: number;
   errors: Array<{ row: number; message: string }>;
+  /** 🆕 Récapitulatif primes/indemnités (présent seulement si des colonnes de primes ont été mappées) */
+  bonuses?: ImportBonusSummary;
 }
 
 const FIELD_MAPPINGS: Record<string, any> = {
@@ -568,8 +590,12 @@ export class EmployeesImportService {
       user.companyId,
       detectedColumns,
     );
-    const suggestedMappings =
-      savedMapping || this.generateIntelligentMappings(detectedColumns);
+    // 🆕 Colonnes de primes/indemnités : suggestion automatique du type fiscal
+    const suggestedMappings = applyBonusSuggestions(
+      detectedColumns,
+      savedMapping || this.generateIntelligentMappings(detectedColumns),
+      !!savedMapping,
+    );
     return {
       totalRows: jsonData.length,
       previewData: jsonData.slice(0, 5),
@@ -579,6 +605,11 @@ export class EmployeesImportService {
       ),
       detectedColumns,
       suggestedMappings,
+      bonusColumnInfo: await describeColumnsForBonus(
+        this.prisma,
+        user.companyId,
+        detectedColumns,
+      ),
       warnings: await this.generateWarnings(
         suggestedMappings,
         jsonData,
@@ -929,6 +960,10 @@ export class EmployeesImportService {
     };
     for (const [f, label] of Object.entries(opts))
       if (!mapped.includes(f)) warnings.push(`ℹ️  ${label}`);
+    // 🆕 TOL par défaut
+    warnings.push(
+      'ℹ️  TOL : zone « Périphérie » par défaut pour tous les employés importés (1 000 FCFA) — modifiable sur chaque fiche',
+    );
     const unmapped =
       data.length > 0
         ? Object.keys(data[0]).filter(
@@ -939,6 +974,13 @@ export class EmployeesImportService {
       warnings.push(
         `ℹ️  ${unmapped.length} colonne(s) ignorée(s) : ${unmapped.slice(0, 3).join(', ')}${unmapped.length > 3 ? '…' : ''}`,
       );
+    // 🆕 Primes / indemnités détectées
+    const bonusMaps = mappings.filter((m) => isBonusField(m.dbField));
+    if (bonusMaps.length > 0) {
+      warnings.push(
+        `💰 ${bonusMaps.length} colonne(s) de primes/indemnités détectée(s) — choisissez la nature fiscale de chacune (imposable par défaut, ou non imposable) : le nom de la colonne devient le nom de la prime`,
+      );
+    }
     return warnings;
   }
 
@@ -947,6 +989,7 @@ export class EmployeesImportService {
     mappings: Record<string, string>,
     userId: string,
   ): Promise<ValidationResult> {
+    mappings = normalizeBonusMappings(mappings); // anciennes valeurs de prime → « imposable »
     const errors: string[] = [];
     const warnings: string[] = [];
     let validRows = 0;
@@ -1082,12 +1125,28 @@ export class EmployeesImportService {
         warnings.push(
           `💡 ${gridResolvedCount} salaire(s) seront calculés automatiquement depuis la grille conventionnelle (${grid!.conventionCode})`,
         );
+
+      // 🆕 Primes / indemnités : plan (création / réutilisation du catalogue) + contrôles
+      let bonusPlan: BonusColumnPlan[] | undefined;
+      let bonusWarnings: string[] | undefined;
+      if (Object.values(mappings).some((df) => isBonusField(df))) {
+        const bp = await planBonusColumns(
+          this.prisma,
+          user.companyId,
+          mappings,
+          jsonData,
+        );
+        errors.push(...bp.errors);
+        bonusPlan = bp.plan;
+        bonusWarnings = bp.warnings;
+      }
       return {
         isValid: errors.length === 0,
         errors,
         warnings,
         validRows,
         invalidRows,
+        ...(bonusPlan ? { bonusPlan, bonusWarnings } : {}),
       };
     } catch (e: any) {
       return {
@@ -1105,6 +1164,7 @@ export class EmployeesImportService {
     mappings: Record<string, string>,
     userId: string,
   ): Promise<ImportResult> {
+    mappings = normalizeBonusMappings(mappings);
     const errors: Array<{ row: number; message: string }> = [];
     let imported = 0;
     let skipped = 0;
@@ -1164,6 +1224,30 @@ export class EmployeesImportService {
           isRequired: HARD_REQUIRED_FIELDS.includes(df),
         })),
       );
+
+      // 🆕 Primes / indemnités : revalidation + création des modèles manquants (une fois)
+      const bonusCols = Object.entries(mappings).filter(([, df]) =>
+        isBonusField(df),
+      );
+      const bonusSummary = emptyBonusSummary();
+      let bonusTemplates = new Map<string, ImportedBonusAssignment['template']>();
+      if (bonusCols.length > 0) {
+        const bp = await planBonusColumns(
+          this.prisma,
+          user.companyId,
+          mappings,
+          jsonData,
+        );
+        if (bp.errors.length > 0) {
+          throw new BadRequestException(bp.errors.join(' | '));
+        }
+        bonusTemplates = await ensureBonusTemplates(
+          this.prisma,
+          user.companyId,
+          bp.plan,
+          bonusSummary,
+        );
+      }
 
       for (let i = 0; i < jsonData.length; i++) {
         const row = jsonData[i] as Record<string, any>;
@@ -1332,6 +1416,8 @@ export class EmployeesImportService {
               : undefined,
             trialPeriodDays: 0,
             isResident: true,
+            // 🆕 TOL : zone PÉRIPHÉRIE par défaut à l'import (1 000 FCFA ; la ville = 5 000)
+            tolZone: 'PERIPHERIE',
             // 🆕 Convention collective — catégorie/échelon (résolus depuis la grille si fournis)
             professionalCategory: raw.professionalCategory
               ? String(raw.professionalCategory)
@@ -1368,11 +1454,26 @@ export class EmployeesImportService {
             shoeSize: raw.shoeSize ? String(raw.shoeSize) : undefined,
           };
 
-          // ✅ Passer par employeesService.create() → transaction employee + employeeContract
+          // 🆕 Primes / indemnités de cette ligne (montants déjà validés)
+          const initialBonuses: ImportedBonusAssignment[] = [];
+          for (const [col] of bonusCols) {
+            const template = bonusTemplates.get(col);
+            if (!template) continue;
+            const parsed = parseBonusAmount(row[col]);
+            if (parsed.state === 'OK')
+              initialBonuses.push({ template, amount: parsed.value });
+          }
+
+          // ✅ Passer par employeesService.create() → transaction employee + employeeContract (+ primes)
           await this.employeesService.create(dto, userId, {
             phoneOptional: true,
+            initialBonuses,
           });
           imported++;
+          for (const b of initialBonuses) {
+            bonusSummary.bonusesAssigned++;
+            bonusSummary.totalAmount += b.amount;
+          }
         } catch (e: any) {
           console.error(`[Import] Ligne ${rowNum}:`, e?.message);
           errors.push({
@@ -1382,7 +1483,13 @@ export class EmployeesImportService {
           skipped++;
         }
       }
-      return { success: skipped === 0, imported, skipped, errors };
+      return {
+        success: skipped === 0,
+        imported,
+        skipped,
+        errors,
+        ...(bonusCols.length > 0 ? { bonuses: bonusSummary } : {}),
+      };
     } catch (e: any) {
       throw new BadRequestException(`Erreur lors de l'import: ${e.message}`);
     }
@@ -1509,6 +1616,13 @@ export class EmployeesImportService {
       '',
       '',
     ];
+    // 🆕 Primes & indemnités : le NOM de la colonne devient le nom de la prime,
+    // la cellule est le montant mensuel (laisser vide si l'employé n'en a pas).
+    headers.push('indemnité de transport', 'prime de responsabilité');
+    note.push('', '');
+    ex1.push('26000', '50000');
+    ex2.push('26000', '');
+    ex3.push('', '');
     const ws = XLSX.utils.aoa_to_sheet([headers, note, ex1, ex2, ex3]);
     ws['!cols'] = headers.map(() => ({ wch: 16 }));
     const wb = XLSX.utils.book_new();

@@ -112,7 +112,7 @@ export class UpdateCompanyDto extends PartialType(CreateCompanyDto) {
 
   @IsOptional()
   @IsString()
-  documentTemplate?: string; // 'DEFAULT' | 'ORCA' | 'STANDARD'
+  documentTemplate?: string; // 'DEFAULT' | 'ORCA' | 'STANDARD' | 'MODERN'
 
   @IsOptional()
   @IsString()

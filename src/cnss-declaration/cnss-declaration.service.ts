@@ -579,7 +579,7 @@ export class CnssDeclarationService {
         emp.salaireSOumisCotisation,
         emp.cotisationDeclaree,
         emp.nbrJoursTravailles,
-        emp.nbrHeuresTravaillees,
+        '', // heures travaillées : colonne laissée vide (seuls les jours sont déclarés)
       ]);
       const bg = i % 2 === 0 ? 'FFF0F4F8' : 'FFFFFFFF';
       row.eachCell((c, col) => {
@@ -934,7 +934,7 @@ export class CnssDeclarationService {
         e.salaireSOumisCotisation,
         e.cotisationDeclaree,
         e.nbrJoursTravailles,
-        e.nbrHeuresTravaillees,
+        '', // heures travaillées : colonne laissée vide
       ].join(';'),
     );
 
@@ -1080,18 +1080,15 @@ export class CnssDeclarationService {
   }
 
   // ════════════════════════════════════════════════════════════════════════
-  // Export template officiel DGC (Déclaration Globale de Cotisation) — .docx
+  // Export template officiel DGC (Déclaration Globale de Cotisation)
+  // — .docx (modifiable par le RH) ou .pdf (rendu figé)
   // ════════════════════════════════════════════════════════════════════════
-  async exportDgcTemplate(
+  private async prepareDgc(
     userId: string,
     month: number,
     year: number,
     options?: { ville?: string; acompte?: number },
-  ): Promise<{
-    buffer: Buffer;
-    filename: string;
-    warnings: string[];
-  }> {
+  ) {
     const recap = await this.getMonthlyRecap(userId, month, year);
     const warnings: string[] = [];
     const mm = String(month).padStart(2, '0');
@@ -1105,35 +1102,54 @@ export class CnssDeclarationService {
     ) {
       warnings.push("N° d'affiliation CNSS de l'entreprise manquant");
     }
-    warnings.push(
-      'Le formulaire imprime "TUS 3%" — à confirmer auprès de la CNSS, le calcul KonzaRH utilise TUS part CNSS 5,475%',
-    );
 
-    const { fillDgcTemplate } = await import('./export-cnss-template.js');
-    const buffer = await fillDgcTemplate(
-      {
-        company: recap.company
-          ? {
-              legalName: recap.company.legalName ?? undefined,
-              cnssAffiliationNumber:
-                recap.company.cnssAffiliationNumber ?? undefined,
-              cnssNumber: recap.company.cnssNumber ?? undefined,
-              address: recap.company.address ?? undefined,
-              phone: recap.company.phone ?? undefined,
-            }
-          : undefined,
-        totals: recap.totals,
-      },
-      month,
-      year,
-      // Ville du formulaire : celle passée en option, sinon la ville de l'entreprise
-      { ...options, ville: options?.ville || recap.company?.city || undefined },
-    );
-
-    return {
-      buffer,
-      filename: `CNSS_DGC_${mm}_${year}_${slug}.docx`,
-      warnings,
+    const dgcRecap = {
+      company: recap.company
+        ? {
+            legalName: recap.company.legalName ?? undefined,
+            cnssAffiliationNumber:
+              recap.company.cnssAffiliationNumber ?? undefined,
+            cnssNumber: recap.company.cnssNumber ?? undefined,
+            address: recap.company.address ?? undefined,
+            phone: recap.company.phone ?? undefined,
+          }
+        : undefined,
+      totals: recap.totals,
     };
+    // Ville du formulaire : celle passée en option, sinon la ville de l'entreprise
+    const dgcOptions = {
+      ...options,
+      ville: options?.ville || recap.company?.city || undefined,
+    };
+    return { dgcRecap, dgcOptions, warnings, mm, slug };
+  }
+
+  async exportDgcTemplate(
+    userId: string,
+    month: number,
+    year: number,
+    options?: { ville?: string; acompte?: number },
+  ): Promise<{ buffer: Buffer; filename: string; warnings: string[] }> {
+    const { dgcRecap, dgcOptions, warnings, mm, slug } = await this.prepareDgc(
+      userId, month, year, options,
+    );
+    const { fillDgcTemplate } = await import('./export-cnss-template.js');
+    const buffer = await fillDgcTemplate(dgcRecap, month, year, dgcOptions);
+    return { buffer, filename: `CNSS_DGC_${mm}_${year}_${slug}.docx`, warnings };
+  }
+
+  // 🆕 Variante PDF (LibreOffice) — rendu garanti identique, non modifiable
+  async exportDgcTemplatePdf(
+    userId: string,
+    month: number,
+    year: number,
+    options?: { ville?: string; acompte?: number },
+  ): Promise<{ buffer: Buffer; filename: string; warnings: string[] }> {
+    const { dgcRecap, dgcOptions, warnings, mm, slug } = await this.prepareDgc(
+      userId, month, year, options,
+    );
+    const { fillDgcTemplatePdf } = await import('./export-cnss-template.js');
+    const buffer = await fillDgcTemplatePdf(dgcRecap, month, year, dgcOptions);
+    return { buffer, filename: `CNSS_DGC_${mm}_${year}_${slug}.pdf`, warnings };
   }
 }

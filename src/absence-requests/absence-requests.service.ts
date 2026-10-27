@@ -390,6 +390,20 @@ private async getUserWithCompany(userId: string, overrideCompanyId?: string): Pr
   // 📋 LISTE (vue RH / Manager / Admin)
   // ============================================================================
 
+  /**
+   * 🆕 Jour de REPRISE réel de chaque demande = premier jour travaillé APRÈS le dernier
+   * jour d'absence (`endDate`, inclus) — repos hebdomadaires et jours fériés de
+   * l'entreprise sautés. Calculé à la lecture (rien à migrer) : liste, détail et
+   * fiches affichent ainsi TOUS la même date. `endDate` reste « dernier jour d'absence ».
+   */
+  private async attachReturnDates<T extends { endDate: Date }>(companyId: string, rows: T[]): Promise<(T & { returnDate: string })[]> {
+    if (rows.length === 0) return [];
+    const workDays = await WorkingDays.getCompanyWorkDays(this.prisma, companyId);
+    const holidays = await this.prisma.publicHoliday.findMany({ where: { companyId }, select: { date: true } });
+    const holidaySet = new Set(holidays.map((h) => h.date));
+    return rows.map((r) => ({ ...r, returnDate: WorkingDays.nextWorkingDay(new Date(r.endDate), workDays, holidaySet) }));
+  }
+
   async findAll(userId: string, employeeId?: string, status?: string, overrideCompanyId?: string) {
     const user = await this.getUserWithCompany(userId, overrideCompanyId);
     // 🔒 La liste de toutes les demandes (motifs maladie compris) n'est pas pour un simple
@@ -408,7 +422,7 @@ private async getUserWithCompany(userId: string, overrideCompanyId?: string): Pr
     if (employeeId) whereClause.employeeId = employeeId;
     if (status) whereClause.status = status;
 
-    return this.prisma.absenceRequest.findMany({
+    const rows = await this.prisma.absenceRequest.findMany({
       where:   whereClause,
       include: {
         employee: { select: { firstName: true, lastName: true, position: true, photoUrl: true, employeeNumber: true, department: { select: { name: true } } } },
@@ -416,6 +430,7 @@ private async getUserWithCompany(userId: string, overrideCompanyId?: string): Pr
       },
       orderBy: { createdAt: 'desc' },
     });
+    return this.attachReturnDates(user.companyId, rows);
   }
 
   // ============================================================================
@@ -429,10 +444,11 @@ private async getUserWithCompany(userId: string, overrideCompanyId?: string): Pr
     });
     if (!employee) throw new EmployeeNotFoundException();
 
-    return this.prisma.absenceRequest.findMany({
+    const rows = await this.prisma.absenceRequest.findMany({
       where:   { employeeId: employee.id, companyId: user.companyId },
       orderBy: { createdAt: 'desc' },
     });
+    return this.attachReturnDates(user.companyId, rows);
   }
 
   async findOne(id: string, userId: string, overrideCompanyId?: string) {
@@ -457,7 +473,8 @@ private async getUserWithCompany(userId: string, overrideCompanyId?: string): Pr
       allowed = !!deptId && absenceRequest.employee.departmentId === deptId;
     }
     if (!allowed) throw new ForbiddenException('Accès refusé');
-    return absenceRequest;
+    const [withReturn] = await this.attachReturnDates(absenceRequest.companyId, [absenceRequest]);
+    return withReturn;
   }
 
   // ============================================================================
@@ -622,13 +639,16 @@ private async getUserWithCompany(userId: string, overrideCompanyId?: string): Pr
     // Catalogue calculé depuis la convention (pas de table à lire) — la
     // ligne cochée est retrouvée en comparant le motif texte enregistré
     // (= le libellé exact de la convention au moment de la demande).
-    const catalog = request.company?.documentTemplate === 'STANDARD'
+    const catalog = ['STANDARD', 'MODERN'].includes(request.company?.documentTemplate as string)
       ? getMotifsForCompany(request.company?.collectiveAgreement)
       : [];
     const motifKey = catalog.find((m) => m.label === request.reason)?.key;
     // 🆕 Motif « Autre » saisi librement : n'est pas dans le catalogue → exposé à part
     //    pour que le document coche la ligne « Autre (précisez) ».
     const otherReason = !motifKey && request.subType === 'AUTRE' ? request.reason : undefined;
+
+    // 🆕 Reprise réelle (≠ dernier jour d'absence) — même calcul que la liste et le détail
+    const [withReturn] = await this.attachReturnDates(request.companyId, [request]);
 
     return {
       id: request.id,
@@ -640,6 +660,7 @@ private async getUserWithCompany(userId: string, overrideCompanyId?: string): Pr
       isPaid: request.isPaid,
       startDate: request.startDate,
       endDate: request.endDate,
+      returnDate: withReturn.returnDate,
       workingDays: request.workingDays,
       reason: request.reason,
       status: request.status,
@@ -783,7 +804,7 @@ private async getUserWithCompany(userId: string, overrideCompanyId?: string): Pr
       responsable:  data.responsableName || '',
       motif:        data.reason || '',
       date_depart:  fmtDate(data.startDate),
-      date_retour:  fmtDate(data.endDate),
+      date_retour:  fmtDate(data.returnDate), // 🆕 reprise réelle, pas le dernier jour d'absence
       nombre_jours: String(data.workingDays ?? ''),
       ...checks,
       check_paye:    data.isPaid ? CHECK : '',

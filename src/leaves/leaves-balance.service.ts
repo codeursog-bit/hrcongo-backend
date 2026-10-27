@@ -925,6 +925,17 @@ export class LeavesBalanceService {
   }
 
   /**
+   * 🆕 Date de REPRISE (jj/mm/aaaa) = premier jour travaillé après le dernier jour de
+   * congé : repos hebdomadaires et jours fériés de l'entreprise sautés.
+   */
+  private async resumptionLabel(companyId: string, endDate: Date): Promise<string> {
+    const workDays = await WorkingDays.getCompanyWorkDays(this.prisma, companyId);
+    const holidays = await this.prisma.publicHoliday.findMany({ where: { companyId }, select: { date: true } });
+    const iso = WorkingDays.nextWorkingDay(new Date(endDate), workDays, new Set(holidays.map((h) => h.date)));
+    return new Date(`${iso}T12:00:00`).toLocaleDateString('fr-FR');
+  }
+
+  /**
    * Rappels de retour de congé — congés qui se terminent dans 3 jours, et
    * retours dépassés sans confirmation.
    */
@@ -971,7 +982,7 @@ export class LeavesBalanceService {
         {
           type: 'SYSTEM_ALERT',
           title: '📅 Fin de congé proche',
-          message: `${leave.employee.firstName} ${leave.employee.lastName} termine son congé le ${new Date(leave.endDate).toLocaleDateString('fr-FR')} — reprise prévue le lendemain.`,
+          message: `${leave.employee.firstName} ${leave.employee.lastName} termine son congé le ${new Date(leave.endDate).toLocaleDateString('fr-FR')} — reprise prévue le ${await this.resumptionLabel(leave.employee.companyId, leave.endDate)}.`,
           link: `/conges/${leave.id}`,
           metadata: {
             leaveId: leave.id,
@@ -1015,7 +1026,7 @@ export class LeavesBalanceService {
         {
           type: 'SYSTEM_ALERT',
           title: '❓ Retour de congé à confirmer',
-          message: `${leave.employee.firstName} ${leave.employee.lastName} devait reprendre le travail le ${new Date(leave.endDate).toLocaleDateString('fr-FR')} (${Math.round(daysOverdue)}j) — merci de vérifier et confirmer son retour.`,
+          message: `${leave.employee.firstName} ${leave.employee.lastName} devait reprendre le travail le ${await this.resumptionLabel(leave.employee.companyId, leave.endDate)} (${Math.round(daysOverdue)}j) — merci de vérifier et confirmer son retour.`,
           link: `/conges/${leave.id}`,
           metadata: {
             leaveId: leave.id,

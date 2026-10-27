@@ -129,6 +129,28 @@ export async function calculateReturnDate(
   };
 }
 
+/**
+ * 🆕 Jour de REPRISE réel = premier jour travaillé APRÈS le dernier jour d'absence
+ * (`lastAbsenceDay`, inclus, tel qu'enregistré dans `endDate`).
+ * Repos hebdomadaires de l'entreprise (`workDays`) et jours fériés (`holidaySet`,
+ * dates « YYYY-MM-DD ») sautés. Fonction pure : le chargement des jours travaillés
+ * et des fériés se fait une seule fois par l'appelant (voir attachReturnDates).
+ */
+export function nextWorkingDay(
+  lastAbsenceDay: Date,
+  workDays: number[] | undefined,
+  holidaySet: Set<string>,
+): string {
+  const cur = new Date(lastAbsenceDay);
+  for (let i = 0; i < 60; i++) {
+    cur.setDate(cur.getDate() + 1);
+    const dow = cur.getDay();
+    const rest = workDays ? !workDays.includes(dow) : dow === 0;
+    if (!rest && !holidaySet.has(formatDate(cur))) break;
+  }
+  return formatDate(cur);
+}
+
 // ============================================================================
 // 🆕 JOURS TRAVAILLÉS DE L'ENTREPRISE (configuration paie)
 // ============================================================================

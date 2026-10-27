@@ -1608,6 +1608,21 @@ export class LeavesService {
   // overrideCompanyId : fourni par le cabinet controller
   // ============================================================================
 
+  /**
+   * 🆕 Jour de REPRISE réel de chaque congé = premier jour travaillé APRÈS le dernier
+   * jour de congé (`endDate`, inclus) — repos hebdomadaires et jours fériés de
+   * l'entreprise sautés. Calculé à la lecture (rien à migrer) : liste, détail et
+   * fiches affichent ainsi TOUS la même date. `endDate` reste « dernier jour de congé »
+   * et `actualReturnDate` la reprise effective confirmée (retour anticipé).
+   */
+  private async attachReturnDates<T extends { endDate: Date }>(companyId: string, rows: T[]): Promise<(T & { returnDate: string })[]> {
+    if (rows.length === 0) return [];
+    const workDays = await WorkingDays.getCompanyWorkDays(this.prisma, companyId);
+    const holidays = await this.prisma.publicHoliday.findMany({ where: { companyId }, select: { date: true } });
+    const holidaySet = new Set(holidays.map((h) => h.date));
+    return rows.map((r) => ({ ...r, returnDate: WorkingDays.nextWorkingDay(new Date(r.endDate), workDays, holidaySet) }));
+  }
+
   async findAll(
     userId: string,
     employeeId?: string,
@@ -1640,7 +1655,7 @@ export class LeavesService {
       whereClause.employeeId = employeeId;
     }
 
-    return this.prisma.leave.findMany({
+    const rows = await this.prisma.leave.findMany({
       where: whereClause,
       include: {
         employee: {
@@ -1655,6 +1670,7 @@ export class LeavesService {
       },
       orderBy: { createdAt: 'desc' },
     });
+    return this.attachReturnDates(user.companyId, rows);
   }
 
   // ============================================================================
@@ -1667,10 +1683,11 @@ export class LeavesService {
       where: { email: user.email ?? undefined, companyId: user.companyId },
     });
     if (!employee) throw new EmployeeNotFoundException();
-    return this.prisma.leave.findMany({
+    const rows = await this.prisma.leave.findMany({
       where: { employeeId: employee.id, companyId: user.companyId },
       orderBy: { createdAt: 'desc' },
     });
+    return this.attachReturnDates(user.companyId, rows);
   }
 
   async findOne(id: string, userId: string, overrideCompanyId?: string) {
@@ -1749,7 +1766,8 @@ export class LeavesService {
       () => null,
     );
 
-    return { ...leave, balance };
+    const [withReturn] = await this.attachReturnDates(leave.companyId, [leave]);
+    return { ...withReturn, balance };
   }
 
   // ============================================================================

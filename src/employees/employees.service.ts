@@ -689,6 +689,10 @@ import { normalizeNationality } from '../common/utils/nationality.util';
 import { ConventionsService } from '../conventions/conventions.service';
 import { resolveVerifiedCompanyId } from '../common/resolve-verified-company.util';
 import { ContractSyncService } from '../contract-chain/contract-sync.service';
+import {
+  ImportedBonusAssignment,
+  createImportedEmployeeBonuses,
+} from './import-bonuses';
 
 // ─── Rôles autorisés ──────────────────────────────────────────────────────────
 const CAN_CREATE = ['SUPER_ADMIN', 'ADMIN', 'HR_MANAGER'];
@@ -835,7 +839,12 @@ export class EmployeesService {
   async create(
     createEmployeeDto: CreateEmployeeDto,
     userId: string,
-    options?: { phoneOptional?: boolean; overrideCompanyId?: string },
+    options?: {
+      phoneOptional?: boolean;
+      overrideCompanyId?: string;
+      /** 🆕 Import Excel : primes/indemnités à attribuer dans la MÊME transaction que l'employé */
+      initialBonuses?: ImportedBonusAssignment[];
+    },
   ) {
     const user = await this.getVerifiedUser(userId);
     await this.applyCompanyOverride(user, options?.overrideCompanyId);
@@ -1119,6 +1128,15 @@ export class EmployeesService {
           contract: createdContract as any,
           actor: await this.auditActor(userId, user.role),
         });
+
+        // 🆕 Import Excel : primes/indemnités de la ligne (atomique avec l'employé)
+        if (options?.initialBonuses?.length) {
+          await createImportedEmployeeBonuses(
+            tx,
+            newEmployee.id,
+            options.initialBonuses,
+          );
+        }
 
         return newEmployee;
       });

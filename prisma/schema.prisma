@@ -428,6 +428,12 @@ model Company {
   auditFindings    AuditFinding[]
   auditCheckpoints AuditCheckpoint[]
 
+    // 💰 Finances (caisse, dépenses, entrées, budgets)
+  financeSettings     FinanceSettings?
+  financeCategories   FinanceCategory[]
+  financeTransactions FinanceTransaction[]
+  financeBudgets      FinanceBudget[]
+
   affiliatedBy          String?                   @db.Uuid
   affiliate             Affiliate?                @relation("AffiliateCompanies", fields: [affiliatedBy], references: [id], onDelete: SetNull)
   affiliateCompany      AffiliateCompany?
@@ -443,6 +449,7 @@ enum DocumentTemplate {
   DEFAULT
   ORCA
   STANDARD // ← ajouté
+  MODERN // Modèle 3
 
   @@map("document_template")
 }
@@ -5572,3 +5579,105 @@ model PayrollForeignPay {
 }
 
 // <<< FIN SECTION 3
+
+
+// ===========================================================================
+// 📂 SECTION 22 — FINANCES (CAISSE, DÉPENSES, ENTRÉES, BUDGETS)
+// ===========================================================================
+
+enum FinanceFlow {
+  EXPENSE // sortie d'argent
+  INCOME // entrée d'argent
+
+  @@map("finance_flow")
+}
+
+model FinanceSettings {
+  id        String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId String  @unique @db.Uuid
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  enabled Boolean @default(false)
+
+  openingBalance Decimal  @default(0) @db.Decimal(15, 2)
+  openingDate    DateTime @default(now()) @db.Date
+  currency       String   @default("XAF") @db.Char(3)
+
+  createdAt DateTime @default(now()) @db.Timestamptz
+  updatedAt DateTime @updatedAt @db.Timestamptz
+
+  @@map("finance_settings")
+}
+
+model FinanceCategory {
+  id        String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId String  @db.Uuid
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  name  String      @db.VarChar(100)
+  type  FinanceFlow
+  color String?     @db.VarChar(7)
+
+  isActive Boolean @default(true)
+
+  transactions FinanceTransaction[]
+  budgets      FinanceBudget[]
+
+  createdAt DateTime @default(now()) @db.Timestamptz
+  updatedAt DateTime @updatedAt @db.Timestamptz
+
+  @@unique([companyId, type, name])
+  @@index([companyId, type])
+  @@map("finance_categories")
+}
+
+model FinanceTransaction {
+  id        String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId String  @db.Uuid
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  type FinanceFlow
+
+  categoryId String          @db.Uuid
+  category   FinanceCategory @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+
+  label     String  @db.VarChar(255)
+  quantity  Decimal @default(1) @db.Decimal(12, 2)
+  unitPrice Decimal @db.Decimal(15, 2)
+  amount    Decimal @db.Decimal(15, 2) // quantity × unitPrice, calculé côté service
+
+  date         DateTime @db.Date
+  counterparty String?  @db.VarChar(255)
+  note         String?  @db.Text
+  receiptUrl   String?  @db.Text
+
+  createdBy String? @db.Uuid
+
+  createdAt DateTime @default(now()) @db.Timestamptz
+  updatedAt DateTime @updatedAt @db.Timestamptz
+
+  @@index([companyId, date])
+  @@index([companyId, type, date])
+  @@index([categoryId])
+  @@map("finance_transactions")
+}
+
+model FinanceBudget {
+  id        String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId String  @db.Uuid
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  categoryId String          @db.Uuid
+  category   FinanceCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+
+  year   Int     @db.SmallInt
+  month  Int     @db.SmallInt // 1..12
+  amount Decimal @db.Decimal(15, 2)
+
+  createdAt DateTime @default(now()) @db.Timestamptz
+  updatedAt DateTime @updatedAt @db.Timestamptz
+
+  @@unique([companyId, categoryId, year, month])
+  @@index([companyId, year, month])
+  @@map("finance_budgets")
+}
