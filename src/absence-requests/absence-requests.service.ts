@@ -118,7 +118,10 @@ private async getUserWithCompany(userId: string, overrideCompanyId?: string): Pr
 
     // 🆕 jours travaillés = configuration de l'entreprise ; reprise = prochain jour ouvrable
     const workDays = await WorkingDays.getCompanyWorkDays(this.prisma, employee.companyId);
-    return WorkingDays.calculateReturnDate(this.prisma, employee.companyId, startDate, workingDaysNeeded, true, workDays);
+    // Départ un jour de repos / férié → l'absence commence au 1er jour travaillé
+    const start = await WorkingDays.firstWorkingDayOnOrAfter(this.prisma, employee.companyId, startDate, workDays);
+    const calc = await WorkingDays.calculateReturnDate(this.prisma, employee.companyId, start, workingDaysNeeded, true, workDays);
+    return { ...calc, startAdjusted: start.getTime() !== startDate.getTime() };
   }
 
   /**
@@ -132,14 +135,16 @@ private async getUserWithCompany(userId: string, overrideCompanyId?: string): Pr
     overrideCompanyId?: string,
   ) {
     const user = await this.getUserWithCompany(userId, overrideCompanyId);
-    const start = new Date(params.startDate);
+    const requestedStart = new Date(params.startDate);
     const end = new Date(params.returnDate);
     end.setUTCDate(end.getUTCDate() - 1);
-    if (isNaN(start.getTime()) || isNaN(end.getTime()) || end < start) {
+    if (isNaN(requestedStart.getTime()) || isNaN(end.getTime()) || end < requestedStart) {
       throw new BadRequestException('La date de reprise doit être après la date de départ');
     }
 
     const workDays = await WorkingDays.getCompanyWorkDays(this.prisma, user.companyId);
+    // Départ un jour de repos / férié → 1er jour travaillé
+    const start = await WorkingDays.firstWorkingDayOnOrAfter(this.prisma, user.companyId, requestedStart, workDays);
     const workingDays = await WorkingDays.calculateWorkingDays(this.prisma, user.companyId, start, end, workDays);
 
     let entitledDays: number | null = null;
@@ -164,6 +169,8 @@ private async getUserWithCompany(userId: string, overrideCompanyId?: string): Pr
     const lastCoveredDate = covered && covered.size > 0 ? [...covered].sort().pop()! : null;
 
     return {
+      startDate: WorkingDays.formatLocalDate(start),
+      startAdjusted: start.getTime() !== requestedStart.getTime(),
       workingDays,
       entitledDays,
       coveredDays,
@@ -254,9 +261,10 @@ private async getUserWithCompany(userId: string, overrideCompanyId?: string): Pr
       }
     }
 
-    const start = new Date(dto.startDate);
     // 🆕 Jours travaillés de l'entreprise (config paie) — ex : lun-ven ⇒ le samedi n'est jamais compté
     const workDays = await WorkingDays.getCompanyWorkDays(this.prisma, employee.companyId);
+    // Départ un jour de repos / férié → l'absence commence au 1er jour travaillé
+    const start = await WorkingDays.firstWorkingDayOnOrAfter(this.prisma, employee.companyId, new Date(dto.startDate), workDays);
 
     // ── Date de fin d'absence (dernier jour, inclus) ─────────────────────
     // 1) reprise saisie par l'employé  → fin = reprise - 1 jour

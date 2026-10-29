@@ -142,6 +142,11 @@ export class LeavesService {
     return WorkingDays.calculateWorkingDays(this.prisma, companyId, start, end);
   }
 
+  /** Un congé commence au premier jour travaillé (ni repos, ni férié). */
+  async adjustStartToWorkingDay(companyId: string, date: Date): Promise<Date> {
+    return WorkingDays.firstWorkingDayOnOrAfter(this.prisma, companyId, date);
+  }
+
   /**
    * Calcule automatiquement la date de retour à partir d'une date de départ
    * et d'un nombre de jours ouvrables souhaité. Voir working-days.util.ts.
@@ -215,9 +220,16 @@ export class LeavesService {
       userId,
       overrideCompanyId,
     );
-    const start = new Date(q.startDate);
-    if (isNaN(start.getTime()))
+    const requestedStart = new Date(q.startDate);
+    if (isNaN(requestedStart.getTime()))
       throw new BadRequestException('Date de départ invalide');
+    // Départ un jour de repos / férié → le congé commence au 1er jour travaillé
+    const start = await this.adjustStartToWorkingDay(
+      user.companyId,
+      requestedStart,
+    );
+    const startDateOut = WorkingDays.formatLocalDate(start);
+    const startAdjusted = start.getTime() !== requestedStart.getTime();
 
     // ↩️ Reprise de jours restants : même mécanique de dates, plafond = reliquat.
     if (q.carriedFromLeaveId) {
@@ -274,7 +286,8 @@ export class LeavesService {
       return {
         reliable: true as const,
         mode,
-        startDate: q.startDate,
+        startDate: startDateOut,
+        startAdjusted,
         endDate: mode === 'BY_DATES' ? q.endDate! : calc.lastLeaveDay,
         returnDate: calc.returnDate,
         workingDays,
@@ -381,7 +394,8 @@ export class LeavesService {
         availableSeniority: entitlement.availableSeniority,
         availableTotal: entitlement.availableTotal,
       },
-      startDate: q.startDate,
+      startDate: startDateOut,
+      startAdjusted,
       endDate,
       returnDate,
       workingDays,
@@ -1494,7 +1508,10 @@ export class LeavesService {
         `L'employé ${employee.firstName} ${employee.lastName} n'est pas actif`,
       );
 
-    const start = new Date(dto.startDate);
+    const start = await this.adjustStartToWorkingDay(
+      employee.companyId,
+      new Date(dto.startDate),
+    );
     const end = new Date(dto.endDate);
     if (end < start)
       throw new BadRequestException(
@@ -2507,6 +2524,7 @@ export class LeavesService {
       throw new BadRequestException(
         'Seul un congé en attente ou déjà approuvé/planifié peut être déplacé (pas un congé rejeté ou annulé)',
       );
+    newStart = await this.adjustStartToWorkingDay(user.companyId, newStart);
     if (newEnd < newStart)
       throw new BadRequestException(
         'La date de fin doit être après la date de début',
@@ -2705,7 +2723,12 @@ export class LeavesService {
 
     const oldStart = new Date(leave.startDate);
     const oldEnd = new Date(leave.endDate);
-    const newStart = dto.startDate ? new Date(dto.startDate) : oldStart;
+    const newStart = dto.startDate
+      ? await this.adjustStartToWorkingDay(
+          user.companyId,
+          new Date(dto.startDate),
+        )
+      : oldStart;
     const newEnd = dto.endDate ? new Date(dto.endDate) : oldEnd;
     if (newEnd < newStart)
       throw new BadRequestException(

@@ -1,7 +1,9 @@
 // ============================================================================
 // 📁 src/common/working-days.util.ts
 // ✅ Moteur "jours ouvrables" partagé — congé annuel ET absences utilisent le
-//    même calcul (lundi-samedi, jours fériés de l'entreprise exclus).
+//    même calcul : les jours travaillés CONFIGURÉS par l'entreprise (repli
+//    lundi-vendredi) et ses jours fériés sont ignorés ; la reprise tombe
+//    toujours sur le prochain jour travaillé.
 // ============================================================================
 
 import { normalizeWorkDays } from './utils/work-days';
@@ -12,16 +14,17 @@ function formatDate(d: Date): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
-/** Compte les jours ouvrables (lun-sam, hors fériés) entre deux dates incluses. */
+/** Compte les jours ouvrables (jours travaillés de l'entreprise, hors fériés) entre deux dates incluses. */
 export async function calculateWorkingDays(
   prisma: PrismaService,
   companyId: string,
   start: Date,
   end: Date,
-  // 🆕 optionnel — jours travaillés de l'entreprise (0=dim … 6=sam). Absent =
-  // comportement historique (lundi-samedi), donc congés/indemnités inchangés.
+  // Optionnel — jours travaillés de l'entreprise (0=dim … 6=sam). Absent =
+  // lus dans la configuration de l'entreprise.
   workDays?: number[],
 ): Promise<number> {
+  if (!workDays) workDays = await getCompanyWorkDays(prisma, companyId);
   const years = [start.getFullYear()];
   if (end.getFullYear() !== start.getFullYear()) years.push(end.getFullYear());
 
@@ -36,7 +39,7 @@ export async function calculateWorkingDays(
   while (cur <= end) {
     const dow = cur.getDay();
     const ds = formatDate(cur);
-    const isWorkDay = workDays ? workDays.includes(dow) : dow >= 1 && dow <= 6;
+    const isWorkDay = workDays.includes(dow);
     if (isWorkDay && !holidaySet.has(ds)) count++;
     cur.setDate(cur.getDate() + 1);
   }
@@ -53,10 +56,12 @@ export async function calculateReturnDate(
   companyId: string,
   startDate: Date,
   workingDaysNeeded: number,
-  // 🆕 optionnels — absents = comportement historique (congés inchangés)
-  returnOnNextWorkingDay = false, // reprise = prochain jour ouvrable (saute repos + fériés)
+  // Optionnels — par défaut : reprise = prochain jour travaillé (saute repos +
+  // fériés) et jours travaillés lus dans la configuration de l'entreprise.
+  returnOnNextWorkingDay = true,
   workDays?: number[],            // jours travaillés de l'entreprise (0=dim … 6=sam)
 ) {
+  if (!workDays) workDays = await getCompanyWorkDays(prisma, companyId);
   if (workingDaysNeeded <= 0) {
     throw new BadRequestException(
       'Le nombre de jours doit être supérieur à 0.',
@@ -89,7 +94,7 @@ export async function calculateReturnDate(
     const dow = cur.getDay();
     const ds = formatDate(cur);
 
-    const isRestDay = workDays ? !workDays.includes(dow) : dow === 0;
+    const isRestDay = !workDays.includes(dow);
     if (isRestDay) {
       sundaysSkipped++; // = jours de repos sautés (dimanche par défaut, ou selon la config entreprise)
     } else if (holidayMap.has(ds)) {
@@ -113,7 +118,7 @@ export async function calculateReturnDate(
   if (returnOnNextWorkingDay) {
     for (let i = 0; i < 30; i++) {
       const d = returnDate.getDay();
-      const rest = workDays ? !workDays.includes(d) : d === 0;
+      const rest = !workDays.includes(d);
       if (!rest && !holidayMap.has(formatDate(returnDate))) break;
       returnDate.setDate(returnDate.getDate() + 1);
     }
@@ -246,3 +251,32 @@ export async function loadCoveredDatesMap(
   }
   return result;
 }
+/**
+ * 🆕 Un congé ne peut pas COMMENCER un jour de repos ou férié de l'entreprise :
+ * renvoie la date elle-même si c'est un jour travaillé, sinon le premier jour
+ * travaillé suivant (jours travaillés + fériés lus dans la configuration).
+ * Même forme que `new Date('YYYY-MM-DD')` (minuit UTC) pour rester compatible
+ * avec le reste du module.
+ */
+export async function firstWorkingDayOnOrAfter(
+  prisma: PrismaService,
+  companyId: string,
+  date: Date,
+  workDays?: number[],
+): Promise<Date> {
+  if (!workDays) workDays = await getCompanyWorkDays(prisma, companyId);
+  const years = [date.getFullYear(), date.getFullYear() + 1];
+  const holidays = await prisma.publicHoliday.findMany({
+    where: { companyId, year: { in: years } },
+    select: { date: true },
+  });
+  const holidaySet = new Set(holidays.map((h) => h.date));
+  const cur = new Date(date);
+  for (let i = 0; i < 60; i++) {
+    if (workDays.includes(cur.getDay()) && !holidaySet.has(formatDate(cur))) break;
+    cur.setDate(cur.getDate() + 1);
+  }
+  return new Date(formatDate(cur));
+}
+
+export { formatDate as formatLocalDate };
