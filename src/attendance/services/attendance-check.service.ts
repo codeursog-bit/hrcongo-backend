@@ -808,11 +808,39 @@ export class AttendanceCheckService {
       },
     });
     if (!current) throw new Error('Présence introuvable');
+    // ✅ Isolation multi-entreprise : on ne corrige que les pointages de SA société
+    if (current.companyId !== user.companyId) {
+      throw new Error('Accès refusé : ce pointage appartient à une autre entreprise');
+    }
 
     const checkInDate = updates.checkIn ? new Date(updates.checkIn) : undefined;
     const checkOutDate = updates.checkOut
       ? new Date(updates.checkOut)
       : undefined;
+
+    // ✅ Cohérence : la sortie doit être après l'entrée
+    const effIn = checkInDate ?? current.checkIn ?? undefined;
+    const effOut = checkOutDate ?? current.checkOut ?? undefined;
+    if (effIn && effOut && effOut.getTime() <= effIn.getTime()) {
+      throw new Error("L'heure de sortie doit être après l'heure d'entrée");
+    }
+    // ✅ Durée recalculée quand les heures changent (pause déduite), sauf si
+    // la durée est fournie explicitement.
+    let recomputedTotalHours: number | undefined;
+    if (
+      updates.totalHours == null &&
+      (checkInDate || checkOutDate) &&
+      effIn &&
+      effOut
+    ) {
+      const breakH = Number((current as any).breakMinutes ?? 0) / 60;
+      recomputedTotalHours = parseFloat(
+        Math.max(
+          0,
+          (effOut.getTime() - effIn.getTime()) / 3_600_000 - breakH,
+        ).toFixed(2),
+      );
+    }
 
     const changes: AuditChange[] = [];
     if (updates.status && updates.status !== current.status) {
@@ -859,7 +887,8 @@ export class AttendanceCheckService {
         status: (updates.status || current.status) as AttendanceStatus,
         checkIn: updates.checkIn || current.checkIn,
         checkOut: updates.checkOut || current.checkOut,
-        totalHours: updates.totalHours || current.totalHours,
+        totalHours:
+          updates.totalHours || recomputedTotalHours || current.totalHours,
         notes: `${current.notes || ''}\n[Modifié ${new Date().toLocaleString('fr-FR')} par ${user.firstName} ${user.lastName} — ${updates.reason}]`,
       },
     });

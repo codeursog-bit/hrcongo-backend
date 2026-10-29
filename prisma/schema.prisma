@@ -2335,6 +2335,10 @@ model Leave {
   plannedPayrollYear   Int?
   payrollIndemnityDays Decimal? @db.Decimal(5, 2)
   payrollSeniorityDays Decimal? @db.Decimal(5, 2)
+  
+  remainderBaseDays      Decimal?  @db.Decimal(5, 2)
+  remainderSeniorityDays Decimal?  @db.Decimal(5, 2)
+  nextDepartureDate      DateTime? @db.Date
 
   requestedAt DateTime @default(now()) @db.Timestamptz
 

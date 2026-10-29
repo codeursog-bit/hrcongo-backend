@@ -42,12 +42,34 @@ import {
   getUserWithCompany,
   getManagerDepartmentId,
   resolveCycleWindow,
+  splitLeaveDays,
+  applyConsumedToRemainder,
 } from './leaves-common.util';
 import { CONGO_LEAVE } from './leaves.constants';
 import { LeavesBalanceService } from './leaves-balance.service';
 import { LeavesIndemnityService } from './leaves-indemnity.service';
 // ✅ LOT E — avis demandé aux titulaires de fonctions (aucun effet sans circuit actif)
 import { ApprovalNotifierService } from '../approvals/core/approval-notifier.service';
+
+/** Ligne du programme des départs (réelle, théorique ou rappel de jours restants). */
+export interface DepartureRowOut {
+  id: string;
+  employeeId: string;
+  employee: any;
+  type: string;
+  startDate: Date;
+  endDate: Date;
+  daysCount: number;
+  status: string;
+  isTheoretical: boolean;
+  isManual: boolean;
+  /** true = reprise de jours restants d'un congé annuel pris en partie. */
+  isRemainder?: boolean;
+  sourceLeaveId?: string;
+  /** Ce qu'il reste à prendre (après rattrapages déjà posés). */
+  remainderLeft?: { base: number; seniority: number; total: number } | null;
+  nextDepartureDate?: Date | null;
+}
 
 @Injectable()
 export class LeavesService {
@@ -161,6 +183,219 @@ export class LeavesService {
   // partout où un solde doit être affiché/figé de façon fiable (bulletins,
   // simulation, vérification avant congé). Voir LeavesBalanceService pour
   // le détail du correctif.
+  /**
+   * 🔮 Aperçu de planification (RH) — appelé en direct par la modale
+   * "Planifier un congé". Trois modes, selon ce que le RH a déjà saisi :
+   *  - ni jours ni date de fin → on propose le DROIT RESTANT complet (base +
+   *    ancienneté selon la convention, moins les anticipés déjà pris) et la
+   *    date de retour correspondante ;
+   *  - `days` → date de fin calculée automatiquement (jours ouvrables) ;
+   *  - `endDate` → nombre de jours déduit des dates.
+   * Dans tous les cas : répartition base/ancienneté et ce qui RESTERA à
+   * prendre plus tard. Lecture seule — rien n'est persisté.
+   */
+  async getPlanningPreview(
+    q: {
+      employeeId: string;
+      startDate: string;
+      days?: number;
+      endDate?: string;
+      // En modification : ce congé est déjà décompté dans le solde, on le
+      // retire pour retrouver "ce qui était pris avant lui".
+      excludeLeaveId?: string;
+      // Reprise de jours restants (rattrapage) : pas de droit/solde en jeu,
+      // juste un plafond = ce qu'il reste sur le congé source.
+      carriedFromLeaveId?: string;
+    },
+    userId: string,
+    overrideCompanyId?: string,
+  ) {
+    const user = await this.assertEmployeeAccess(
+      q.employeeId,
+      userId,
+      overrideCompanyId,
+    );
+    const start = new Date(q.startDate);
+    if (isNaN(start.getTime()))
+      throw new BadRequestException('Date de départ invalide');
+
+    // ↩️ Reprise de jours restants : même mécanique de dates, plafond = reliquat.
+    if (q.carriedFromLeaveId) {
+      const source = await this.prisma.leave.findUnique({
+        where: { id: q.carriedFromLeaveId },
+        select: { companyId: true, employeeId: true },
+      });
+      if (
+        !source ||
+        source.companyId !== user.companyId ||
+        source.employeeId !== q.employeeId
+      ) {
+        throw new BadRequestException('Reliquat introuvable pour cet employé');
+      }
+      const remaining = await this.getRemainingCarryover(
+        q.carriedFromLeaveId,
+        q.excludeLeaveId,
+      );
+      let days: number;
+      let mode: 'FULL_DEFAULT' | 'BY_DAYS' | 'BY_DATES';
+      if (q.days && q.days > 0) {
+        mode = 'BY_DAYS';
+        days = q.days;
+      } else if (q.endDate) {
+        mode = 'BY_DATES';
+        const end = new Date(q.endDate);
+        if (isNaN(end.getTime()) || end < start)
+          throw new BadRequestException(
+            'La date de fin doit être après la date de début',
+          );
+        days = await this.calculateWorkingDays(start, end, user.companyId);
+      } else {
+        mode = 'FULL_DEFAULT';
+        days = remaining;
+      }
+      if (days <= 0) {
+        return {
+          reliable: true as const,
+          mode,
+          startDate: q.startDate,
+          endDate: null,
+          returnDate: null,
+          workingDays: 0,
+          carryover: { remaining, remainderAfter: remaining, excessDays: 0 },
+        };
+      }
+      const calc = await WorkingDays.calculateReturnDate(
+        this.prisma,
+        user.companyId,
+        start,
+        Math.ceil(days),
+      );
+      const workingDays = mode === 'BY_DATES' ? days : Math.ceil(days);
+      return {
+        reliable: true as const,
+        mode,
+        startDate: q.startDate,
+        endDate: mode === 'BY_DATES' ? q.endDate! : calc.lastLeaveDay,
+        returnDate: calc.returnDate,
+        workingDays,
+        carryover: {
+          remaining,
+          remainderAfter: Math.max(0, Math.round((remaining - workingDays) * 10) / 10),
+          excessDays: Math.max(0, Math.round((workingDays - remaining) * 10) / 10),
+        },
+      };
+    }
+
+    const projection = await this.getProjectedBalanceAsOf(q.employeeId, start);
+    if (!projection.reliable) {
+      return { reliable: false as const, reason: projection.reason };
+    }
+
+    let takenBefore = projection.annualTaken;
+    if (q.excludeLeaveId) {
+      const own = await this.prisma.leave.findUnique({
+        where: { id: q.excludeLeaveId },
+        select: {
+          employeeId: true,
+          status: true,
+          daysCount: true,
+          debitedCycleStartDate: true,
+          carriedFromLeaveId: true,
+        },
+      });
+      if (
+        own &&
+        own.employeeId === q.employeeId &&
+        own.status === 'APPROVED' &&
+        !own.carriedFromLeaveId &&
+        own.debitedCycleStartDate &&
+        new Date(own.debitedCycleStartDate).getTime() ===
+          new Date(projection.cycleStartDate).getTime()
+      ) {
+        takenBefore = Math.max(0, takenBefore - Number(own.daysCount));
+      }
+    }
+
+    const seniority = Number(projection.seniorityDays ?? 0);
+    const entitlement = splitLeaveDays({
+      baseEntitled: CONGO_LEAVE.ANNUAL_DAYS,
+      seniorityEntitled: seniority,
+      takenBefore,
+      requestedDays: 0,
+    });
+
+    let mode: 'FULL_DEFAULT' | 'BY_DAYS' | 'BY_DATES';
+    let requestedDays: number;
+    if (q.days && q.days > 0) {
+      mode = 'BY_DAYS';
+      requestedDays = q.days;
+    } else if (q.endDate) {
+      mode = 'BY_DATES';
+      const end = new Date(q.endDate);
+      if (isNaN(end.getTime()) || end < start)
+        throw new BadRequestException(
+          'La date de fin doit être après la date de début',
+        );
+      requestedDays = await this.calculateWorkingDays(
+        start,
+        end,
+        user.companyId,
+      );
+    } else {
+      mode = 'FULL_DEFAULT';
+      requestedDays = entitlement.availableTotal;
+    }
+
+    let endDate: string | null = null;
+    let returnDate: string | null = null;
+    let workingDays = requestedDays;
+    if (requestedDays > 0) {
+      const calc = await WorkingDays.calculateReturnDate(
+        this.prisma,
+        user.companyId,
+        start,
+        Math.ceil(requestedDays),
+      );
+      endDate = mode === 'BY_DATES' ? q.endDate! : calc.lastLeaveDay;
+      returnDate = calc.returnDate;
+      if (mode !== 'BY_DATES') workingDays = Math.ceil(requestedDays);
+    }
+
+    const split = splitLeaveDays({
+      baseEntitled: CONGO_LEAVE.ANNUAL_DAYS,
+      seniorityEntitled: seniority,
+      takenBefore,
+      requestedDays: workingDays,
+    });
+
+    return {
+      reliable: true as const,
+      mode,
+      cycleStartDate: projection.cycleStartDate,
+      cycleEndDate: projection.cycleEndDate,
+      entitlement: {
+        base: CONGO_LEAVE.ANNUAL_DAYS,
+        seniority,
+        takenBefore,
+        availableBase: entitlement.availableBase,
+        availableSeniority: entitlement.availableSeniority,
+        availableTotal: entitlement.availableTotal,
+      },
+      startDate: q.startDate,
+      endDate,
+      returnDate,
+      workingDays,
+      split: {
+        usedBase: split.usedBase,
+        usedSeniority: split.usedSeniority,
+        remainderBase: split.remainderBase,
+        remainderSeniority: split.remainderSeniority,
+        remainderTotal: split.remainderTotal,
+        excessDays: split.excessDays,
+      },
+    };
+  }
+
   async getTotalLeaveBalanceSummary(employeeId: string) {
     return this.balanceService.getTotalLeaveBalanceSummary(employeeId);
   }
@@ -372,6 +607,8 @@ export class LeavesService {
     companyId?: string,
     anchorMonth?: number,
     anchorYear?: number,
+    currentMonthWorkGross?: number,
+    opts?: { estimateCurrentMonth?: boolean },
   ) {
     return this.indemnityService.calculateLeaveIndemnity(
       employeeId,
@@ -379,6 +616,8 @@ export class LeavesService {
       companyId,
       anchorMonth,
       anchorYear,
+      currentMonthWorkGross,
+      opts,
     );
   }
 
@@ -865,6 +1104,33 @@ export class LeavesService {
         }
       }
 
+      // ✅ RÈGLE MÉTIER (demande explicite) : le congé annuel suit le
+      // PLANNING de l'entreprise — c'est le RH/Admin qui le planifie (date,
+      // jours, reste à prendre). Un employé ne peut donc demander QUE un
+      // congé annuel ANTICIPÉ (déduit de son solde, sans indemnité à cette
+      // date). Le rattrapage d'un retour anticipé reste permis, mais pas la
+      // reprise des jours restants d'un congé annuel pris en partie : sa
+      // date est fixée par l'entreprise.
+      if (user.role === 'EMPLOYEE') {
+        if (createLeaveDto.carriedFromLeaveId) {
+          const src = await this.prisma.leave.findUnique({
+            where: { id: createLeaveDto.carriedFromLeaveId },
+            select: { returnConfirmed: true, forfeitedDays: true },
+          });
+          const isEarlyReturnCarryover =
+            !!src && src.returnConfirmed && Number(src.forfeitedDays ?? 0) > 0;
+          if (!isEarlyReturnCarryover) {
+            throw new BadRequestException(
+              "La reprise des jours restants d'un congé annuel pris en partie est planifiée par l'entreprise — la date vous sera communiquée par le RH.",
+            );
+          }
+        } else if (createLeaveDto.type === 'ANNUAL') {
+          throw new BadRequestException(
+            "Le congé annuel est planifié par l'entreprise selon son planning. Vous pouvez demander un congé annuel anticipé, déduit de votre solde.",
+          );
+        }
+      }
+
       const start = new Date(createLeaveDto.startDate);
       const end = new Date(createLeaveDto.endDate);
 
@@ -1085,9 +1351,9 @@ export class LeavesService {
       );
     if (source.companyId !== companyId)
       throw new ForbiddenException('Accès refusé');
-    if (!source.returnConfirmed || !(Number(source.forfeitedDays) > 0)) {
+    if (!this.sourceHasRemainder(source)) {
       throw new BadRequestException(
-        "Ce congé n'a pas de reliquat de retour anticipé disponible",
+        "Ce congé n'a pas de reliquat disponible (ni retour anticipé, ni congé annuel pris en partie)",
       );
     }
 
@@ -1189,9 +1455,13 @@ export class LeavesService {
       reason?: string;
       extraDaysGranted?: number;
       resumptionNote?: string;
-      // ✅ Rattrapage d'un reliquat de retour anticipé — id du congé source
-      // (celui qui a un forfeitedDays > 0). Voir createCarryoverLeave().
+      // ✅ Rattrapage d'un reliquat — id du congé source (retour anticipé
+      // avec forfeitedDays > 0, OU congé annuel pris en partie avec jours
+      // restants). Voir createCarryoverLeave().
       carriedFromLeaveId?: string;
+      // ✅ Date du prochain départ (jours restants d'un congé annuel partiel)
+      // — sert au rappel du programme des départs.
+      nextDepartureDate?: string;
     },
     userId: string,
     overrideCompanyId?: string,
@@ -1296,6 +1566,38 @@ export class LeavesService {
     // décompter dessus, pas celle du cycle courant au jour de la saisie.
     const balance = await this.getOrCreateLeaveBalance(dto.employeeId, start);
 
+    // ✅ Jours RESTANTS à prendre après ce congé annuel (pris en partie, par
+    // besoin de l'entreprise) : base (26j) consommée en premier, puis
+    // ancienneté. Calculé côté serveur — source de vérité unique, identique à
+    // l'aperçu affiché au RH (voir getPlanningPreview). Totalement distinct du
+    // solde : le cycle se referme, ces jours restent dus.
+    let remainderBaseDays: number | null = null;
+    let remainderSeniorityDays: number | null = null;
+    let nextDepartureDate: Date | null = null;
+    if (dto.type === 'ANNUAL') {
+      const split = splitLeaveDays({
+        baseEntitled: CONGO_LEAVE.ANNUAL_DAYS,
+        seniorityEntitled: Number(balance.seniorityDays ?? 0),
+        takenBefore: Number(balance.annualTaken ?? 0),
+        requestedDays: workingDays,
+      });
+      if (split.remainderTotal > 0) {
+        remainderBaseDays = split.remainderBase;
+        remainderSeniorityDays = split.remainderSeniority;
+        if (!dto.nextDepartureDate) {
+          throw new BadRequestException(
+            `Il restera ${split.remainderTotal}j à prendre plus tard (${split.remainderBase}j de base${split.remainderSeniority > 0 ? ` + ${split.remainderSeniority}j d'ancienneté` : ''}) — merci d'indiquer la date du prochain départ pour pouvoir le rappeler.`,
+          );
+        }
+        nextDepartureDate = new Date(dto.nextDepartureDate);
+        if (isNaN(nextDepartureDate.getTime()) || nextDepartureDate <= end) {
+          throw new BadRequestException(
+            'La date du prochain départ doit être postérieure à la fin de ce congé.',
+          );
+        }
+      }
+    }
+
     // ✅ CORRECTIF (demande explicite) : même règle que create() — un congé
     // ANNUAL planifié directement par le RH pour MOINS que le solde dû doit
     // porter un motif explicite (jamais le fallback générique "Planifié
@@ -1356,8 +1658,19 @@ export class LeavesService {
         // planifié directement (par opposition à approuvé depuis une
         // demande employé, seul chemin qui les avait). Seulement pour
         // ANNUAL — même règle que updateStatus (jamais pour un anticipé).
-        extraDaysGranted: dto.type === 'ANNUAL' ? dto.extraDaysGranted : undefined,
+        // Jours d'ancienneté reportés : repris automatiquement du calcul si le
+        // RH n'a rien saisi (la lettre les affiche déjà).
+        extraDaysGranted:
+          dto.type === 'ANNUAL'
+            ? (dto.extraDaysGranted ??
+              (remainderSeniorityDays && remainderSeniorityDays > 0
+                ? remainderSeniorityDays
+                : undefined))
+            : undefined,
         resumptionNote: dto.type === 'ANNUAL' ? dto.resumptionNote : undefined,
+        remainderBaseDays,
+        remainderSeniorityDays,
+        nextDepartureDate,
       },
       include: {
         employee: {
@@ -1431,6 +1744,7 @@ export class LeavesService {
       startDate: string;
       endDate: string;
       reason?: string;
+      nextDepartureDate?: string;
     },
     employee: { firstName: string; lastName: string; email: string },
     workingDays: number,
@@ -1450,9 +1764,9 @@ export class LeavesService {
       );
     if (source.companyId !== companyId)
       throw new ForbiddenException('Accès refusé');
-    if (!source.returnConfirmed || !(Number(source.forfeitedDays) > 0)) {
+    if (!this.sourceHasRemainder(source)) {
       throw new BadRequestException(
-        "Ce congé n'a pas de reliquat de retour anticipé disponible",
+        "Ce congé n'a pas de reliquat disponible (ni retour anticipé, ni congé annuel pris en partie)",
       );
     }
 
@@ -1496,6 +1810,24 @@ export class LeavesService {
     // ici — c'est tout le principe du rattrapage : le cycle normal continue
     // sa vie sans être perturbé par ce repos de rattrapage non payé.
 
+    // ✅ Suivi du reliquat d'un congé annuel partiel : une fois tout repris, le
+    // rappel n'a plus lieu d'être ; s'il en reste, on garde/actualise la date
+    // du prochain départ.
+    if (Number(source.remainderBaseDays ?? 0) + Number(source.remainderSeniorityDays ?? 0) > 0) {
+      const leftAfter = remaining - workingDays;
+      await this.prisma.leave.update({
+        where: { id: source.id },
+        data: {
+          nextDepartureDate:
+            leftAfter <= 0
+              ? null
+              : dto.nextDepartureDate
+                ? new Date(dto.nextDepartureDate)
+                : source.nextDepartureDate,
+        },
+      });
+    }
+
     const employeeUser = await this.prisma.user.findFirst({
       where: { email: employee.email, companyId },
       select: { id: true },
@@ -1536,7 +1868,12 @@ export class LeavesService {
   ): Promise<number> {
     const source = await this.prisma.leave.findUnique({
       where: { id: sourceLeaveId },
-      select: { forfeitedDays: true },
+      select: {
+        forfeitedDays: true,
+        status: true,
+        remainderBaseDays: true,
+        remainderSeniorityDays: true,
+      },
     });
     if (!source) return 0;
     const children = await this.prisma.leave.findMany({
@@ -1548,14 +1885,105 @@ export class LeavesService {
       select: { daysCount: true },
     });
     const consumed = children.reduce((s, c) => s + Number(c.daysCount), 0);
-    return Math.max(0, Number(source.forfeitedDays) - consumed);
+    return Math.max(0, this.sourceTotalRemainder(source) - consumed);
   }
 
   /**
-   * Reliquats de retour anticipé encore disponibles pour un employé —
-   * utilisé par "Mon espace" (l'employé voit ce qu'il lui reste à prendre de
-   * son cycle précédent) et par le RH lors de la planification d'un
+   * Un congé source peut porter un reliquat de DEUX natures (cumulables) :
+   *  - retour anticipé : `forfeitedDays` (jours posés mais non pris)
+   *  - congé annuel pris en partie : `remainderBaseDays` + `remainderSeniorityDays`
+   *    (jours dus restants — seulement tant que ce congé reste APPROVED).
+   */
+  private sourceTotalRemainder(source: {
+    forfeitedDays: any;
+    status: string;
+    remainderBaseDays?: any;
+    remainderSeniorityDays?: any;
+  }): number {
+    const forfeited = Number(source.forfeitedDays ?? 0);
+    const partial =
+      source.status === 'APPROVED'
+        ? Number(source.remainderBaseDays ?? 0) +
+          Number(source.remainderSeniorityDays ?? 0)
+        : 0;
+    return forfeited + partial;
+  }
+
+  private sourceHasRemainder(source: {
+    returnConfirmed: boolean;
+    forfeitedDays: any;
+    status: string;
+    remainderBaseDays?: any;
+    remainderSeniorityDays?: any;
+  }): boolean {
+    const earlyReturn =
+      source.returnConfirmed && Number(source.forfeitedDays ?? 0) > 0;
+    const partial =
+      source.status === 'APPROVED' &&
+      Number(source.remainderBaseDays ?? 0) +
+        Number(source.remainderSeniorityDays ?? 0) >
+        0;
+    return earlyReturn || partial;
+  }
+
+  /**
+   * Pour une liste de congés ANNUAL pris en partie, calcule en UNE requête
+   * ce qu'il reste réellement à prendre (reliquat initial − rattrapages déjà
+   * pris/en attente), ventilé base/ancienneté (base consommée en premier).
+   */
+  private async computeRemainderLeft(
+    leaves: Array<{
+      id: string;
+      status: string;
+      remainderBaseDays: any;
+      remainderSeniorityDays: any;
+    }>,
+  ): Promise<Map<string, { base: number; seniority: number; total: number }>> {
+    const out = new Map<
+      string,
+      { base: number; seniority: number; total: number }
+    >();
+    const partials = leaves.filter(
+      (l) =>
+        l.status === 'APPROVED' &&
+        Number(l.remainderBaseDays ?? 0) + Number(l.remainderSeniorityDays ?? 0) >
+          0,
+    );
+    if (partials.length === 0) return out;
+    const children = await this.prisma.leave.groupBy({
+      by: ['carriedFromLeaveId'],
+      where: {
+        carriedFromLeaveId: { in: partials.map((l) => l.id) },
+        status: { in: ['PENDING', 'APPROVED'] },
+      },
+      _sum: { daysCount: true },
+    });
+    const consumedBy = new Map(
+      children.map((c): [string, number] => [
+        c.carriedFromLeaveId as string,
+        Number(c._sum.daysCount ?? 0),
+      ]),
+    );
+    for (const l of partials) {
+      out.set(
+        l.id,
+        applyConsumedToRemainder(
+          Number(l.remainderBaseDays ?? 0),
+          Number(l.remainderSeniorityDays ?? 0),
+          consumedBy.get(l.id) ?? 0,
+        ),
+      );
+    }
+    return out;
+  }
+
+  /**
+   * Reliquats encore disponibles pour un employé (retour anticipé OU congé
+   * annuel pris en partie) — utilisé par "Mon espace" (l'employé voit ce qu'il
+   * lui reste à prendre) et par le RH lors de la planification d'un
    * rattrapage (programme des départs / nouvelle demande).
+   * ⚠️ Totalement indépendant du SOLDE : le solde repart à 0 sur le nouveau
+   * cycle, ces jours restent dus.
    */
   async getCarryoverBalance(
     employeeId: string,
@@ -1565,18 +1993,38 @@ export class LeavesService {
     await this.assertEmployeeAccess(employeeId, userId, overrideCompanyId);
 
     const sources = await this.prisma.leave.findMany({
-      where: { employeeId, returnConfirmed: true, forfeitedDays: { gt: 0 } },
-      orderBy: { actualReturnDate: 'desc' },
+      where: {
+        employeeId,
+        OR: [
+          { returnConfirmed: true, forfeitedDays: { gt: 0 } },
+          {
+            status: 'APPROVED',
+            type: 'ANNUAL',
+            carriedFromLeaveId: null,
+            OR: [
+              { remainderBaseDays: { gt: 0 } },
+              { remainderSeniorityDays: { gt: 0 } },
+            ],
+          },
+        ],
+      },
+      orderBy: { startDate: 'desc' },
     });
+
+    const leftMap = await this.computeRemainderLeft(sources);
 
     const results: Array<{
       sourceLeaveId: string;
+      kind: 'EARLY_RETURN' | 'PARTIAL_ANNUAL' | 'BOTH';
       cycleLabel: string | null;
       originalStartDate: Date;
       originalEndDate: Date;
       actualReturnDate: Date | null;
       forfeitedDays: number;
       remainingDays: number;
+      remainingBaseDays: number | null;
+      remainingSeniorityDays: number | null;
+      nextDepartureDate: Date | null;
     }> = [];
 
     for (const source of sources) {
@@ -1589,18 +2037,83 @@ export class LeavesService {
         cycleLabel = `${y1}-${y1 + 1}`;
       }
 
+      const hasEarly = source.returnConfirmed && Number(source.forfeitedDays ?? 0) > 0;
+      const left = leftMap.get(source.id);
+
       results.push({
         sourceLeaveId: source.id,
+        kind: hasEarly ? (left ? 'BOTH' : 'EARLY_RETURN') : 'PARTIAL_ANNUAL',
         cycleLabel,
         originalStartDate: source.startDate,
         originalEndDate: source.endDate,
         actualReturnDate: source.actualReturnDate,
-        forfeitedDays: Number(source.forfeitedDays),
+        forfeitedDays: Number(source.forfeitedDays ?? 0),
         remainingDays: remaining,
+        remainingBaseDays: left ? left.base : null,
+        remainingSeniorityDays: left ? left.seniority : null,
+        nextDepartureDate: source.nextDepartureDate,
       });
     }
 
     return results;
+  }
+
+  /**
+   * 📋 Vue RH/Admin : TOUS les employés de l'entreprise qui ont pris leur
+   * congé annuel EN PARTIE et dont il reste des jours à prendre — triés par
+   * date de prochain départ (les plus proches d'abord, sans date en dernier).
+   */
+  async getPendingRemainders(userId: string, overrideCompanyId?: string) {
+    const user = await this.getUserWithCompany(userId, overrideCompanyId);
+    const sources = await this.prisma.leave.findMany({
+      where: {
+        companyId: user.companyId,
+        status: 'APPROVED',
+        type: 'ANNUAL',
+        carriedFromLeaveId: null,
+        OR: [
+          { remainderBaseDays: { gt: 0 } },
+          { remainderSeniorityDays: { gt: 0 } },
+        ],
+      },
+      include: {
+        employee: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            position: true,
+            department: { select: { id: true, name: true } },
+          },
+        },
+      },
+    });
+    const leftMap = await this.computeRemainderLeft(sources);
+    const rows = sources
+      .map((l) => {
+        const left = leftMap.get(l.id);
+        if (!left || left.total <= 0) return null;
+        return {
+          sourceLeaveId: l.id,
+          employeeId: l.employeeId,
+          employee: l.employee,
+          takenStartDate: l.startDate,
+          takenEndDate: l.endDate,
+          takenDays: Number(l.daysCount),
+          remainingBaseDays: left.base,
+          remainingSeniorityDays: left.seniority,
+          remainingDays: left.total,
+          nextDepartureDate: l.nextDepartureDate,
+          reason: l.resumptionNote ?? l.reason,
+        };
+      })
+      .filter((r): r is NonNullable<typeof r> => r !== null)
+      .sort((a, b) => {
+        const da = a.nextDepartureDate ? new Date(a.nextDepartureDate).getTime() : Infinity;
+        const db = b.nextDepartureDate ? new Date(b.nextDepartureDate).getTime() : Infinity;
+        return da - db;
+      });
+    return { rows, stats: { count: rows.length, totalDays: rows.reduce((s, r) => s + r.remainingDays, 0) } };
   }
 
   // ============================================================================
@@ -2044,12 +2557,96 @@ export class LeavesService {
       }
     }
 
+    // ✅ RÈGLE (demande explicite) : repousser un départ ne change JAMAIS la
+    // paie — ni le mois où l'indemnité est payée (plannedPayrollMonth/Year,
+    // inchangés), ni son montant : c'est juste le repos qui bouge.
+    //  - ANNIVERSARY : le cycle est ancré sur la date d'embauche, il ne
+    //    bouge jamais (resolveCycleWindow ignore leaveCycleStartDate).
+    //  - ROLLING (glissant) : le cycle repart de la fin RÉELLE du congé — si
+    //    ce congé avait fermé le cycle, on décale donc son point de départ
+    //    sur la nouvelle date de fin (janvier repoussé en février → les
+    //    cycles suivants partent de février).
+    const companyCfg = await this.prisma.company.findUnique({
+      where: { id: user.companyId },
+      select: { leaveCycleMode: true },
+    });
+    const isAnniversary = companyCfg?.leaveCycleMode === 'ANNIVERSARY';
+
+    if (
+      !isAnniversary &&
+      leave.type === 'ANNUAL' &&
+      leave.status === 'APPROVED' &&
+      !leave.carriedFromLeaveId
+    ) {
+      const emp = await this.prisma.employee.findUnique({
+        where: { id: leave.employeeId },
+        select: { leaveCycleStartDate: true },
+      });
+      const wasClosingCycle =
+        emp?.leaveCycleStartDate &&
+        new Date(emp.leaveCycleStartDate).getTime() ===
+          new Date(leave.endDate).getTime();
+      if (wasClosingCycle) {
+        await this.prisma.employee.update({
+          where: { id: leave.employeeId },
+          data: { leaveCycleStartDate: newEnd },
+        });
+      }
+    }
+
+    // ✅ Congé annuel pris en partie : si le nombre de jours ouvrables change
+    // avec les nouvelles dates, le reste à prendre est recalculé (la date du
+    // prochain départ, elle, ne bouge pas).
+    let remainderFix: {
+      remainderBaseDays: number | null;
+      remainderSeniorityDays: number | null;
+    } | null = null;
+    if (
+      delta !== 0 &&
+      leave.status === 'APPROVED' &&
+      leave.type === 'ANNUAL' &&
+      !leave.carriedFromLeaveId &&
+      leave.debitedCycleStartDate &&
+      (leave.remainderBaseDays != null || leave.remainderSeniorityDays != null)
+    ) {
+      const balRow = await this.prisma.leaveBalance.findUnique({
+        where: {
+          employeeId_cycleStartDate: {
+            employeeId: leave.employeeId,
+            cycleStartDate: leave.debitedCycleStartDate,
+          },
+        },
+      });
+      if (balRow) {
+        const split = splitLeaveDays({
+          baseEntitled: CONGO_LEAVE.ANNUAL_DAYS,
+          seniorityEntitled: Number(balRow.seniorityDays ?? 0),
+          // le solde a déjà été ajusté de `delta` plus haut
+          takenBefore: Math.max(0, Number(balRow.annualTaken) - newWorkingDays),
+          requestedDays: newWorkingDays,
+        });
+        remainderFix =
+          split.remainderTotal > 0
+            ? {
+                remainderBaseDays: split.remainderBase,
+                remainderSeniorityDays: split.remainderSeniority,
+              }
+            : { remainderBaseDays: null, remainderSeniorityDays: null };
+      }
+    }
+
     const updated = await this.prisma.leave.update({
       where: { id },
       data: {
         startDate: newStart,
         endDate: newEnd,
         daysCount: newWorkingDays,
+        ...(remainderFix ?? {}),
+        ...(remainderFix &&
+        remainderFix.remainderBaseDays == null &&
+        remainderFix.remainderSeniorityDays == null
+          ? { nextDepartureDate: null }
+          : {}),
       },
     });
 
@@ -2076,6 +2673,7 @@ export class LeavesService {
       reason?: string;
       extraDaysGranted?: number;
       resumptionNote?: string;
+      nextDepartureDate?: string;
     },
     userId: string,
     overrideCompanyId?: string,
@@ -2149,6 +2747,75 @@ export class LeavesService {
       }
     }
 
+    // ✅ Jours restants d'un congé ANNUAL pris en partie : recalculés dès que
+    // les dates/le type changent (le solde déjà débité contient ce congé
+    // lui-même, donc on le retire pour retrouver "ce qui était pris avant").
+    let remainderUpdate: {
+      remainderBaseDays: number | null;
+      remainderSeniorityDays: number | null;
+      nextDepartureDate: Date | null;
+    } | null = null;
+    if (!leave.carriedFromLeaveId && leave.status === 'APPROVED') {
+      if (newType !== 'ANNUAL') {
+        remainderUpdate = {
+          remainderBaseDays: null,
+          remainderSeniorityDays: null,
+          nextDepartureDate: null,
+        };
+      } else if (leave.debitedCycleStartDate) {
+        const balRow = await this.prisma.leaveBalance.findUnique({
+          where: {
+            employeeId_cycleStartDate: {
+              employeeId: leave.employeeId,
+              cycleStartDate: leave.debitedCycleStartDate,
+            },
+          },
+        });
+        if (balRow) {
+          // Si c'était un anticipé converti en annuel, son ancien nombre de
+          // jours était déjà dans annualTaken, comme pour un annuel.
+          const takenBefore = Math.max(
+            0,
+            Number(balRow.annualTaken) - oldWorkingDays,
+          );
+          const split = splitLeaveDays({
+            baseEntitled: CONGO_LEAVE.ANNUAL_DAYS,
+            seniorityEntitled: Number(balRow.seniorityDays ?? 0),
+            takenBefore,
+            requestedDays: newWorkingDays,
+          });
+          if (split.remainderTotal > 0) {
+            const nextDate = dto.nextDepartureDate
+              ? new Date(dto.nextDepartureDate)
+              : leave.nextDepartureDate
+                ? new Date(leave.nextDepartureDate)
+                : null;
+            if (!nextDate) {
+              throw new BadRequestException(
+                `Il restera ${split.remainderTotal}j à prendre plus tard — merci d'indiquer la date du prochain départ pour pouvoir le rappeler.`,
+              );
+            }
+            if (isNaN(nextDate.getTime()) || nextDate <= newEnd) {
+              throw new BadRequestException(
+                'La date du prochain départ doit être postérieure à la fin de ce congé.',
+              );
+            }
+            remainderUpdate = {
+              remainderBaseDays: split.remainderBase,
+              remainderSeniorityDays: split.remainderSeniority,
+              nextDepartureDate: nextDate,
+            };
+          } else {
+            remainderUpdate = {
+              remainderBaseDays: null,
+              remainderSeniorityDays: null,
+              nextDepartureDate: null,
+            };
+          }
+        }
+      }
+    }
+
     const delta = newWorkingDays - oldWorkingDays;
     const isAnnualFamily = ['ANNUAL', 'ANNUAL_ANTICIPATED'].includes(
       leave.type,
@@ -2194,10 +2861,25 @@ export class LeavesService {
     let plannedPayrollMonth = leave.plannedPayrollMonth;
     let plannedPayrollYear = leave.plannedPayrollYear;
     let payrollIndemnityDays = leave.payrollIndemnityDays;
+
+    // ✅ RÈGLE (demande explicite) : l'indemnité ne se paie qu'UNE fois par
+    // cycle. Le mois de paie n'est donc PAS déplacé avec les dates quand :
+    //  - l'indemnité a déjà été versée (paidIndemnityAmount renseigné) —
+    //    sinon elle serait payée une 2e fois sur le nouveau mois ;
+    // "Modifier" = correction d'une erreur de saisie : tout est recalculé.
+    // Pour simplement décaler un départ (sans toucher à la paie ni au
+    // cycle), c'est "Repousser" (rescheduleLeave).
+    const keepPayrollAnchor =
+      leave.type === 'ANNUAL' &&
+      newType === 'ANNUAL' &&
+      leave.plannedPayrollMonth != null &&
+      leave.paidIndemnityAmount != null;
+
     if (
       leave.status === 'APPROVED' &&
       (typeChanged || datesChanged) &&
-      !leave.carriedFromLeaveId
+      !leave.carriedFromLeaveId &&
+      !keepPayrollAnchor
     ) {
       if (newType === 'ANNUAL') {
         plannedPayrollMonth =
@@ -2228,7 +2910,13 @@ export class LeavesService {
 
     const extraDaysGranted =
       newType === 'ANNUAL'
-        ? (dto.extraDaysGranted ?? leave.extraDaysGranted)
+        ? (dto.extraDaysGranted ??
+          (remainderUpdate
+            ? remainderUpdate.remainderSeniorityDays &&
+              remainderUpdate.remainderSeniorityDays > 0
+              ? remainderUpdate.remainderSeniorityDays
+              : null
+            : leave.extraDaysGranted))
         : null;
     const resumptionNote =
       newType === 'ANNUAL' ? (dto.resumptionNote ?? leave.resumptionNote) : null;
@@ -2246,6 +2934,7 @@ export class LeavesService {
         plannedPayrollMonth,
         plannedPayrollYear,
         payrollIndemnityDays,
+        ...(remainderUpdate ?? {}),
       },
     });
 
@@ -2779,23 +3468,36 @@ export class LeavesService {
       realLeaves.map(async (leave) => {
         let indemnity = 0;
         let monthsKnown: number | null = null;
+        let currentMonthEstimated = false;
         try {
           const totalDays = leave.payrollIndemnityDays
             ? Number(leave.payrollIndemnityDays)
             : Number(leave.daysCount);
+          // ✅ Aperçu : le brut propre du mois de paie n'est pas encore connu —
+          // estimé (jamais vide) et signalé comme tel. Le vrai montant est
+          // recalculé par la génération de la paie avec le vrai brut du mois.
           const result = await this.calculateLeaveIndemnity(
             leave.employeeId,
             totalDays,
             companyId,
             month,
             year,
+            undefined,
+            { estimateCurrentMonth: true },
           );
           indemnity = result.indemnity;
           monthsKnown = result.monthsUsed;
+          currentMonthEstimated = !!result.currentMonthEstimated;
         } catch {
           /* employé sans historique de paie suffisant — 0 par défaut */
         }
-        return { ...leave, indemnityAmount: indemnity, monthsKnown, isTheoretical: false };
+        return {
+          ...leave,
+          indemnityAmount: indemnity,
+          monthsKnown,
+          currentMonthEstimated,
+          isTheoretical: false,
+        };
       }),
     );
 
@@ -2822,6 +3524,7 @@ export class LeavesService {
         .map(async (r) => {
           let indemnity = 0;
           let monthsKnown: number | null = null;
+          let currentMonthEstimated = false;
           try {
             const result = await this.calculateLeaveIndemnity(
               r.employeeId,
@@ -2829,9 +3532,12 @@ export class LeavesService {
               companyId,
               month,
               year,
+              undefined,
+              { estimateCurrentMonth: true },
             );
             indemnity = result.indemnity;
             monthsKnown = result.monthsUsed;
+            currentMonthEstimated = !!result.currentMonthEstimated;
           } catch {
             /* employé sans historique de paie suffisant — 0 par défaut */
           }
@@ -2848,6 +3554,7 @@ export class LeavesService {
             isManual: false,
             indemnityAmount: indemnity,
             monthsKnown,
+            currentMonthEstimated,
           };
         }),
     );
@@ -2885,20 +3592,7 @@ export class LeavesService {
     companyId: string,
     periodStart: Date,
     periodEnd: Date,
-  ): Promise<
-    Array<{
-      id: string;
-      employeeId: string;
-      employee: any;
-      type: string;
-      startDate: Date;
-      endDate: Date;
-      daysCount: number;
-      status: string;
-      isTheoretical: boolean;
-      isManual: boolean;
-    }>
-  > {
+  ): Promise<DepartureRowOut[]> {
     // 🆕 Un seul fetch pour toute l'entreprise (pas par employé) — le mode
     // de cycle est une config entreprise, pas individuelle.
     const companyForMode = await this.prisma.company.findUnique({
@@ -2934,18 +3628,11 @@ export class LeavesService {
 
     const realEmployeeIds = new Set(realLeaves.map((l) => l.employeeId));
 
-    const rows: Array<{
-      id: string;
-      employeeId: string;
-      employee: any;
-      type: string;
-      startDate: Date;
-      endDate: Date;
-      daysCount: number;
-      status: string;
-      isTheoretical: boolean;
-      isManual: boolean;
-    }> = realLeaves.map((l) => ({
+    // ✅ Jours encore à prendre pour les congés ANNUAL pris en partie (affichés
+    // en badge sur la ligne — l'admin voit d'un coup d'œil ce qu'il reste).
+    const leftMap = await this.computeRemainderLeft(realLeaves);
+
+    const rows: DepartureRowOut[] = realLeaves.map((l) => ({
       id: l.id,
       employeeId: l.employeeId,
       employee: l.employee,
@@ -2956,7 +3643,61 @@ export class LeavesService {
       status: l.status,
       isTheoretical: false,
       isManual: l.isManual,
+      remainderLeft: leftMap.get(l.id) ?? null,
+      nextDepartureDate: l.nextDepartureDate ?? null,
     }));
+
+    // 1bis) RAPPELS — jours restants d'un congé annuel pris en partie dont la
+    //    date de prochain départ tombe ce mois-ci. Pas d'indemnité (déjà payée
+    //    au 1er départ) : simple reprise de repos, signalée comme telle.
+    const remainderSources = await this.prisma.leave.findMany({
+      where: {
+        companyId,
+        status: 'APPROVED',
+        type: 'ANNUAL',
+        carriedFromLeaveId: null,
+        nextDepartureDate: { gte: periodStart, lte: periodEnd },
+        employee: { status: 'ACTIVE' },
+        OR: [
+          { remainderBaseDays: { gt: 0 } },
+          { remainderSeniorityDays: { gt: 0 } },
+        ],
+      },
+      include: { employee: { select: employeeSelect } },
+    });
+    const remainderLeftMap = await this.computeRemainderLeft(remainderSources);
+    for (const src of remainderSources) {
+      const left = remainderLeftMap.get(src.id);
+      if (!left || left.total <= 0 || !src.nextDepartureDate) continue;
+      let endD: Date;
+      try {
+        const calc = await WorkingDays.calculateReturnDate(
+          this.prisma,
+          companyId,
+          new Date(src.nextDepartureDate),
+          Math.ceil(left.total),
+        );
+        endD = new Date(calc.lastLeaveDay);
+      } catch {
+        continue;
+      }
+      rows.push({
+        id: `remainder-${src.id}`,
+        employeeId: src.employeeId,
+        employee: src.employee,
+        type: 'ANNUAL',
+        startDate: src.nextDepartureDate,
+        endDate: endD,
+        daysCount: left.total,
+        status: 'RESTE_A_PRENDRE',
+        isTheoretical: true,
+        isManual: false,
+        isRemainder: true,
+        sourceLeaveId: src.id,
+        remainderLeft: left,
+        nextDepartureDate: src.nextDepartureDate,
+      });
+    }
 
     // 2) Départs théoriques — employés actifs, cycle qui boucle ce mois-ci,
     //    pas déjà couverts par un congé validé trouvé à l'étape 1
@@ -3100,14 +3841,25 @@ export class LeavesService {
           rows.reduce((s, r) => s + Number(r.daysCount || 0), 0),
         );
 
+        const remainderNames = rows
+          .filter((r) => r.isRemainder)
+          .map((r) =>
+            `${r.employee?.firstName ?? ''} ${r.employee?.lastName ?? ''}`.trim(),
+          )
+          .filter(Boolean);
+        const remainderNote =
+          remainderNames.length > 0
+            ? ` Reprise de jours restants (déjà indemnisés, sans paie) : ${remainderNames.join(', ')}.`
+            : '';
+
         const title =
           mode === 'HEADS_UP'
             ? `📅 ${rows.length} départ(s) en congé prévu(s) en ${monthLabel}`
             : `⚠️ ${rows.length} départ(s) de ${monthLabel} pas encore planifié(s)`;
         const message =
           mode === 'HEADS_UP'
-            ? `${names.join(', ')} — ${totalDays}j au total. Préparez leurs indemnités sur la paie de ce mois-ci et planifiez officiellement leur départ.`
-            : `${names.join(', ')} n'ont toujours pas de congé réellement planifié pour ${monthLabel} — la clôture de paie approche.`;
+            ? `${names.join(', ')} — ${totalDays}j au total. Préparez leurs indemnités sur la paie de ce mois-ci et planifiez officiellement leur départ.${remainderNote}`
+            : `${names.join(', ')} n'ont toujours pas de congé réellement planifié pour ${monthLabel} — la clôture de paie approche.${remainderNote}`;
 
         await this.notificationsService.createForGroup(
           company.id,

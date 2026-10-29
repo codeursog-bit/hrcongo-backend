@@ -145,3 +145,80 @@ export function resolveCycleWindow(
 
   return { cycleStartDate, cycleEndDate };
 }
+// ============================================================================
+// 🧮 RÉPARTITION BASE / ANCIENNETÉ D'UN CONGÉ ANNUEL (planification RH)
+// Règle (identique à la lettre d'autorisation) : les jours de BASE (26j) sont
+// consommés en premier, l'ancienneté seulement ensuite. Les congés anticipés
+// déjà pris dans le cycle (`takenBefore`) consomment eux aussi la base d'abord.
+// Fonction pure — aucune dépendance, testable seule.
+// ============================================================================
+export interface LeaveDaysSplit {
+  /** Jours de base encore disponibles avant ce congé. */
+  availableBase: number;
+  /** Jours d'ancienneté encore disponibles avant ce congé. */
+  availableSeniority: number;
+  availableTotal: number;
+  /** Jours de ce congé imputés sur la base / sur l'ancienneté. */
+  usedBase: number;
+  usedSeniority: number;
+  /** Ce qu'il restera à prendre plus tard (jamais négatif). */
+  remainderBase: number;
+  remainderSeniority: number;
+  remainderTotal: number;
+  /** Jours demandés au-delà du droit disponible (0 si dans le droit). */
+  excessDays: number;
+}
+
+const round1 = (n: number) => Math.round(n * 10) / 10;
+
+export function splitLeaveDays(input: {
+  baseEntitled: number;
+  seniorityEntitled: number;
+  takenBefore: number;
+  requestedDays: number;
+}): LeaveDaysSplit {
+  const base = Math.max(0, input.baseEntitled);
+  const sen = Math.max(0, input.seniorityEntitled);
+  const taken = Math.max(0, input.takenBefore);
+  const requested = Math.max(0, input.requestedDays);
+
+  const availableBase = Math.max(0, base - taken);
+  const availableSeniority = Math.max(0, sen - Math.max(0, taken - base));
+
+  const usedBase = Math.min(requested, availableBase);
+  const usedSeniority = Math.min(requested - usedBase, availableSeniority);
+
+  const remainderBase = availableBase - usedBase;
+  const remainderSeniority = availableSeniority - usedSeniority;
+
+  return {
+    availableBase: round1(availableBase),
+    availableSeniority: round1(availableSeniority),
+    availableTotal: round1(availableBase + availableSeniority),
+    usedBase: round1(usedBase),
+    usedSeniority: round1(usedSeniority),
+    remainderBase: round1(remainderBase),
+    remainderSeniority: round1(remainderSeniority),
+    remainderTotal: round1(remainderBase + remainderSeniority),
+    excessDays: round1(requested - usedBase - usedSeniority),
+  };
+}
+
+/**
+ * Applique `consumedDays` (rattrapages déjà pris/en attente) sur un reliquat
+ * base+ancienneté : la base est consommée en premier, comme partout ailleurs.
+ */
+export function applyConsumedToRemainder(
+  remainderBase: number,
+  remainderSeniority: number,
+  consumedDays: number,
+): { base: number; seniority: number; total: number } {
+  const fromBase = Math.min(Math.max(0, consumedDays), remainderBase);
+  const fromSen = Math.min(
+    Math.max(0, consumedDays) - fromBase,
+    remainderSeniority,
+  );
+  const base = round1(remainderBase - fromBase);
+  const seniority = round1(remainderSeniority - fromSen);
+  return { base, seniority, total: round1(base + seniority) };
+}

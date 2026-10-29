@@ -355,6 +355,8 @@ export class LeavesBalanceService {
       cycleStartDate,
       cycleEndDate,
       totalEntitled,
+      // ✅ AJOUT (planification) : exposé pour répartir base/ancienneté.
+      seniorityDays,
       annualTaken,
       projectedRemaining: Math.round((totalEntitled - annualTaken) * 10) / 10,
     };

@@ -58,6 +58,52 @@ export class LeavesController {
   }
 
   /**
+   * Aperçu de planification (RH) : droit restant (base + ancienneté), date
+   * de retour calculée automatiquement et jours qui resteront à prendre.
+   * ⚠️ Route à segment fixe — doit rester AVANT @Get(':id').
+   */
+  @Get('planning-preview')
+  @UseGuards(RolesGuard)
+  @Roles('ADMIN', 'HR_MANAGER', 'SUPER_ADMIN')
+  getPlanningPreview(
+    @Query('employeeId') employeeId: string,
+    @Query('startDate') startDate: string,
+    @Query('days') days: string | undefined,
+    @Query('endDate') endDate: string | undefined,
+    @Query('excludeLeaveId') excludeLeaveId: string | undefined,
+    @Query('carriedFromLeaveId') carriedFromLeaveId: string | undefined,
+    @Request() req,
+    @Query('companyId') companyId?: string,
+  ) {
+    return this.leavesService.getPlanningPreview(
+      {
+        employeeId,
+        startDate,
+        days: days ? parseFloat(days) : undefined,
+        endDate: endDate || undefined,
+        excludeLeaveId: excludeLeaveId || undefined,
+        carriedFromLeaveId: carriedFromLeaveId || undefined,
+      },
+      req.user.userId,
+      companyId,
+    );
+  }
+
+  /**
+   * Employés qui ont pris leur congé annuel EN PARTIE et dont il reste des
+   * jours à prendre (indépendant du solde). Réservé RH/Admin.
+   */
+  @Get('pending-remainders')
+  @UseGuards(RolesGuard)
+  @Roles('ADMIN', 'HR_MANAGER', 'SUPER_ADMIN')
+  getPendingRemainders(
+    @Request() req,
+    @Query('companyId') companyId?: string,
+  ) {
+    return this.leavesService.getPendingRemainders(req.user.userId, companyId);
+  }
+
+  /**
    * Vue combinée congé + absence pour la page "Gestion des congés"
    * (KPI + liste filtrable par mois/type/sous-type/statut).
    */
@@ -209,9 +255,11 @@ export class LeavesController {
       reason?: string;
       extraDaysGranted?: number;
       resumptionNote?: string;
-      // ✅ Rattrapage d'un reliquat de retour anticipé — voir
-      // createCarryoverLeave() côté service.
+      // ✅ Rattrapage d'un reliquat (retour anticipé OU congé annuel pris en
+      // partie) — voir createCarryoverLeave() côté service.
       carriedFromLeaveId?: string;
+      // Date du prochain départ (jours restants d'un congé annuel partiel).
+      nextDepartureDate?: string;
     },
     @Request() req,
     @Query('companyId') companyId?: string,
@@ -643,6 +691,7 @@ export class LeavesController {
       reason?: string;
       extraDaysGranted?: number;
       resumptionNote?: string;
+      nextDepartureDate?: string;
     },
     @Request() req,
     @Query('companyId') companyId?: string,

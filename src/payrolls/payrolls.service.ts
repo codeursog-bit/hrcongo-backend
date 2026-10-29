@@ -2084,8 +2084,22 @@ export class PayrollsService {
       Number(ytdAgg._sum.employerCustomTaxTotal ?? 0) +
       carryOverChargesPat;
 
-    // ── Base congé = ytd brut / 12 (méthode 1/12e Congo) ───────────────────
-    const baseConge = ytdGross > 0 ? Math.round(ytdGross / 12) : 0;
+    // ── Base congé ────────────────────────────────────────────────────────
+    // ✅ CORRECTIF (demande explicite) : sur le bulletin du mois où l'indemnité
+    // de congé est PAYÉE, la base congé est exactement le montant de
+    // l'indemnité versée (lignes "Indemnité de congé" + "Congé supplémentaire"
+    // du bulletin) — plus le brut cumulé ÷ 12, qui n'a aucun rapport avec ce
+    // qui a réellement été payé. Les autres mois gardent le repère 1/12e du
+    // cumul (méthode Congo).
+    const indemnityPaidOnPayslip = (payroll.items ?? [])
+      .filter((i: any) => ['INDEM_CONGE', 'CONGE_SUPP'].includes(i.code))
+      .reduce((sum: number, i: any) => sum + Number(i.amount ?? 0), 0);
+    const paysLeaveIndemnity = indemnityPaidOnPayslip > 0;
+    const baseConge = paysLeaveIndemnity
+      ? Math.round(indemnityPaidOnPayslip)
+      : ytdGross > 0
+        ? Math.round(ytdGross / 12)
+        : 0;
 
     // ── Droits congés — SNAPSHOT depuis les PayrollItems (immuable) ──────────
     // ✅ On lit d'abord les items INFO LEAVE_* créés à la génération du bulletin.
@@ -2124,6 +2138,9 @@ export class PayrollsService {
 
     return {
       ...payroll,
+      // ✅ Mois où l'indemnité de congé est payée : la case « Base Congé »
+      // (ligne Mensuel) affiche aussi le montant exact de l'indemnité versée.
+      ...(paysLeaveIndemnity ? { baseConge } : {}),
       ytd: {
         grossSalary: ytdGross,
         netImposable: ytdNetImpos,

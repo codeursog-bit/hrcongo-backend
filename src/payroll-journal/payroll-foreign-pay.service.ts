@@ -110,11 +110,6 @@ export class PayrollForeignPayService {
         'La paie du Congo est calculée par la paie normale : saisissez ici uniquement la rémunération perçue à l\'étranger.',
       );
     }
-    if (dto.netAmount > dto.grossAmount) {
-      throw new BadRequestException(
-        'Le net à payer ne peut pas dépasser le brut.',
-      );
-    }
 
     const data = {
       countryName: dto.countryName.trim(),

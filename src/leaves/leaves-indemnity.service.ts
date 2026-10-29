@@ -88,6 +88,12 @@ export class LeavesIndemnityService {
     // mois précis (base + heures sup + primes — JAMAIS l'indemnité
     // elle-même, ce qui recréerait une boucle) pour compléter le 12e mois.
     currentMonthWorkGross?: number,
+    // ✅ Aperçu (page "planning à payer") : le bulletin du mois de paie
+    // n'existe pas encore et son brut propre n'est pas connu — on l'estime
+    // (dernier brut connu du cycle, sinon salaire de base) pour que le
+    // montant affiché ne soit jamais vide. Jamais utilisé pour un vrai
+    // bulletin (le générateur transmet toujours le vrai brut du mois).
+    opts?: { estimateCurrentMonth?: boolean },
   ): Promise<{
     indemnity: number;
     basedOnAverage: number;
@@ -95,6 +101,7 @@ export class LeavesIndemnityService {
     cyclesCount: number;
     method: 'AVERAGE_12M' | 'CURRENT_SALARY';
     usedOpeningCumulative: boolean;
+    currentMonthEstimated?: boolean;
   }> {
     const refYear = anchorYear ?? new Date().getFullYear();
     const refMonth = anchorMonth ?? new Date().getMonth() + 1;
@@ -160,7 +167,9 @@ export class LeavesIndemnityService {
       const last = await this.prisma.payroll.findFirst({
         where: {
           employeeId,
-          status: { in: ['VALIDATED', 'PAID'] },
+          // ✅ DRAFT inclus : un bulletin généré mais pas encore validé reste
+          // le dernier brut connu (jamais CANCELLED).
+          status: { in: ['DRAFT', 'VALIDATED', 'PAID'] },
           OR: [
             { year: { lt: refYear } },
             { year: refYear, month: { lt: refMonth } },
@@ -182,6 +191,7 @@ export class LeavesIndemnityService {
         cyclesCount: 1,
         method,
         usedOpeningCumulative: false,
+        currentMonthEstimated: false,
       };
     }
 
@@ -202,7 +212,12 @@ export class LeavesIndemnityService {
           }
         : { employeeId, type: 'ANNUAL', status: 'APPROVED' },
       orderBy: { endDate: 'desc' },
-      select: { startDate: true, endDate: true },
+      select: {
+        startDate: true,
+        endDate: true,
+        plannedPayrollMonth: true,
+        plannedPayrollYear: true,
+      },
     });
 
     // 🐛 CORRECTIF (trouvé en discussion produit) : en ANNIVERSARY, le
@@ -215,8 +230,27 @@ export class LeavesIndemnityService {
     // dans l'année suivante par rapport au bulletin en cours de génération,
     // désactivant l'injection du mois courant). Utiliser `startDate` remet
     // le cycle en phase : [Jan1, Dec31] au lieu de [Fev1, Jan31 suivant].
+    // ✅ RÈGLE (demande explicite) : en ANNIVERSARY, un congé REPOUSSÉ ne
+    // casse jamais le cycle — l'employé part chaque année à son mois
+    // d'anniversaire, et son indemnité reste payée au mois prévu. On ancre
+    // donc le cycle suivant sur le mois PLANIFIÉ (= mois qui suit le mois de
+    // paie de l'indemnité, ex. paie de décembre → cycle qui démarre en
+    // janvier), jamais sur la date réelle de départ, qui peut avoir été
+    // décalée (congé de janvier pris en février). Repli : date réelle.
+    const anniversaryAnchor =
+      cycleMode === 'ANNIVERSARY' &&
+      lastAnnualLeave?.plannedPayrollMonth &&
+      lastAnnualLeave?.plannedPayrollYear
+        ? new Date(
+            lastAnnualLeave.plannedPayrollYear,
+            lastAnnualLeave.plannedPayrollMonth, // mois de paie + 1 (0-indexé)
+            1,
+          )
+        : null;
     const sinceDateRaw =
-      cycleMode === 'ANNIVERSARY' && lastAnnualLeave?.startDate
+      cycleMode === 'ANNIVERSARY' && anniversaryAnchor
+        ? anniversaryAnchor
+        : cycleMode === 'ANNIVERSARY' && lastAnnualLeave?.startDate
         ? new Date(
             lastAnnualLeave.startDate.getFullYear(),
             lastAnnualLeave.startDate.getMonth(),
@@ -283,6 +317,7 @@ export class LeavesIndemnityService {
     let totalIndemnity = 0;
     let totalMonthsUsed = 0;
     let usedOpeningCumulative = false;
+    let currentMonthEstimated = false;
     let remainingDays = daysCount; // ✅ jamais dépasser le nombre de jours réellement demandés
 
     for (let i = 0; i < cycles.length; i++) {
@@ -302,10 +337,14 @@ export class LeavesIndemnityService {
         : 0;
       const daysPerCycle = CONGO_LEAVE.ANNUAL_DAYS + cycleSeniorityDays;
 
-      const history = await this.prisma.payroll.findMany({
+      const historyRaw = await this.prisma.payroll.findMany({
         where: {
           employeeId,
-          status: { in: ['VALIDATED', 'PAID'] },
+          // ✅ CORRECTIF (bug "0/12 mois connus" sur l'onglet congé payé) :
+          // les bulletins sont créés en DRAFT par le générateur — ne compter
+          // que VALIDATED/PAID faisait disparaître tout bulletin généré mais
+          // pas encore validé. Seul CANCELLED est exclu.
+          status: { in: ['DRAFT', 'VALIDATED', 'PAID'] },
           AND: [
             {
               OR: [
@@ -325,8 +364,75 @@ export class LeavesIndemnityService {
           ],
         },
         orderBy: [{ year: 'asc' }, { month: 'asc' }],
-        select: { grossSalary: true, month: true, year: true },
+        select: {
+          grossSalary: true,
+          month: true,
+          year: true,
+          // Lignes d'indemnité de congé éventuellement déjà présentes sur ce
+          // bulletin (cas d'un recalcul) — à retirer du brut pour ne jamais
+          // recréer la boucle "indemnité calculée sur un brut qui contient
+          // déjà l'indemnité".
+          items: {
+            where: { code: { in: ['INDEM_CONGE', 'CONGE_SUPP'] } },
+            select: { amount: true },
+          },
+        },
       });
+      const history = historyRaw.map((p: any) => {
+        const indemInside = (p.items ?? []).reduce(
+          (sum: number, it: any) => sum + Number(it.amount ?? 0),
+          0,
+        );
+        const isAnchorMonth = p.month === refMonth && p.year === refYear;
+        return {
+          grossSalary: isAnchorMonth
+            ? Math.max(0, Number(p.grossSalary) - indemInside)
+            : Number(p.grossSalary),
+          month: p.month as number,
+          year: p.year as number,
+        };
+      });
+
+      // ✅ MOIS DE PAIE = LE 12e MOIS DU CYCLE (règle confirmée) : 11 bruts
+      // passés + le brut PROPRE du mois où l'indemnité est payée (primes et
+      // heures sup comprises, JAMAIS l'indemnité elle-même) = 12 bruts, ÷ 12.
+      // Le bulletin de ce mois n'existe pas encore (ou existe en brouillon,
+      // indemnité comprise) : on ne le lit donc JAMAIS tel quel dans
+      // l'historique — il est remplacé par UN seul brut propre injecté
+      // (jamais de 13e mois).
+      const isLastCycle = i === cycles.length - 1;
+      const anchorStart = new Date(refYear, refMonth - 1, 1);
+      const anchorInWindow = isLastCycle && anchorStart >= from && anchorStart <= to;
+      const isAfterAnchor = (p: { month: number; year: number }) =>
+        p.year > refYear || (p.year === refYear && p.month > refMonth);
+      const historyBase = anchorInWindow
+        ? history.filter(
+            (p) =>
+              !(p.month === refMonth && p.year === refYear) && !isAfterAnchor(p),
+          )
+        : history;
+      const anchorRowGross = history.find(
+        (p) => p.month === refMonth && p.year === refYear,
+      )?.grossSalary;
+
+      let injectedGross: number | null = null;
+      let currentMonthEstimatedHere = false;
+      if (anchorInWindow) {
+        if (typeof currentMonthWorkGross === 'number' && currentMonthWorkGross > 0) {
+          injectedGross = currentMonthWorkGross; // vrai brut propre, calculé par la paie
+        } else if (typeof anchorRowGross === 'number' && anchorRowGross > 0) {
+          injectedGross = anchorRowGross; // bulletin du mois déjà en base, indemnité retirée
+        } else if (opts?.estimateCurrentMonth) {
+          const lastKnown = historyBase.length
+            ? historyBase[historyBase.length - 1].grossSalary
+            : 0;
+          const est = lastKnown > 0 ? lastKnown : fallbackGross;
+          if (est > 0) {
+            injectedGross = est;
+            currentMonthEstimatedHere = true;
+          }
+        }
+      }
 
       // 🆕 Mode ANNIVERSARY : substitution du/des mois de départ PASSÉS par
       // le montant d'indemnité déjà versé pour couvrir ce mois précis
@@ -406,10 +512,10 @@ export class LeavesIndemnityService {
       }
       const history_final =
         substitutedMonths.size === 0
-          ? history
+          ? historyBase
           : [
               // Mois réels NON substitués, tels quels.
-              ...history.filter(
+              ...historyBase.filter(
                 (p) => !substitutedMonths.has(`${p.year}-${p.month}`),
               ),
               // Mois substitués (réel remplacé par le montant d'indemnité,
@@ -419,26 +525,9 @@ export class LeavesIndemnityService {
               })),
             ];
 
-      // ✅ CORRECTIF ("le trou") : le dernier mois du cycle est justement le
-      // mois de paie en cours (celui qu'on est en train de générer) — son
-      // bulletin n'existe donc jamais encore en base à cet instant, et
-      // `history` ne peut structurellement pas le contenir. Si l'appelant
-      // nous a transmis le brut de travail de ce mois précis, on l'injecte
-      // ici comme un mois de plus, uniquement s'il n'est pas déjà présent
-      // (recalcul d'un bulletin déjà validé par ex.) et uniquement sur le
-      // DERNIER cycle (celui qui se termine au mois de la paie).
-      const isLastCycle = i === cycles.length - 1;
-      const anchorAlreadyInHistory = history.some(
-        (p) => p.month === refMonth && p.year === refYear,
-      );
-      const cycleEndsOnAnchorMonth =
-        to.getFullYear() === refYear && to.getMonth() === refMonth - 1;
-      const injectCurrentMonth =
-        isLastCycle &&
-        cycleEndsOnAnchorMonth &&
-        !anchorAlreadyInHistory &&
-        typeof currentMonthWorkGross === 'number' &&
-        currentMonthWorkGross > 0;
+      const injectCurrentMonth = injectedGross !== null;
+      const currentMonthGrossUsed = injectedGross ?? 0;
+      if (currentMonthEstimatedHere) currentMonthEstimated = true;
       const historyCount = history_final.length + (injectCurrentMonth ? 1 : 0);
 
       // ✅ CORRECTIF (règle confirmée) : on divise TOUJOURS par 12, jamais
@@ -457,7 +546,7 @@ export class LeavesIndemnityService {
       let avgBrut: number;
       const realTotal =
         history_final.reduce((s, p) => s + Number(p.grossSalary), 0) +
-        (injectCurrentMonth ? currentMonthWorkGross! : 0);
+        (injectCurrentMonth ? currentMonthGrossUsed : 0);
       const declaredOpeningMonths = openingStillEligible
         ? (emp?.openingCumulativeMonths ?? 0)
         : 0;
@@ -482,7 +571,7 @@ export class LeavesIndemnityService {
       }
       this.logger.log(
         `📎 Cycle ${i + 1}: ${history_final.length} bulletin(s) réel(s)` +
-          (injectCurrentMonth ? ` + 1 mois courant (${currentMonthWorkGross!.toLocaleString('fr-FR')} F, pas encore en base)` : '') +
+          (injectCurrentMonth ? ` + 1 mois de paie (${currentMonthGrossUsed.toLocaleString('fr-FR')} F${currentMonthEstimatedHere ? ', estimé' : ', brut propre hors indemnité'})` : '') +
           (openingMonthsUsed > 0 ? ` + ${openingMonthsUsed} mois de cumul d'onboarding` : '') +
           ` — ${monthsKnown}/12 mois connus, somme ÷ 12 = ${Math.round(avgBrut).toLocaleString('fr-FR')} F`,
       );
@@ -544,6 +633,7 @@ export class LeavesIndemnityService {
       cyclesCount: cycles.length,
       method,
       usedOpeningCumulative,
+      currentMonthEstimated,
     };
   }
 
