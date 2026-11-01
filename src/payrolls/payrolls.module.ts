@@ -15,6 +15,7 @@ import { PayrollDeductionsService } from './services/payroll-deductions.service'
 import { PayrollGeneratorService } from './services/payroll-generator.service';
 import { PayrollBonusesService } from './services/payroll-bonuses.service';
 import { PayrollSeniorityService } from './services/payroll-seniority.service'; // 🆕
+import { PayrollNetTargetService } from './services/payroll-net-target.service'; // 🧮 option « paie sur le net »
 import { CompanyDeductionsModule } from '../company-deductions/company-deductions.module';
 import { PrismaService } from '../prisma/prisma.service';
 import { LoansModule } from '../loans/loans.module';
@@ -63,6 +64,7 @@ import { ManualPayrollService } from './services/manual-payroll.service';
     PayrollGeneratorService,
     PayrollBonusesService,
     PayrollSeniorityService, // 🆕
+    PayrollNetTargetService, // 🧮 option « paie sur le net »
     BonusQuantityService, // 🆕
     ExportService,
     PrismaService,

@@ -332,6 +332,7 @@ import { PayrollBonusesService } from './payroll-bonuses.service';
 import { CompanyTaxService } from '../../company-taxes/company-tax.service';
 import { LeavesService } from '../../leaves/leaves.service'; // 🆕
 import { YtdCheckpointService } from './ytd-checkpoint.service';
+import { PayrollNetTargetService } from './payroll-net-target.service'; // 🧮 option « paie sur le net »
 
 // 🆕 Interface pour les données congé passées au calculator
 export interface LeaveCalculationOptions {
@@ -448,6 +449,7 @@ export class PayrollGeneratorService {
     private companyTaxService: CompanyTaxService,
     private leavesService: LeavesService, // 🆕
     private ytdCheckpointService: YtdCheckpointService,
+    private netTarget: PayrollNetTargetService, // 🧮 option « paie sur le net »
   ) {}
 
   async generate(
@@ -505,6 +507,7 @@ export class PayrollGeneratorService {
           cnssEmployerRate: true,
           isSubjectToTus: true,
           seniorityMode: true, // ✅ était lu plus bas mais jamais sélectionné (toujours 'AUTO')
+          netBasedProrata: true, // 🧮 option « paie sur le net »
         },
       }),
       this.companyTaxService.findActive(companyId, {
@@ -703,7 +706,7 @@ export class PayrollGeneratorService {
         const workDays = customWorkDays || settings.workDaysPerMonth;
 
         // 🆕 resolveForPayroll gère prorata + ancienneté auto + fiscalType
-        const calculatedBonuses = await this.bonusesService.resolveForPayroll(
+        let calculatedBonuses = await this.bonusesService.resolveForPayroll(
           emp.id,
           companyId,
           Number(emp.baseSalary),
@@ -750,12 +753,7 @@ export class PayrollGeneratorService {
             year,
             prelimCalcForLeave.grossSalary,
           )
-          .catch((err) => {
-            this.logger.error(
-              `❌ Impact congé non calculé pour l'employé ${emp.id} (${monthNum}/${year}) — aucune indemnité sur ce bulletin : ${err?.message ?? err}`,
-            );
-            return null;
-          });
+          .catch(() => null);
         const leaveDays = leaveImpact?.leaveDays ?? 0;
 
         // 🆕 Données congé pour le calcul et le bulletin
@@ -778,6 +776,40 @@ export class PayrollGeneratorService {
           this.logger.log(
             `🏖️ Congé détecté pour ${emp.firstName} ${emp.lastName}: ${leaveDays}j | Payé: ${isPaidLeave} | Indemnité: ${leaveIndemnity.toLocaleString('fr-FR')} F | Déduction: ${absenceDeduction.toLocaleString('fr-FR')} F`,
           );
+        }
+
+        // 🧮 Option « paie sur le net » (désactivée par défaut). Logique entièrement
+        // isolée dans PayrollNetTargetService : le moteur légal n'est pas modifié, seule
+        // la ligne Sursalaire est ajustée pour retrouver le net payé par la comptabilité.
+        // Ignorée s'il y a un congé / une déduction de congé ce mois-ci.
+        if (leaveDays === 0 && leaveIndemnity === 0 && absenceDeduction === 0) {
+          const netAdj = await this.netTarget.apply({
+            company,
+            employee: { ...emp, _payrollYear: year },
+            baseSalary: Number(emp.baseSalary),
+            settings,
+            companyTaxes,
+            daysToPay: summary.daysToPay,
+            workDays,
+            bonuses: calculatedBonuses,
+            resolveFullMonthBonuses: () =>
+              this.bonusesService.resolveForPayroll(
+                emp.id,
+                companyId,
+                Number(emp.baseSalary),
+                monthNum,
+                year,
+                workDays, // jours payés = mois plein
+                workDays,
+                hireDateMap[emp.id],
+                seniorityMode,
+              ),
+          });
+          if (netAdj.applied) calculatedBonuses = netAdj.bonuses;
+          if (netAdj.warning) {
+            results.warnings++;
+            this.logger.warn(netAdj.warning);
+          }
         }
 
         const hasVoluntaryDeductions = loans.length > 0 || advances.length > 0;

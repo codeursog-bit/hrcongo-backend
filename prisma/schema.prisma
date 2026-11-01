@@ -263,6 +263,7 @@ model Company {
   legalForm             String?   @db.VarChar(100) // "SARL", "SA"... — utilisé dans les contrats de prestation
   seniorityProrata      Boolean   @default(false)
   salaryProrataDisplay  Boolean   @default(false)
+  netBasedProrata       Boolean   @default(false)
   // Coordonnées
   address               String    @db.Text
   city                  String    @db.VarChar(100)

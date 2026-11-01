@@ -107,6 +107,10 @@ export class UpdateCompanyDto extends PartialType(CreateCompanyDto) {
   // « salaire plein + ligne Déduction absences ». Présentation SEULEMENT — les
   // données en base (SAL_BASE, ABS_DEDUCT, journal) ne changent pas. Défaut : non.
   @IsBoolean() @IsOptional() salaryProrataDisplay?: boolean;
+  // Paie sur le NET : le net du bulletin est recalé sur « net plein × jours ÷ jours
+  // théoriques » en ajustant UNIQUEMENT le sursalaire (calcul à l'envers). Option de
+  // flexibilité — le calcul légal par défaut n'est pas modifié. Défaut : non.
+  @IsBoolean() @IsOptional() netBasedProrata?: boolean;
   @IsString() @IsOptional() leaveConventionKey?: string;
 
   // 🆕 DOCUMENTS PERSONNALISÉS (ex. modèles client Orca)

@@ -770,6 +770,7 @@ import { resolveCycleWindow } from '../../leaves/leaves-common.util';
 import { YtdCheckpointService } from './ytd-checkpoint.service';
 import { AttendanceSummaryService } from '../../attendance/attendance-summary.service';
 import { PayrollBonusesService } from './payroll-bonuses.service';
+import { PayrollNetTargetService } from './payroll-net-target.service'; // 🧮 option « paie sur le net »
 import { resolveVerifiedCompanyId } from '../../common/resolve-verified-company.util';
 import {
   CompanyNotFoundException,
@@ -857,6 +858,7 @@ export class ManualPayrollService {
     // attribuées à l'employé en BDD (convention, ancienneté, primes récurrentes).
     private attendanceSummary: AttendanceSummaryService,
     private bonusesService: PayrollBonusesService,
+    private netTarget: PayrollNetTargetService, // 🧮 option « paie sur le net »
   ) {}
 
   // ✅ Jours réellement travaillés : si l'utilisateur a saisi un chiffre, on
@@ -996,6 +998,7 @@ export class ManualPayrollService {
           cnssEmployerRate: true,
           isSubjectToTus: true,
           seniorityMode: true,
+          netBasedProrata: true, // 🧮 option « paie sur le net »
         },
       }),
     ]);
@@ -1088,7 +1091,7 @@ export class ManualPayrollService {
     const eff100 = Number(dto.overtimeHours100 ?? 0);
 
     // ✅ Primes déjà attribuées à l'employé en BDD + celles tapées à la main
-    const calculatedBonuses = await this.mergeWithDbBonuses(
+    let calculatedBonuses = await this.mergeWithDbBonuses(
       dto.employeeId,
       companyId,
       effectiveBaseSalary,
@@ -1100,6 +1103,34 @@ export class ManualPayrollService {
       (company as any).seniorityMode ?? 'AUTO',
       this.buildCalculatedBonuses(dto.manualBonuses),
     );
+
+    // 🧮 Option « paie sur le net » (désactivée par défaut) — logique isolée dans
+    // PayrollNetTargetService ; seule la ligne Sursalaire est ajustée.
+    const netAdj = await this.netTarget.apply({
+      company,
+      employee: { ...employee, _payrollYear: dto.year },
+      baseSalary: effectiveBaseSalary,
+      settings,
+      companyTaxes,
+      daysToPay,
+      workDays: settings.workDaysPerMonth,
+      bonuses: calculatedBonuses,
+      resolveFullMonthBonuses: () =>
+        this.mergeWithDbBonuses(
+          dto.employeeId,
+          companyId,
+          effectiveBaseSalary,
+          dto.month,
+          dto.year,
+          settings.workDaysPerMonth, // jours payés = mois plein
+          settings.workDaysPerMonth,
+          (employee as any).hireDate ?? null,
+          (company as any).seniorityMode ?? 'AUTO',
+          this.buildCalculatedBonuses(dto.manualBonuses),
+        ),
+    });
+    if (netAdj.applied) calculatedBonuses = netAdj.bonuses;
+    if (netAdj.warning) this.logger.warn(netAdj.warning);
     const manualDeductionTotal = (dto.manualDeductions ?? []).reduce(
       (s, d) => s + (Number(d.amount) || 0),
       0,
@@ -1300,7 +1331,7 @@ export class ManualPayrollService {
     const absenceDays = Math.max(0, settings.workDaysPerMonth - daysToPay);
 
     // ✅ Primes déjà attribuées à l'employé en BDD + celles tapées à la main
-    const calculatedBonuses = await this.mergeWithDbBonuses(
+    let calculatedBonuses = await this.mergeWithDbBonuses(
       dto.employeeId,
       companyId,
       effectiveBaseSalary,
@@ -1312,6 +1343,34 @@ export class ManualPayrollService {
       (company as any).seniorityMode ?? 'AUTO',
       this.buildCalculatedBonuses(dto.manualBonuses),
     );
+
+    // 🧮 Option « paie sur le net » (désactivée par défaut) — logique isolée dans
+    // PayrollNetTargetService ; seule la ligne Sursalaire est ajustée.
+    const netAdj = await this.netTarget.apply({
+      company,
+      employee: { ...employee, _payrollYear: dto.year },
+      baseSalary: effectiveBaseSalary,
+      settings,
+      companyTaxes,
+      daysToPay,
+      workDays: settings.workDaysPerMonth,
+      bonuses: calculatedBonuses,
+      resolveFullMonthBonuses: () =>
+        this.mergeWithDbBonuses(
+          dto.employeeId,
+          companyId,
+          effectiveBaseSalary,
+          dto.month,
+          dto.year,
+          settings.workDaysPerMonth, // jours payés = mois plein
+          settings.workDaysPerMonth,
+          (employee as any).hireDate ?? null,
+          (company as any).seniorityMode ?? 'AUTO',
+          this.buildCalculatedBonuses(dto.manualBonuses),
+        ),
+    });
+    if (netAdj.applied) calculatedBonuses = netAdj.bonuses;
+    if (netAdj.warning) this.logger.warn(netAdj.warning);
     const manualDeductionTotal = (dto.manualDeductions ?? []).reduce(
       (s, d) => s + (Number(d.amount) || 0),
       0,
