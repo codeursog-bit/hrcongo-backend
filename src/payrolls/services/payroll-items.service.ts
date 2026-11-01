@@ -277,6 +277,22 @@ export class PayrollItemsService {
         // Ancienneté AUTO — base = salaire contractuel, rate = % décimal
         bonusBase = Number(emp.baseSalary);
         bonusRate = bonus._seniorityRate / 100;
+        // ✅ Prorata ACTIVÉ sur l'ancienneté (option entreprise) : Nombre = jours
+        // payés, déduits du montant versé ÷ montant plein × jours théoriques.
+        // Ex. 26 % de 770 771 = 200 400 plein ; 20 j → 154 154 → Nombre = 20.
+        // Prorata désactivé → isProratized = false → pas de Nombre (droit acquis).
+        const seniorityFull = Number(bonus._originalAmount);
+        if (
+          isDaySplitContract &&
+          theoWorkDays > 0 &&
+          bonus.isProratized &&
+          seniorityFull > 0
+        ) {
+          bonusQuantity = Math.min(
+            theoWorkDays,
+            round2((Number(bonus.amount) * theoWorkDays) / seniorityFull),
+          );
+        }
       } else if (
         isDaySplitContract &&
         theoWorkDays > 0 &&
@@ -305,6 +321,27 @@ export class PayrollItemsService {
         // Toutes les autres primes — lire directement depuis CalculatedBonus
         bonusBase = bonus.base != null ? Number(bonus.base) : null;
         bonusRate = bonus.rate != null ? Number(bonus.rate) : null;
+        // ✅ Prime en % proratisée aux jours (base + taux présents) : on garde
+        // base et taux, et on ajoute Nombre = jours payés (montant versé ÷
+        // montant plein × jours théoriques). Sans prorata → pas de Nombre.
+        if (
+          isDaySplitContract &&
+          theoWorkDays > 0 &&
+          bonus.isProratized &&
+          bonus.frequency !== 'ANNUAL' &&
+          bonusBase != null &&
+          bonusRate != null &&
+          bonusRate > 0 &&
+          bonusRate < 1
+        ) {
+          const full = Number(bonus._originalAmount) > 0 ? Number(bonus._originalAmount) : Number(bonus.amount);
+          if (full > 0) {
+            bonusQuantity = Math.min(
+              theoWorkDays,
+              round2((Number(bonus.amount) * theoWorkDays) / full),
+            );
+          }
+        }
       }
 
       items.push({
@@ -447,16 +484,12 @@ export class PayrollItemsService {
             label: tax.name,
             type: 'DEDUCTION',
             base: tax.base > 0 ? tax.base : null,
-            // ✅ FIX — avant ce patch, rate=1 était codé en dur dès que
-            // base > 0, pour TOUTES les taxes custom, y compris celles au
-            // pourcentage (ex: CAMU solidarité = 0,5%). Le bulletin
-            // affichait alors "1" au lieu du vrai taux. Maintenant : taxe
-            // à montant fixe (TOL...) → rate=1 (flag d'affichage, base
-            // affichée = montant) ; taxe au pourcentage (CAMU...) → le
-            // vrai taux (ex: 0.005), affiché "0,5" côté front.
-            rate: tax.baseType === 'FIXED'
-              ? (tax.base > 0 ? 1 : null)
-              : (tax.employeeRate ?? null),
+            // ✅ Taxe à montant fixe (TOL…) → AUCUN taux, AUCUN nombre : c'est
+            // déjà une valeur fixe (la base affichée = le montant). L'ancien
+            // drapeau rate=1 affichait un « 1 » trompeur sur le bulletin.
+            // Taxe au pourcentage (CAMU…) → le vrai taux (ex: 0.0227), affiché
+            // « 2,27% » côté front.
+            rate: tax.baseType === 'FIXED' ? null : (tax.employeeRate ?? null),
             quantity: null,
             amount: tax.employeeAmount,
             isTaxable: false,
@@ -648,13 +681,9 @@ export class PayrollItemsService {
             label: tax.name,
             type: 'EMPLOYER_COST',
             base: tax.base > 0 ? tax.base : null,
-            // ✅ FIX — même correction que côté salarié (§7) : rate était
-            // toujours null ici, donc aucune taxe custom patronale
-            // n'affichait de taux. Taxe à montant fixe → 1 (flag) ; taxe
-            // au pourcentage → le vrai taux (ex: employerRate).
-            rate: tax.baseType === 'FIXED'
-              ? (tax.base > 0 ? 1 : null)
-              : (tax.employerRate ?? null),
+            // ✅ Même règle que côté salarié (§7) : montant fixe → pas de taux ;
+            // pourcentage → le vrai taux (ex: employerRate).
+            rate: tax.baseType === 'FIXED' ? null : (tax.employerRate ?? null),
             quantity: null,
             empRate: null,
             empAmount: tax.employerAmount,

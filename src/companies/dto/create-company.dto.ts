@@ -130,6 +130,10 @@ export class CreateCompanyDto {
   @IsBoolean() @IsOptional() appliesSeniorityLeaveBonus?: boolean;
   // Prime d'ancienneté proratisée selon les jours travaillés (défaut : non)
   @IsBoolean() @IsOptional() seniorityProrata?: boolean;
+  // Bulletin : présentation du salaire de base proratisé (jours payés) au lieu de
+  // « salaire plein + ligne Déduction absences ». Présentation SEULEMENT — les
+  // données en base (SAL_BASE, ABS_DEDUCT, journal) ne changent pas. Défaut : non.
+  @IsBoolean() @IsOptional() salaryProrataDisplay?: boolean;
   @IsString() @IsOptional() leaveConventionKey?: string;
   @IsBoolean() @IsOptional() echelonReminderEnabled?: boolean;
 }
