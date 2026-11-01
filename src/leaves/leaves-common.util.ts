@@ -7,6 +7,7 @@
 // ============================================================================
 
 import { PrismaService } from '../prisma/prisma.service';
+import { CONGO_LEAVE } from './leaves.constants';
 import { CompanyNotFoundException } from '../exceptions/business.exceptions';
 import { resolveVerifiedCompanyId } from '../common/resolve-verified-company.util';
 
@@ -221,4 +222,24 @@ export function applyConsumedToRemainder(
   const base = round1(remainderBase - fromBase);
   const seniority = round1(remainderSeniority - fromSen);
   return { base, seniority, total: round1(base + seniority) };
+}
+
+/**
+ * Nombre de jours à INDEMNISER pour un congé annuel planifié : le droit
+ * COMPLET du cycle (26j + jours d'ancienneté), quel que soit le nombre de
+ * jours réellement pris (les jours restants ne sont que du repos).
+ *
+ * ⚠️ Ne jamais copier tel quel `LeaveBalance.annualEntitled` : la ligne de
+ * solde du cycle qui s'ouvre (ex: cycle du 10/10 consulté le 02/11) s'accumule
+ * mois par mois et vaut ~0 au début — copier ce 0 faisait tomber l'indemnité
+ * à 0 F et disparaître la ligne du bulletin. On prend donc toujours le plus
+ * grand entre ce qui est inscrit au solde et le droit plein 26j + ancienneté.
+ */
+export function fullCycleIndemnityDays(
+  entitled: unknown,
+  seniorityDays?: unknown,
+): number {
+  const e = Number(entitled ?? 0);
+  const s = Math.max(0, Number(seniorityDays ?? 0) || 0);
+  return Math.max(Number.isFinite(e) ? e : 0, CONGO_LEAVE.ANNUAL_DAYS + s);
 }

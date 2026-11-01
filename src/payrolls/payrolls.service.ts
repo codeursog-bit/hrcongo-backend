@@ -1600,7 +1600,12 @@ export class PayrollsService {
       // ✅ Charger l'impact congé — cohérence avec la génération batch
       this.leavesService
         .getLeaveImpactForPayroll(employeeId, monthNum, year, prelimCalc.grossSalary)
-        .catch(() => null),
+        .catch((err) => {
+          this.logger.error(
+            `❌ Impact congé non calculé pour l'employé ${employeeId} (${monthNum}/${year}) — aucune indemnité sur ce bulletin : ${err?.message ?? err}`,
+          );
+          return null;
+        }),
       // ✅ CORRECTIF (bug trouvé) : snapshot solde congés AU MOMENT de la
       // génération — lisait seulement le cycle le PLUS RÉCENT
       // (findFirst orderBy desc), donc sous-évalué pour un employé avec
@@ -3076,7 +3081,12 @@ export class PayrollsService {
       // ✅ Charger l'impact congé — cohérence avec la génération batch
       this.leavesService
         .getLeaveImpactForPayroll(employeeId, monthNum, year, prelimCalcForLeave.grossSalary)
-        .catch(() => null),
+        .catch((err) => {
+          this.logger.error(
+            `❌ Impact congé non calculé (simulation) pour l'employé ${employeeId} (${monthNum}/${year}) : ${err?.message ?? err}`,
+          );
+          return null;
+        }),
       // ✅ CORRECTIF (bug trouvé) : cette simulation ne renvoyait jamais
       // droitsConge/priseConge/soldeConge — la bannière congé de la paie
       // manuelle (front) lisait sim.ytd.soldeConge, qui restait toujours

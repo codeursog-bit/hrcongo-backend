@@ -21,7 +21,7 @@ import {
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateLeaveDto } from './dto/create-leave.dto';
 import { EmployeeNotFoundException } from '../exceptions/business.exceptions';
-import { LeaveType, NotificationType } from '@prisma/client';
+import { LeaveType, NotificationType, Prisma } from '@prisma/client';
 import { NotificationsService } from '../notifications/notifications.service';
 import { MailService } from '../mail/mail.service';
 import { SubscriptionGuard } from '../subscriptions/guards/subscription.guard';
@@ -2883,7 +2883,8 @@ export class LeavesService {
     // pour un ANNUAL_ANTICIPATED (absorbée dans le futur congé ANNUAL).
     let plannedPayrollMonth = leave.plannedPayrollMonth;
     let plannedPayrollYear = leave.plannedPayrollYear;
-    let payrollIndemnityDays = leave.payrollIndemnityDays;
+    let payrollIndemnityDays: Prisma.Decimal | number | null =
+      leave.payrollIndemnityDays;
 
     // ✅ RÈGLE (demande explicite) : l'indemnité ne se paie qu'UNE fois par
     // cycle. Le mois de paie n'est donc PAS déplacé avec les dates quand :

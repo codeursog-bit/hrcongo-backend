@@ -262,6 +262,7 @@ model Company {
   taxNumber             String?   @db.VarChar(50)
   legalForm             String?   @db.VarChar(100) // "SARL", "SA"... — utilisé dans les contrats de prestation
   seniorityProrata      Boolean   @default(false)
+  salaryProrataDisplay  Boolean   @default(false)
   // Coordonnées
   address               String    @db.Text
   city                  String    @db.VarChar(100)
@@ -357,6 +358,7 @@ model Company {
 
   // 🆕 RELATION PAIEMENTS (One-to-Many - accès direct)
   payments Payment[] @relation("CompanyPayments")
+  
 
   // Relations existantes
 

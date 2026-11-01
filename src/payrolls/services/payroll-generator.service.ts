@@ -750,7 +750,12 @@ export class PayrollGeneratorService {
             year,
             prelimCalcForLeave.grossSalary,
           )
-          .catch(() => null);
+          .catch((err) => {
+            this.logger.error(
+              `❌ Impact congé non calculé pour l'employé ${emp.id} (${monthNum}/${year}) — aucune indemnité sur ce bulletin : ${err?.message ?? err}`,
+            );
+            return null;
+          });
         const leaveDays = leaveImpact?.leaveDays ?? 0;
 
         // 🆕 Données congé pour le calcul et le bulletin

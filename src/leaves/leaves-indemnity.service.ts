@@ -12,7 +12,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import * as WorkingDays from '../common/working-days.util';
 import { getSeniorityDaysForConvention } from './config/leave-seniority-conventions';
-import { resolveCycleWindow } from './leaves-common.util';
+import { resolveCycleWindow, fullCycleIndemnityDays } from './leaves-common.util';
 import {
   CONGO_LEAVE,
   LeaveImpactForPayroll,
@@ -209,8 +209,19 @@ export class LeavesIndemnityService {
             // début du décompte suivant. Sans ce filtre, on retomberait sur
             // le même comportement que ROLLING par erreur.
             paidIndemnityAmount: { not: null },
+            // ✅ Un congé qui n'est pas TERMINÉ avant le mois de paie (ex: le
+            // congé de novembre qu'on paie en octobre, ou un congé futur) n'est
+            // pas "le dernier congé pris" : il ne doit jamais redémarrer le
+            // cycle de référence à sa date de fin.
+            endDate: { lt: new Date(refYear, refMonth - 1, 1) },
           }
-        : { employeeId, type: 'ANNUAL', status: 'APPROVED' },
+        : {
+            employeeId,
+            type: 'ANNUAL',
+            status: 'APPROVED',
+            // ✅ Même garde-fou (voir ci-dessus).
+            endDate: { lt: new Date(refYear, refMonth - 1, 1) },
+          },
       orderBy: { endDate: 'desc' },
       select: {
         startDate: true,
@@ -271,8 +282,15 @@ export class LeavesIndemnityService {
     // sinceDate n'est pas déjà un 1er, on arrondit au 1er du mois SUIVANT
     // (le mois de la reprise, souvent partiel, reste hors des deux cycles
     // plutôt que dans les deux à la fois — jamais de double comptage).
-    const sinceDate =
-      sinceDateRaw.getDate() === 1
+    // ✅ RÈGLE (confirmée) : premier cycle = depuis le PREMIER bulletin, donc
+    // le mois d'embauche (bulletin partiel, ex: embauché le 10/10 → bulletin
+    // d'octobre) COMPTE comme 1er mois : cycle oct. → sept., pas nov. → oct.
+    // L'arrondi au mois SUIVANT ne vaut que pour un cycle qui redémarre après un
+    // retour de congé (voir ci-dessus : jamais de mois compté dans 2 cycles).
+    const cycleStartsAtHire = !lastAnnualLeave && !!hireDate;
+    const sinceDate = cycleStartsAtHire
+      ? new Date(sinceDateRaw.getFullYear(), sinceDateRaw.getMonth(), 1)
+      : sinceDateRaw.getDate() === 1
         ? sinceDateRaw
         : new Date(sinceDateRaw.getFullYear(), sinceDateRaw.getMonth() + 1, 1);
 
@@ -764,9 +782,20 @@ export class LeavesIndemnityService {
       // Mois de paiement programmé : indemnité calculée sur le droit TOTAL
       // du cycle (snapshot pris à la planification), pas sur daysCount du
       // seul congé qui clôt le cycle.
-      const totalDays = payrollAnchoredLeave.payrollIndemnityDays
-        ? Number(payrollAnchoredLeave.payrollIndemnityDays)
-        : Number(payrollAnchoredLeave.daysCount);
+      // ✅ Un Decimal Prisma à 0 est « truthy » en JS : l'ancien test
+      // `x ? Number(x) : daysCount` ne se déclenchait JAMAIS pour 0.00 et
+      // renvoyait 0 jour → indemnité 0 F → ligne absente du bulletin. On teste
+      // la VALEUR : 0 ou négatif = droit plein du cycle (26j + ancienneté).
+      const storedDays = Number(payrollAnchoredLeave.payrollIndemnityDays ?? 0);
+      const totalDays =
+        storedDays > 0
+          ? storedDays
+          : payrollAnchoredLeave.payrollIndemnityDays == null
+            ? Number(payrollAnchoredLeave.daysCount)
+            : fullCycleIndemnityDays(
+                0,
+                payrollAnchoredLeave.payrollSeniorityDays,
+              );
       indemnifiedDays = totalDays; // ✅ pour le libellé du bulletin — pas
       // le même nombre que "leaveDays" ci-dessous, qui ne compte que les
       // jours d'absence PHYSIQUE de CE mois (ex: un congé anticipé
@@ -801,6 +830,14 @@ export class LeavesIndemnityService {
       // (payroll-generator) de confirmer, via clearOpeningCumulativeAfterUse(),
       // une fois le bulletin réellement créé.
       shouldClearOpeningCumulative = result.usedOpeningCumulative;
+      // 🛡️ Garde-fou : un congé ancré sur ce mois qui ressort à 0 F est une
+      // anomalie — on la rend visible dans les logs au lieu de laisser la ligne
+      // disparaître du bulletin sans aucune trace.
+      if (leaveIndemnity <= 0) {
+        this.logger.warn(
+          `⚠️ Congé ${payrollAnchoredLeave.id} (employé ${employeeId}) ancré sur ${month}/${year} mais indemnité = ${leaveIndemnity} F (jours indemnisés: ${totalDays}) — vérifier payrollIndemnityDays et l'historique de paie.`,
+        );
+      }
     } else if (isMaintained) {
       leaveIndemnity = absenceDeduction;
       leaveIndemnityBase = absenceDeduction;
