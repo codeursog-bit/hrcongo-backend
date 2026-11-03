@@ -243,3 +243,41 @@ export function fullCycleIndemnityDays(
   const s = Math.max(0, Number(seniorityDays ?? 0) || 0);
   return Math.max(Number.isFinite(e) ? e : 0, CONGO_LEAVE.ANNUAL_DAYS + s);
 }
+
+// ============================================================================
+// 🎫 ÉLIGIBILITÉ AUX CONGÉS PAR TYPE DE CONTRAT
+// - STAGE : jamais de congé.
+// - PRESTATAIRE / CONSULTANT (travailleurs BNC) : seulement si l'entreprise
+//   l'a activé dans ses paramètres (Company.leaveAppliesToContractors).
+// Un salarié inéligible n'apparaît NULLE PART côté congé : ni notification,
+// ni solde, ni planning, ni provision/indemnité.
+// ============================================================================
+export const LEAVE_NEVER_ELIGIBLE_CONTRACTS = ['STAGE'];
+export const LEAVE_CONTRACTOR_CONTRACTS = ['PRESTATAIRE', 'CONSULTANT'];
+
+export function isLeaveEligibleContract(
+  contractType: string | null | undefined,
+  contractorsEligible: boolean,
+): boolean {
+  if (!contractType) return true;
+  if (LEAVE_NEVER_ELIGIBLE_CONTRACTS.includes(contractType)) return false;
+  if (LEAVE_CONTRACTOR_CONTRACTS.includes(contractType))
+    return contractorsEligible;
+  return true;
+}
+
+/**
+ * Filtre Prisma (EmployeeWhereInput) réutilisable dans n'importe quelle
+ * requête d'employés — y compris en relation (`where: { employee: filter }`)
+ * — et valable multi-entreprises : le réglage est lu sur la company de
+ * chaque employé.
+ */
+export function leaveEligibleEmployeeFilter(): any {
+  return {
+    contractType: { notIn: LEAVE_NEVER_ELIGIBLE_CONTRACTS },
+    NOT: {
+      contractType: { in: LEAVE_CONTRACTOR_CONTRACTS },
+      company: { leaveAppliesToContractors: false },
+    },
+  };
+}

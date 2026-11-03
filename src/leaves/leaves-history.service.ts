@@ -532,6 +532,8 @@ export class LeavesHistoryService {
       },
     });
     if (!employee) throw new NotFoundException('Employé introuvable');
+    // Stagiaires / prestataires sans option entreprise : aucun solde expliqué.
+    await this.balanceService.assertLeaveEligible(employee.id);
 
     const today = this.todayUtc();
     const bal: any = await this.balanceService.getEmployeeBalanceDetails(employee.id);

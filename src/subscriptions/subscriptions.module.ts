@@ -60,6 +60,12 @@ import { PaymentsModule } from '../payments/payments.module';
 import { AffiliateModule } from '../affiliate/affiliate.module';
 import { CabinetModule } from '../cabinet/cabinet.module';
 import { NotificationsModule } from '../notifications/notifications.module';
+import { PlatformSettingsModule } from '../platform-settings/platform-settings.module';
+import { BillingAdminController } from './billing-admin.controller';
+import { PricingService } from './pricing.service';
+import { DiscountCodesService } from './discount-codes.service';
+import { CustomQuotesService } from './custom-quotes.service';
+import { InvoicesService } from '../invoices/invoices.service';
 
 @Module({
   imports: [
@@ -69,19 +75,25 @@ import { NotificationsModule } from '../notifications/notifications.module';
     AffiliateModule,
     CabinetModule, // ← pour injecter CabinetSubscriptionService dans WebhooksController
     NotificationsModule, // ← pour les rappels J-7/J-3/J-1 et l'alerte "abonnement expiré"
+    PlatformSettingsModule, // ← agrégateur de paiement choisi par le super admin
   ],
   controllers: [
     SubscriptionsController,
     WebhooksController, // ← webhook YabetooPay : conservé pour l'historique + les versements affiliés (disbursement.completed)
     MotekiWebhooksController, // ← webhook Moteki
     ChariowWebhooksController, // ← webhook Chariow (Pulse) : 3e prestataire, redondance de Moteki
+    BillingAdminController, // ← super admin : prix, codes de réduction, devis, agrégateur, factures
   ],
   providers: [
     SubscriptionsService,
     SubscriptionGuard,
     AdminGuard,
     SubscriptionCronService,
+    PricingService,
+    DiscountCodesService,
+    CustomQuotesService,
+    InvoicesService,
   ],
-  exports: [SubscriptionsService, SubscriptionGuard],
+  exports: [SubscriptionsService, SubscriptionGuard, PricingService, InvoicesService],
 })
 export class SubscriptionsModule {}

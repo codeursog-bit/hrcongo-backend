@@ -173,9 +173,11 @@ export function analyzeServer(
   }
   if (restarts >= 3) {
     f.push({
-      key: 'restarts', level: 'CRITICAL',
+      key: 'restarts', level: restarts >= 8 ? 'CRITICAL' : 'WARNING',
       title: `${restarts} redémarrages du back en 24 h`,
-      detail: 'Le back plante ou est tué à répétition (mémoire saturée ? erreur au démarrage ? déploiements ?).',
+      detail: restarts >= 8
+        ? 'Le back plante ou est tué à répétition (mémoire saturée ? erreur au démarrage ?).'
+        : 'Normal si tu as déployé plusieurs fois aujourd’hui ; sinon le back plante ou est tué (mémoire saturée ? erreur au démarrage ?).',
       action: 'Regarde les logs du conteneur dans Coolify au moment des redémarrages et la mémoire juste avant.',
     });
   } else if (restarts > 0) {

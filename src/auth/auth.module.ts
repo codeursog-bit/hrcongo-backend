@@ -12,7 +12,6 @@ import { JwtModule } from '@nestjs/jwt';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { JwtStrategy } from './jwt.strategy';
 import { CabinetModule } from '../cabinet/cabinet.module';
-import { PrismaService } from 'src/prisma/prisma.service';
 import { AffiliateModule } from '../affiliate/affiliate.module';
 
 @Module({
@@ -41,7 +40,8 @@ import { AffiliateModule } from '../affiliate/affiliate.module';
       inject: [ConfigService],
     }),
   ],
-  providers: [AuthService, TwoFactorService, JwtStrategy, PrismaService],
+  // PrismaService vient du PrismaModule global : le redéclarer ici créait une 2e instance (et un 2e pool de connexions)
+  providers: [AuthService, TwoFactorService, JwtStrategy],
   controllers: [AuthController, TwoFactorController],
   exports: [AuthService, TwoFactorService],
 })

@@ -30,7 +30,7 @@ export class NotificationsController {
     // ✅ Utiliser req.user.userId (cohérent avec la stratégie JWT)
     return this.notificationsService.findAll(
       req.user.userId,
-      limit ? parseInt(limit) : undefined,
+      limit ? Math.min(Math.max(parseInt(limit) || 50, 1), 100) : undefined, // plafonné : le front demande 100 au maximum
     );
   }
 

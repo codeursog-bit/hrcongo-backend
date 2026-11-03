@@ -128,6 +128,9 @@ export class CreateCompanyDto {
   leaveReferenceCycle?: 'JANUARY' | 'HIRE_DATE' | 'JUNE';
 
   @IsBoolean() @IsOptional() appliesSeniorityLeaveBonus?: boolean;
+  // 🆕 CONGÉS — l'entreprise accorde-t-elle des congés (et l'indemnité) à ses
+  // prestataires/consultants ? Défaut : non. Les stagiaires n'en ont jamais.
+  @IsBoolean() @IsOptional() leaveAppliesToContractors?: boolean;
   // Prime d'ancienneté proratisée selon les jours travaillés (défaut : non)
   @IsBoolean() @IsOptional() seniorityProrata?: boolean;
   // Bulletin : présentation du salaire de base proratisé (jours payés) au lieu de

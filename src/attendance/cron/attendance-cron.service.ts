@@ -385,8 +385,13 @@ export class AttendanceCronService implements OnModuleDestroy {
             checkOut: null,
           },
           include: {
+            // select au lieu de include : on n'a besoin que du nom et du compte push.
+            // Avant, la ligne employé COMPLÈTE était chargée pour chaque pointage ouvert,
+            // à chaque tick de 5 min pendant la fenêtre de 90 min, pour toutes les entreprises.
             employee: {
-              include: {
+              select: {
+                firstName: true,
+                lastName: true,
                 user: { select: { id: true, pushToken: true, pushNotifEnabled: true, pushSubscriptions: { select: { id: true } } } },
               },
             },

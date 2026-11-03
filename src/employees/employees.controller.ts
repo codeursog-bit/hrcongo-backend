@@ -303,7 +303,8 @@ export class EmployeesController {
   async findAll(@Request() req, @Query() query: any) {
     try {
       const page = parseInt(query?.page) || 1;
-      const limit = parseInt(query?.limit) || 50;
+      // Plafond : le front demande jusqu'à 1000 ; sans borne, ?limit=1000000 chargeait tout d'un coup
+      const limit = Math.min(parseInt(query?.limit) || 50, 1000);
       // ✅ FIX BUG 5: passer companyId pour les rôles cabinet
       const companyId = query?.companyId ?? undefined;
       // 🆕 Recherche/filtres — doivent porter sur TOUS les employés, pas seulement la page affichée

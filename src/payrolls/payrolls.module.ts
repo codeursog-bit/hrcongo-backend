@@ -17,7 +17,6 @@ import { PayrollBonusesService } from './services/payroll-bonuses.service';
 import { PayrollSeniorityService } from './services/payroll-seniority.service'; // 🆕
 import { PayrollNetTargetService } from './services/payroll-net-target.service'; // 🧮 option « paie sur le net »
 import { CompanyDeductionsModule } from '../company-deductions/company-deductions.module';
-import { PrismaService } from '../prisma/prisma.service';
 import { LoansModule } from '../loans/loans.module';
 import { AuditEngineModule } from '../audit-engine/audit-engine.module';
 import { AttendanceModule } from '../attendance/attendance.module';
@@ -67,7 +66,6 @@ import { ManualPayrollService } from './services/manual-payroll.service';
     PayrollNetTargetService, // 🧮 option « paie sur le net »
     BonusQuantityService, // 🆕
     ExportService,
-    PrismaService,
     PayrollSettingsService,
     IrppCalculatorService,
     FiscalPartsService,

@@ -25,6 +25,7 @@ import {
   getUserWithCompany,
   getManagerDepartmentId,
   resolveCycleWindow,
+  isLeaveEligibleContract,
 } from './leaves-common.util';
 import { CONGO_LEAVE } from './leaves.constants';
 import { LeavesIndemnityService } from './leaves-indemnity.service';
@@ -40,6 +41,60 @@ export class LeavesBalanceService {
   ) {}
 
   // ============================================================================
+  // 🎫 ÉLIGIBILITÉ — stagiaires : jamais de congé ; prestataires/consultants :
+  // seulement si l'entreprise l'a activé (Company.leaveAppliesToContractors).
+  // ============================================================================
+  async getLeaveEligibility(employeeId: string): Promise<{
+    eligible: boolean;
+    reason: 'STAGIAIRE' | 'PRESTATAIRE' | null;
+  }> {
+    const emp = await this.prisma.employee.findUnique({
+      where: { id: employeeId },
+      select: {
+        contractType: true,
+        company: { select: { leaveAppliesToContractors: true } },
+      },
+    });
+    if (!emp) throw new EmployeeNotFoundException(employeeId);
+    const eligible = isLeaveEligibleContract(
+      emp.contractType as string,
+      !!emp.company?.leaveAppliesToContractors,
+    );
+    return {
+      eligible,
+      reason: eligible
+        ? null
+        : emp.contractType === 'STAGE'
+          ? 'STAGIAIRE'
+          : 'PRESTATAIRE',
+    };
+  }
+
+  /**
+   * Éligibilité de l'utilisateur connecté (menu "Mes congés", tableau de bord).
+   * Un utilisateur sans fiche employé (ex: admin pur) n'est jamais restreint.
+   */
+  async getMyLeaveEligibility(userId: string) {
+    const user = await getUserWithCompany(this.prisma, userId);
+    const employee = await this.prisma.employee.findFirst({
+      where: { email: user.email ?? undefined, companyId: user.companyId },
+      select: { id: true },
+    });
+    if (!employee) return { eligible: true, reason: null };
+    return this.getLeaveEligibility(employee.id);
+  }
+
+  async assertLeaveEligible(employeeId: string): Promise<void> {
+    const { eligible, reason } = await this.getLeaveEligibility(employeeId);
+    if (eligible) return;
+    throw new BadRequestException(
+      reason === 'STAGIAIRE'
+        ? "Les stagiaires n'ont pas droit aux congés."
+        : "Les prestataires ne bénéficient pas de congés dans cette entreprise (option désactivée dans les paramètres).",
+    );
+  }
+
+  // ============================================================================
   // ✅ CORRECTIF (bug récurrent trouvé à plusieurs endroits : bulletins,
   //    simulation paie manuelle, vérification de solde à la création d'un
   //    congé...) — toutes ces lectures ne prenaient que le cycle LE PLUS
@@ -52,6 +107,21 @@ export class LeavesBalanceService {
   //    (snapshot de bulletin, simulation, vérification avant congé...).
   // ============================================================================
   async getTotalLeaveBalanceSummary(employeeId: string) {
+    await this.applyDueLeaveDebits(employeeId).catch(() => 0);
+    // Inéligible (stagiaire / prestataire sans option) : aucun solde, et
+    // surtout aucune ligne LeaveBalance créée au passage.
+    if (!(await this.getLeaveEligibility(employeeId)).eligible) {
+      return {
+        annualEntitled: 0,
+        annualTaken: 0,
+        annualRemaining: 0,
+        seniorityDays: 0,
+        carriedForward: 0,
+        cyclesCount: 0,
+        cycleEndDate: null,
+        canTakeAnnualLeave: false,
+      };
+    }
     // S'assure que le cycle actuellement ouvert existe/est à jour avant de sommer.
     await this.getOrCreateLeaveBalance(employeeId).catch(() => null);
 
@@ -256,6 +326,206 @@ export class LeavesBalanceService {
   }
 
   /**
+   * 🆕 Date de référence du cycle à DÉBITER pour un départ en congé Annuel.
+   *
+   * Règle métier : un congé Annuel clôt le cycle qu'on vient de TRAVAILLER.
+   * Un départ à la date anniversaire, juste après (ex: jour férié → premier
+   * jour ouvré) ou reporté (besoin de l'entreprise) reste donc imputé sur le
+   * cycle qui s'est terminé à l'anniversaire, tant que ce cycle n'a pas
+   * encore été consommé par un congé Annuel. Reporter ne déplace jamais le
+   * cycle ni son droit (26j + ancienneté).
+   *
+   * Renvoie `departureDate` inchangée quand la règle ne s'applique pas
+   * (congé anticipé, 1er cycle de l'employé, cycle précédent déjà soldé).
+   * Sinon renvoie la FIN du cycle précédent, qui se résout exactement sur ce
+   * cycle via resolveCycleWindow() (`cycleEndDate < referenceDate` strict).
+   */
+  async resolveDebitReferenceDate(
+    employeeId: string,
+    departureDate: Date,
+    leaveType: string = 'ANNUAL',
+    excludeLeaveId?: string,
+  ): Promise<Date> {
+    if (leaveType === 'ANNUAL_ANTICIPATED') return departureDate;
+
+    const employee = await this.prisma.employee.findUnique({
+      where: { id: employeeId },
+      select: {
+        hireDate: true,
+        leaveCycleStartDate: true,
+        company: { select: { leaveCycleMode: true } },
+      },
+    });
+    if (!employee) throw new EmployeeNotFoundException(employeeId);
+
+    const mode =
+      (employee.company?.leaveCycleMode as 'ROLLING' | 'ANNIVERSARY') ??
+      'ROLLING';
+    const hire = new Date(employee.hireDate);
+    const leaveCycleStart = employee.leaveCycleStartDate
+      ? new Date(employee.leaveCycleStartDate)
+      : null;
+    const chainStart = mode === 'ANNIVERSARY' ? hire : (leaveCycleStart ?? hire);
+
+    const current = resolveCycleWindow(
+      hire,
+      leaveCycleStart,
+      departureDate,
+      mode,
+    );
+    // 1er cycle : il n'existe pas de cycle précédent à clore.
+    if (current.cycleStartDate.getTime() <= chainStart.getTime()) {
+      return departureDate;
+    }
+
+    // Cycle précédent = fenêtre qui se termine pile au début de l'actuelle.
+    const previous = resolveCycleWindow(
+      hire,
+      leaveCycleStart,
+      current.cycleStartDate,
+      mode,
+    );
+    if (previous.cycleEndDate.getTime() !== current.cycleStartDate.getTime()) {
+      return departureDate;
+    }
+
+    const alreadyClosed = await this.prisma.leave.findFirst({
+      where: {
+        employeeId,
+        type: 'ANNUAL',
+        status: { in: ['APPROVED'] },
+        carriedFromLeaveId: null,
+        debitedCycleStartDate: previous.cycleStartDate,
+        ...(excludeLeaveId ? { id: { not: excludeLeaveId } } : {}),
+      },
+      select: { id: true },
+    });
+    return alreadyClosed ? departureDate : previous.cycleEndDate;
+  }
+
+  /**
+   * 🆕 DÉBIT DIFFÉRÉ DU SOLDE — règle métier : planifier un congé à l'avance
+   * ne touche PAS au solde. Le solde continue de s'incrémenter chaque mois
+   * (2,16 j) et ne retombe qu'à la DATE DE DÉPART du congé planifié.
+   *
+   * Applique, pour chaque congé Annuel/Anticipé validé dont le départ est
+   * arrivé et qui n'a pas encore été débité (Leave.balanceDebitedAt = null) :
+   *  - le débit du solde (cycle re-résolu à la date de départ — exact même si
+   *    le cycle a bougé depuis la planification, notamment en mode ROLLING) ;
+   *  - la fermeture du cycle ROLLING (leaveCycleStartDate = fin du congé),
+   *    qui n'est plus avancée dès la planification.
+   * Idempotent et sûr en multi-instances : le congé est "réservé" par un
+   * updateMany conditionnel avant toute écriture.
+   * @param employeeId limite le traitement à un employé (appels paresseux).
+   */
+  async applyDueLeaveDebits(employeeId?: string): Promise<number> {
+    const due = await this.prisma.leave.findMany({
+      where: {
+        status: 'APPROVED',
+        type: { in: ['ANNUAL', 'ANNUAL_ANTICIPATED'] },
+        carriedFromLeaveId: null,
+        balanceDebitedAt: null,
+        startDate: { lte: new Date() },
+        ...(employeeId ? { employeeId } : {}),
+      },
+      orderBy: { startDate: 'asc' },
+    });
+
+    let applied = 0;
+    for (const leave of due) {
+      const claim = await this.prisma.leave.updateMany({
+        where: { id: leave.id, balanceDebitedAt: null },
+        data: { balanceDebitedAt: new Date() },
+      });
+      if (claim.count !== 1) continue; // une autre instance l'a déjà pris
+
+      try {
+        const ref = await this.resolveDebitReferenceDate(
+          leave.employeeId,
+          leave.startDate,
+          leave.type,
+          leave.id,
+        );
+        const balance = await this.ensureBalanceRowForDebit(
+          leave.employeeId,
+          ref,
+        );
+        await this.prisma.leaveBalance.update({
+          where: { id: balance.id },
+          data: {
+            annualTaken: { increment: leave.daysCount },
+            annualRemaining: { decrement: leave.daysCount },
+          },
+        });
+        await this.prisma.leave.update({
+          where: { id: leave.id },
+          data: { debitedCycleStartDate: balance.cycleStartDate },
+        });
+        if (leave.type === 'ANNUAL') {
+          await this.prisma.employee.update({
+            where: { id: leave.employeeId },
+            data: { leaveCycleStartDate: leave.endDate },
+          });
+        }
+        applied++;
+      } catch (err: any) {
+        // On libère la réservation : le prochain passage réessaiera.
+        await this.prisma.leave
+          .update({ where: { id: leave.id }, data: { balanceDebitedAt: null } })
+          .catch(() => null);
+        this.logger.error(
+          `❌ Débit différé du congé ${leave.id} impossible : ${err?.message ?? err}`,
+        );
+      }
+    }
+    return applied;
+  }
+
+  /**
+   * 🆕 Ligne LeaveBalance RÉELLE à débiter pour une planification/validation.
+   * getOrCreateLeaveBalance() renvoie un solde "virtuel" (id `virtual-…`,
+   * non persisté) pour un cycle qui n'a pas encore commencé — impossible à
+   * décrémenter. Ici on le persiste avec le droit COMPLET du cycle (calculé
+   * à sa date de fin), pas le droit proratisé d'aujourd'hui : ainsi la ligne
+   * n'est jamais figée à 0j (voir le commentaire de getOrCreateLeaveBalance).
+   */
+  async ensureBalanceRowForDebit(employeeId: string, referenceDate: Date) {
+    const balance = await this.getOrCreateLeaveBalance(
+      employeeId,
+      referenceDate,
+    );
+    if (!String(balance.id).startsWith('virtual-')) return balance;
+
+    const full = await this.getOrCreateLeaveBalance(
+      employeeId,
+      new Date(balance.cycleEndDate),
+    );
+    const existing = await this.prisma.leaveBalance.findUnique({
+      where: {
+        employeeId_cycleStartDate: {
+          employeeId,
+          cycleStartDate: full.cycleStartDate,
+        },
+      },
+    });
+    if (existing) return existing;
+    return this.prisma.leaveBalance.create({
+      data: {
+        employeeId,
+        year: full.year,
+        cycleNumber: full.cycleNumber,
+        cycleStartDate: full.cycleStartDate,
+        cycleEndDate: full.cycleEndDate,
+        annualEntitled: full.annualEntitled,
+        annualTaken: 0,
+        annualRemaining: full.annualRemaining,
+        seniorityDays: full.seniorityDays,
+        carriedForward: 0,
+      },
+    });
+  }
+
+  /**
    * Projette le solde d'un employé TEL QU'IL SERA à une date future donnée
    * (asOfDate), sur le cycle auquel cette date appartient — au lieu du solde
    * accumulé "aujourd'hui" que renvoie getOrCreateLeaveBalance() par défaut.
@@ -275,7 +545,20 @@ export class LeavesBalanceService {
    *    planification avec un message clair plutôt que de faire confiance à
    *    une date de cycle non garantie.
    */
-  async getProjectedBalanceAsOf(employeeId: string, asOfDate: Date) {
+  async getProjectedBalanceAsOf(
+    employeeId: string,
+    departureDate: Date,
+    leaveType: string = 'ANNUAL',
+  ) {
+    // 🆕 Un départ posé APRÈS la date anniversaire (ex: 04/01/2027 pour un
+    // cycle clos le 01/01/2027, ou un congé reporté) consomme le droit du
+    // cycle qui vient de se fermer — pas celui du cycle suivant, qui est
+    // encore vide. `asOfDate` = date de référence du cycle débité.
+    const asOfDate = await this.resolveDebitReferenceDate(
+      employeeId,
+      departureDate,
+      leaveType,
+    );
     const employee = await this.prisma.employee.findUnique({
       where: { id: employeeId },
       select: {
@@ -307,20 +590,31 @@ export class LeavesBalanceService {
     });
 
     const realNow = new Date();
-    if (!existing && realNow < cycleStartDate) {
+    // 🆕 PLANIFICATION À L'AVANCE (ANNIVERSARY *et* ROLLING) : on ne bloque
+    // plus un cycle qui n'a pas encore démarré. Planifier ne modifie NI le
+    // solde NI le cycle ouvert (débit et fermeture du cycle ROLLING sont
+    // différés à la date de départ — voir applyDueLeaveDebits) ; le cycle
+    // réellement débité est re-résolu à ce moment-là. Le seul refus restant
+    // est une date de départ antérieure à l'embauche (donnée aberrante).
+    if (departureDate < new Date(employee.hireDate)) {
       return {
         reliable: false as const,
+        debitReferenceDate: asOfDate,
         cycleStartDate,
         cycleEndDate,
         reason:
-          `Ce congé tombe après la fin du cycle actuel de l'employé, dont la ` +
-          `date de clôture dépend elle-même de son prochain retour de congé ` +
-          `(pas encore survenu). Planifiez d'abord son congé sur le cycle en ` +
-          `cours, ou attendez que ce cycle se ferme avant de planifier au-delà.`,
+          "La date de départ est antérieure à la date d'embauche de l'employé.",
       };
     }
 
-    const effectiveNow = asOfDate < cycleEndDate ? asOfDate : cycleEndDate;
+    // Cycle pas encore démarré dans la réalité : on projette le droit
+    // COMPLET (un congé planifié sur un cycle futur se prend à sa clôture).
+    const effectiveNow =
+      realNow < cycleStartDate
+        ? cycleEndDate
+        : asOfDate < cycleEndDate
+          ? asOfDate
+          : cycleEndDate;
     const msElapsed = Math.max(
       0,
       effectiveNow.getTime() - cycleStartDate.getTime(),
@@ -352,6 +646,8 @@ export class LeavesBalanceService {
 
     return {
       reliable: true as const,
+      // Date à repasser à ensureBalanceRowForDebit() pour débiter ce cycle.
+      debitReferenceDate: asOfDate,
       cycleStartDate,
       cycleEndDate,
       totalEntitled,
@@ -359,6 +655,118 @@ export class LeavesBalanceService {
       seniorityDays,
       annualTaken,
       projectedRemaining: Math.round((totalEntitled - annualTaken) * 10) / 10,
+    };
+  }
+
+  /**
+   * 🆕 SYNCHRO DATE D'EMBAUCHE → CYCLES DE CONGÉ.
+   * À appeler par le service employés APRÈS une modification de `hireDate`
+   * (le cycle et le solde se comptent depuis l'embauche : 1er cycle surtout).
+   *
+   * - Supprime les lignes LeaveBalance DÉRIVÉES de l'ancienne date et non
+   *   consommées (annualTaken = 0, aucun congé n'y est imputé, ni reliquat,
+   *   ni ajustement manuel) : elles sont recréées à la demande, à la bonne
+   *   date, par getOrCreateLeaveBalance().
+   * - Ne touche JAMAIS un cycle déjà débité ni un congé planifié/validé :
+   *   ils sont renvoyés dans `warnings` pour que le RH les revoie (aucun
+   *   déplacement silencieux).
+   * - Renvoie le prochain départ théorique ("prévu") recalculé.
+   */
+  async syncAfterHireDateChange(employeeId: string, oldHireDate: Date) {
+    const employee = await this.prisma.employee.findUnique({
+      where: { id: employeeId },
+      select: {
+        hireDate: true,
+        leaveCycleStartDate: true,
+        company: { select: { leaveCycleMode: true } },
+      },
+    });
+    if (!employee) throw new EmployeeNotFoundException(employeeId);
+
+    const newHire = new Date(employee.hireDate);
+    if (newHire.getTime() === new Date(oldHireDate).getTime()) {
+      return { changed: false as const, resetCycles: 0, warnings: [] };
+    }
+
+    // ROLLING : un cycle ancré sur l'ancienne embauche (aucun congé pris
+    // depuis) doit suivre la nouvelle date ; un cycle ancré sur un vrai
+    // retour de congé ne bouge pas.
+    if (
+      employee.leaveCycleStartDate &&
+      new Date(employee.leaveCycleStartDate).getTime() ===
+        new Date(oldHireDate).getTime()
+    ) {
+      await this.prisma.employee.update({
+        where: { id: employeeId },
+        data: { leaveCycleStartDate: newHire },
+      });
+    }
+
+    const rows = await this.prisma.leaveBalance.findMany({
+      where: { employeeId },
+    });
+    const taken = await this.prisma.leave.findMany({
+      where: {
+        employeeId,
+        type: 'ANNUAL',
+        status: { in: ['APPROVED', 'PENDING'] as any },
+        debitedCycleStartDate: { not: null },
+      },
+      select: { debitedCycleStartDate: true },
+    });
+    const debited = new Set(
+      taken.map((l) => new Date(l.debitedCycleStartDate as Date).getTime()),
+    );
+
+    const resettable = rows.filter(
+      (r) =>
+        Number(r.annualTaken) === 0 &&
+        Number(r.carriedForward || 0) === 0 &&
+        !(r as any).adjustmentNote &&
+        !debited.has(new Date(r.cycleStartDate as Date).getTime()),
+    );
+    if (resettable.length) {
+      await this.prisma.leaveBalance.deleteMany({
+        where: { id: { in: resettable.map((r) => r.id) } },
+      });
+    }
+
+    // Congés déjà planifiés/validés/en attente non terminés : à revoir.
+    const pending = await this.prisma.leave.findMany({
+      where: {
+        employeeId,
+        type: { in: ['ANNUAL', 'ANNUAL_ANTICIPATED'] as any },
+        status: { in: ['APPROVED', 'PENDING'] as any },
+        endDate: { gte: new Date() },
+      },
+      select: { id: true, startDate: true, endDate: true, status: true },
+      orderBy: { startDate: 'asc' },
+    });
+
+    const mode =
+      (employee.company?.leaveCycleMode as 'ROLLING' | 'ANNIVERSARY') ??
+      'ROLLING';
+    const { cycleEndDate } = resolveCycleWindow(
+      newHire,
+      employee.leaveCycleStartDate && mode === 'ROLLING'
+        ? new Date(employee.leaveCycleStartDate)
+        : null,
+      new Date(),
+      mode,
+    );
+
+    return {
+      changed: true as const,
+      resetCycles: resettable.length,
+      expectedNextDeparture: cycleEndDate,
+      warnings: pending.map((l) => ({
+        leaveId: l.id,
+        status: l.status,
+        startDate: l.startDate,
+        endDate: l.endDate,
+        message:
+          "La date d'embauche a changé : ce congé a été planifié avec l'ancien calendrier, vérifiez sa date de départ.",
+      })),
     };
   }
 
@@ -377,6 +785,8 @@ export class LeavesBalanceService {
     });
     if (!employee) throw new EmployeeNotFoundException(employeeId);
 
+    // Débits différés dont le départ est arrivé : appliqués avant lecture.
+    await this.applyDueLeaveDebits(employeeId).catch(() => 0);
     const balance = await this.getOrCreateLeaveBalance(employeeId);
 
     const { cycleStartDate, cycleEndDate } = resolveCycleWindow(
@@ -636,6 +1046,7 @@ export class LeavesBalanceService {
       select: { id: true },
     });
     if (!employee) throw new EmployeeNotFoundException();
+    await this.assertLeaveEligible(employee.id);
 
     return this.getEmployeeBalanceDetails(employee.id);
   }
@@ -705,6 +1116,7 @@ export class LeavesBalanceService {
     month: number,
     year: number,
   ): Promise<void> {
+    if (!(await this.getLeaveEligibility(employeeId)).eligible) return;
     const employee = await this.prisma.employee.findUnique({
       where: { id: employeeId },
       select: {
@@ -815,6 +1227,7 @@ export class LeavesBalanceService {
    * approche/dépasse le plafond du cycle sans avoir été pris.
    */
   async checkAndSendLeaveAlerts(employeeId: string): Promise<void> {
+    if (!(await this.getLeaveEligibility(employeeId)).eligible) return;
     const employee = await this.prisma.employee.findUnique({
       where: { id: employeeId },
       select: {
@@ -877,6 +1290,7 @@ export class LeavesBalanceService {
           link: `/employes/${employeeId}/conges`,
           metadata: { employeeId, remainingDays: remaining, provision },
         },
+        { excludeEmployeeIds: [employeeId] },
       );
     }
 
@@ -903,6 +1317,7 @@ export class LeavesBalanceService {
             alertLevel: 'WARNING',
           },
         },
+        { excludeEmployeeIds: [employeeId] },
       );
     }
 
@@ -922,6 +1337,7 @@ export class LeavesBalanceService {
             alertLevel: 'CRITICAL',
           },
         },
+        { excludeEmployeeIds: [employeeId] },
       );
     }
   }

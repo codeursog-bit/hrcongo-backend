@@ -54,5 +54,5 @@ export class UpsertBulletinTemplateDto {
   // 🆕 Choix du modèle de FACTURE pour les contrats prestataire/consultant/
   // intérim/stagiaire (cf. FACTURE_CONTRACT_TYPES côté front). Stocké dans
   // le même config Json que le bulletin — aucune colonne/table ajoutée.
-  @IsOptional() @IsIn(['forfait', 'detaillee']) factureTemplateId?: string;
+  @IsOptional() @IsIn(['forfait', 'detaillee', 'professionnelle']) factureTemplateId?: string;
 }

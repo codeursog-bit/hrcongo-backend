@@ -99,12 +99,13 @@ export class NotificationsService {
    * l'utilisateur lui-même.
    */
   private async getVisibleUserIds(userId: string): Promise<string[] | null> {
-    const user = await this.prisma.user.findUnique({
-      where: { id: userId },
-      select: { id: true }
-    });
-    if (!user) return null;
-    return [user.id];
+    // ⚡ PERF : l'ancienne version faisait un user.findUnique juste pour
+    // renvoyer [user.id] — une requête SQL de trop à CHAQUE sondage de la
+    // cloche (route appelée en boucle par tous les onglets ouverts). Un
+    // utilisateur supprimé n'a plus de notifications (onDelete: Cascade),
+    // donc le résultat est identique sans cette requête.
+    if (!userId) return null;
+    return [userId];
   }
 
   async findAll(userId: string, limit?: number) {
@@ -230,13 +231,26 @@ export class NotificationsService {
       message: string;
       link?: string;
       metadata?: any;
-    }
+    },
+    // 🆕 Employés à NE PAS notifier même s'ils ont le rôle visé (ex: un RH
+    // qui est aussi salarié ne doit pas recevoir la notification qui parle de
+    // SA propre indemnité / provision de congé).
+    options?: { excludeEmployeeIds?: string[] }
   ) {
+    const excludeIds = options?.excludeEmployeeIds ?? [];
     const users = await this.prisma.user.findMany({
       where: {
         companyId,
         role: { in: roles as UserRole[] },
-        isActive: true
+        isActive: true,
+        ...(excludeIds.length
+          ? {
+              OR: [
+                { employeeId: null },
+                { employeeId: { notIn: excludeIds } },
+              ],
+            }
+          : {}),
       },
       select: { id: true }
     });

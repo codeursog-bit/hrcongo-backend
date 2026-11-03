@@ -79,6 +79,7 @@ export class MailService {
     subject: string,
     html: string,
     text: string,
+    attachments?: { filename: string; content: Buffer }[],
   ): Promise<boolean> {
     try {
       const { error } = await this.resend.emails.send({
@@ -87,6 +88,7 @@ export class MailService {
         subject,
         html,
         text,
+        ...(attachments?.length ? { attachments } : {}),
       });
       if (error) {
         this.logger.error('❌ Resend error:', error);
@@ -1031,6 +1033,51 @@ export class MailService {
       '⚠️ Votre abonnement est terminé — accès limité au plan Gratuit',
       html,
       `${greeting}\n\nVotre abonnement n'a pas été renouvelé et votre entreprise est repassée sur le plan Gratuit. Renouveler : ${subscriptionUrl}`,
+    );
+  }
+
+  // ──────────────────────────────────────────────────────────
+  // FACTURE — paiement d'abonnement reçu (PDF en pièce jointe)
+  // ──────────────────────────────────────────────────────────
+  async sendInvoice(params: {
+    to: string;
+    companyName: string;
+    invoiceNumber: string;
+    amountLabel: string;
+    periodEnd?: Date;
+    pdf: Buffer;
+  }): Promise<boolean> {
+    const subscriptionUrl = `${this.frontendUrl}/parametres/subscription`;
+    const until = params.periodEnd
+      ? ` Votre abonnement est actif jusqu'au <strong style="color:#e2e8f0;">${params.periodEnd.toLocaleDateString('fr-FR')}</strong>.`
+      : '';
+
+    const html = this.baseTemplate(
+      `
+      <p style="font-size:16px;margin:0 0 20px;">Bonjour,</p>
+      <p style="color:#94a3b8;margin:0 0 20px;">
+        Nous avons bien reçu le paiement de <strong style="color:#e2e8f0;">${params.amountLabel}</strong>
+        pour <strong style="color:#e2e8f0;">${params.companyName}</strong>.${until}
+      </p>
+      <p style="color:#94a3b8;margin:0 0 24px;">
+        Votre facture <strong style="color:#e2e8f0;">${params.invoiceNumber}</strong> est jointe à cet email au format PDF.
+      </p>
+      <div style="text-align:center;">
+        <a href="${subscriptionUrl}" style="display:inline-block;background:linear-gradient(135deg,#047857,#10b981);color:#fff;padding:14px 36px;text-decoration:none;border-radius:10px;font-weight:700;">
+          Voir mon abonnement
+        </a>
+      </div>
+    `,
+      'linear-gradient(135deg,#047857,#10b981)',
+      'Paiement reçu — merci !',
+    );
+
+    return this.send(
+      params.to,
+      `Votre facture ${params.invoiceNumber} — KonzaRH`,
+      html,
+      `Paiement de ${params.amountLabel} reçu pour ${params.companyName}. Facture ${params.invoiceNumber} en pièce jointe. ${subscriptionUrl}`,
+      [{ filename: `${params.invoiceNumber}.pdf`, content: params.pdf }],
     );
   }
 }

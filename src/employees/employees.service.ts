@@ -668,6 +668,8 @@
 // }
 
 import { resolveUserEmployeeId } from '../common/utils/user-employee.util';
+import { ModuleRef } from '@nestjs/core';
+import { LeavesService } from '../leaves/leaves.service';
 import {
   Injectable,
   NotFoundException,
@@ -742,6 +744,9 @@ export class EmployeesService {
     private subscriptionGuard: SubscriptionGuard,
     private conventionsService: ConventionsService,
     private contractSync: ContractSyncService,
+    // 🆕 Résolution paresseuse de LeavesService (évite une dépendance
+    // circulaire de modules Employees ↔ Leaves/Subscriptions).
+    private moduleRef: ModuleRef,
   ) {}
 
   // Auteur de l'action pour le journal d'audit (id + rôle + « Prénom NOM »)
@@ -1915,6 +1920,32 @@ export class EmployeesService {
             }
             throw syncError;
           }
+        }
+      }
+
+      // 🆕 SYNCHRO CONGÉS : le solde et les cycles de congé se comptent depuis
+      // la date d'embauche. Si elle change, on recale le 1er cycle et on
+      // remonte au RH les congés déjà planifiés à revoir (jamais déplacés en
+      // silence). Best-effort : un échec ici ne doit pas faire échouer la
+      // modification de la fiche employé.
+      if (
+        dataToUpdate.hireDate &&
+        new Date(dataToUpdate.hireDate).getTime() !==
+          new Date(employee.hireDate).getTime()
+      ) {
+        try {
+          const leavesService = this.moduleRef.get(LeavesService, {
+            strict: false,
+          });
+          const leaveSync = await leavesService.syncAfterHireDateChange(
+            id,
+            new Date(employee.hireDate),
+          );
+          return { ...updated, leaveSync };
+        } catch (syncError: any) {
+          console.error(
+            `⚠️ Synchro congés après changement de date d'embauche (${id}) : ${syncError?.message ?? syncError}`,
+          );
         }
       }
 

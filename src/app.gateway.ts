@@ -113,7 +113,8 @@ export class AppGateway implements OnGatewayConnection, OnGatewayDisconnect {
       }
 
       const payload = this.jwtService.verify(token, {
-        secret: process.env.JWT_SECRET || 'secretKey_change_in_production_123!',
+        // 🔒 Plus de secret de repli codé en dur : main.ts refuse déjà de démarrer sans JWT_SECRET.
+        secret: process.env.JWT_SECRET as string,
       });
 
       const companyId = payload?.companyId;

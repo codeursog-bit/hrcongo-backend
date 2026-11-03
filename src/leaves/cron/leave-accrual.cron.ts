@@ -9,6 +9,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { PrismaService } from '../../prisma/prisma.service';
 import { LeavesService } from '../leaves.service';
+import { leaveEligibleEmployeeFilter } from '../leaves-common.util';
 
 @Injectable()
 export class LeaveAccrualCron {
@@ -34,7 +35,7 @@ export class LeaveAccrualCron {
     try {
       // Récupérer tous les employés actifs
       const employees = await this.prisma.employee.findMany({
-        where: { status: 'ACTIVE' },
+        where: { status: 'ACTIVE', ...leaveEligibleEmployeeFilter() },
         select: {
           id: true,
           firstName: true,
@@ -80,6 +81,23 @@ export class LeaveAccrualCron {
   }
 
   // ============================================================================
+  // ⏰ CRON 1bis — Débit différé des congés planifiés (chaque jour à 00h30)
+  // Un congé planifié à l'avance ne touche pas au solde : il est débité (et le
+  // cycle ROLLING fermé) le jour de son départ.
+  // ============================================================================
+
+  @Cron('30 0 * * *', { timeZone: 'Africa/Brazzaville' })
+  async handleDueLeaveDebits(): Promise<void> {
+    try {
+      const n = await this.leavesService.applyDueLeaveDebits();
+      if (n > 0)
+        this.logger.log(`✅ [CRON] ${n} congé(s) planifié(s) débité(s) à leur date de départ`);
+    } catch (err) {
+      this.logger.error('❌ [CRON] Erreur débit différé des congés:', err);
+    }
+  }
+
+  // ============================================================================
   // ⏰ CRON 2 — Alertes RH (chaque lundi à 8h00 Brazzaville)
   // Vérifie les seuils de congés non pris et envoie les alertes
   // ============================================================================
@@ -92,7 +110,7 @@ export class LeaveAccrualCron {
 
     try {
       const employees = await this.prisma.employee.findMany({
-        where: { status: 'ACTIVE' },
+        where: { status: 'ACTIVE', ...leaveEligibleEmployeeFilter() },
         select: { id: true },
       });
 

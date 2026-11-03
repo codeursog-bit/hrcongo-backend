@@ -12,7 +12,11 @@ import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import * as WorkingDays from '../common/working-days.util';
 import { getSeniorityDaysForConvention } from './config/leave-seniority-conventions';
-import { resolveCycleWindow, fullCycleIndemnityDays } from './leaves-common.util';
+import {
+  resolveCycleWindow,
+  fullCycleIndemnityDays,
+  leaveEligibleEmployeeFilter,
+} from './leaves-common.util';
 import {
   CONGO_LEAVE,
   LeaveImpactForPayroll,
@@ -925,7 +929,11 @@ export class LeavesIndemnityService {
 
   async getLeaveProvision(companyId: string): Promise<LeaveProvisionResult> {
     const employees = await this.prisma.employee.findMany({
-      where: { companyId, status: 'ACTIVE' },
+      where: {
+        companyId,
+        status: 'ACTIVE',
+        ...leaveEligibleEmployeeFilter(),
+      },
       select: {
         id: true,
         firstName: true,

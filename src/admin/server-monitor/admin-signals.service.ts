@@ -68,14 +68,29 @@ export class AdminSignalsService {
     }
 
     const since = new Date(Date.now() - DAY_MS);
-    const [findings, failedPayments, pastDue, errors5xx] = await Promise.all([
+    const [findings, failedPayments, pastDue, errors5xx, drift] = await Promise.all([
       this.safe('constats serveur', () => this.metrics.getDiagnostics(), []),
       this.safe('paiements échoués', () => this.prisma.payment.count({ where: { status: 'FAILED', createdAt: { gte: since } } }), 0),
       this.safe('abonnements impayés', () => this.prisma.subscription.count({ where: { status: 'PAST_DUE' } }), 0),
       this.safe('erreurs 5xx', () => this.prisma.appError.count({ where: { statusCode: { gte: 500 }, resolved: false, createdAt: { gte: since } } }), 0),
+      // Prisma : « The column `x.y` does not exist in the current database » = migration non appliquée
+      this.safe('désynchronisation du schéma', () => this.prisma.appError.findFirst({
+        where: { createdAt: { gte: new Date(Date.now() - 30 * 60_000) }, message: { contains: 'does not exist in the current database' } }, // 30 min : l'alerte disparaît dès que la migration est appliquée
+        orderBy: { createdAt: 'desc' }, select: { message: true },
+      }), null as { message: string } | null),
     ]);
 
     const items: AdminAlertItem[] = [];
+
+    if (drift) {
+      const m = /The (column|table) `([^`]+)` does not exist/.exec(drift.message);
+      items.push({
+        key: 'schema-drift', level: 'CRITICAL',
+        title: 'Base de données désynchronisée avec le code',
+        detail: `${m ? `${m[1] === 'column' ? 'Colonne' : 'Table'} « ${m[2]} » absente de la base. ` : ''}Une migration Prisma n’a pas été appliquée : lance « npx prisma migrate deploy » sur la base de production.`,
+        href: '/admin/errors',
+      });
+    }
 
     for (const f of findings) {
       if (f.level === 'INFO') continue;

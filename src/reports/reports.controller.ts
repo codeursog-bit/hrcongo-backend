@@ -301,7 +301,7 @@ export class ReportsController {
         contractType,
         nationality,
         page: page ? parseInt(page, 10) : 1,
-        limit: limit ? parseInt(limit, 10) : 25,
+        limit: limit ? Math.min(Math.max(parseInt(limit, 10) || 25, 1), 500) : 25,
       },
       companyId,
     );

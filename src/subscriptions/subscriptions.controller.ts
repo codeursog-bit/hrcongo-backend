@@ -14,7 +14,9 @@ import {
   HttpCode,
   HttpStatus,
   ForbiddenException,
+  Res,
 } from '@nestjs/common';
+import type { Response } from 'express';
 import { AuthGuard } from '@nestjs/passport';
 import { SubscriptionsService } from './subscriptions.service';
 import { UpgradeCheckoutDto } from './dto/upgrade-checkout.dto';
@@ -22,10 +24,15 @@ import { MotekiCheckoutDto } from './dto/moteki-checkout.dto';
 import { ChariowCheckoutDto } from './dto/chariow-checkout.dto';
 import { SubscriptionGuard } from './guards/subscription.guard';
 import { AdminGuard } from '../auth/guards/admin.guard';
-import { PLANS } from './config/plans.config';
 import { MotekiService } from '../payments/moteki.service';
 import { YabetooPayService } from '../payments/yabetoopay.service';
 import { ChariowService } from '../payments/chariow.service';
+import { PricingService } from './pricing.service';
+import { CustomQuotesService } from './custom-quotes.service';
+import { DiscountCodesService } from './discount-codes.service';
+import { InvoicesService } from '../invoices/invoices.service';
+import { PlatformSettingsService } from '../platform-settings/platform-settings.service';
+import { ValidateDiscountDto } from './dto/billing-admin.dto';
 
 @Controller('subscriptions')
 @UseGuards(AuthGuard('jwt'))
@@ -36,6 +43,11 @@ export class SubscriptionsController {
     private readonly motekiService: MotekiService,
     private readonly yabetooPayService: YabetooPayService,
     private readonly chariowService: ChariowService,
+    private readonly pricingService: PricingService,
+    private readonly customQuotesService: CustomQuotesService,
+    private readonly discountCodesService: DiscountCodesService,
+    private readonly invoicesService: InvoicesService,
+    private readonly platformSettings: PlatformSettingsService,
   ) {}
 
   // ==========================================================================
@@ -66,7 +78,7 @@ export class SubscriptionsController {
 
   @Get('plans')
   async getPlans() {
-    return { plans: PLANS };
+    return this.subscriptionsService.getAvailablePlans();
   }
 
   // ==========================================================================
@@ -138,22 +150,69 @@ export class SubscriptionsController {
   // ==========================================================================
 
   @Get('payment-provider')
-  getActivePaymentProvider() {
-    // Priorité (bascule automatique, redondance à 3 prestataires) :
-    // Moteki → Chariow → YabetooPay. Si aucun n'est configuré, on le dit
-    // clairement plutôt que de planter — le frontend peut afficher un
-    // message adapté au lieu d'un checkout cassé.
-    //
-    // ⚠️ Cette bascule ne couvre que "quel prestataire est CONFIGURÉ au
-    // démarrage" (clé API présente en env) — pas un vrai failover à chaud si
-    // Moteki répond mais échoue en cours de requête (ex: 500 ponctuel). Pour
-    // ça, il faudrait détecter l'échec runtime et rebasculer dynamiquement —
-    // pas encore implémenté, à ajouter si les pannes Moteki sont fréquentes
-    // en cours de checkout plutôt qu'au démarrage.
-    if (this.motekiService.isConfigured()) return { provider: 'MOTEKI' as const };
-    if (this.chariowService.isConfigured()) return { provider: 'CHARIOW' as const };
-    if (this.yabetooPayService.isConfigured()) return { provider: 'YABETOOPAY' as const };
-    return { provider: 'NONE' as const };
+  async getActivePaymentProvider() {
+    // Choisi par le super admin (réglages plateforme)
+    const { paymentProvider } = await this.platformSettings.get();
+    const configured = {
+      YABETOOPAY: this.yabetooPayService.isConfigured(),
+      MOTEKI: this.motekiService.isConfigured(),
+      CHARIOW: this.chariowService.isConfigured(),
+    } as const;
+    return { provider: configured[paymentProvider] ? paymentProvider : ('NONE' as const) };
+  }
+
+  /** Devis actif de l'entreprise (null si aucun) */
+  @Get('quote')
+  async getActiveQuote(@Request() req) {
+    if (!req.user.companyId) return { quote: null };
+    const q = await this.customQuotesService.findActiveForCompany(req.user.companyId);
+    return {
+      quote: q && {
+        id: q.id, plan: q.plan, amount: q.amount, months: q.months,
+        isRecurring: q.isRecurring, validUntil: q.validUntil,
+      },
+    };
+  }
+
+  /** Aperçu du prix avec un code (n'enregistre rien) */
+  @Post('discount/validate')
+  @HttpCode(HttpStatus.OK)
+  async validateDiscount(@Body() dto: ValidateDiscountDto, @Request() req) {
+    if (!req.user.companyId) throw new ForbiddenException('Aucune entreprise associée');
+    const base = await this.pricingService.getPrice(dto.plan, dto.billingPeriod);
+    const a = await this.discountCodesService.apply(dto.code, req.user.companyId, base);
+    return {
+      code: a.code, percentOff: a.percentOff,
+      originalAmount: a.originalAmount, discountAmount: a.discountAmount, finalAmount: a.finalAmount,
+    };
+  }
+
+  // ── Factures ────────────────────────────────────────────────────────────
+  @Get('invoices')
+  async listInvoices(@Request() req) {
+    if (!req.user.companyId) return { invoices: [] };
+    return { invoices: await this.invoicesService.listForCompany(req.user.companyId) };
+  }
+
+  @Get('invoices/:id/pdf')
+  async downloadInvoice(@Param('id') id: string, @Request() req, @Res() res: Response) {
+    if (!req.user.companyId) throw new ForbiddenException('Aucune entreprise associée');
+    const inv = await this.invoicesService.getOwned(id, req.user.companyId);
+    const pdf = await this.invoicesService.buildPdf(inv);
+    res.set({
+      'Content-Type': 'application/pdf',
+      'Content-Disposition': `attachment; filename="${inv.number}.pdf"`,
+      'Content-Length': pdf.length,
+    });
+    res.end(pdf);
+  }
+
+  @Post('invoices/:id/resend')
+  @HttpCode(HttpStatus.OK)
+  @UseGuards(AdminGuard)
+  async resendInvoice(@Param('id') id: string, @Request() req) {
+    if (!req.user.companyId) throw new ForbiddenException('Aucune entreprise associée');
+    return this.invoicesService.resend(id, req.user.companyId, req.user.sub);
   }
 
   @Get('moteki/payment-methods')

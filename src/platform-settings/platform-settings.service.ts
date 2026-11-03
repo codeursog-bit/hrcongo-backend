@@ -1,8 +1,6 @@
 // ============================================================================
-// Fichier: backend/src/platform-settings/platform-settings.service.ts
-// Réglages plateforme (ligne unique, id=1) — lus par les crons, modifiables
-// par le super admin. Pas de scope entreprise ici, contrairement à
-// PayrollSettings.
+// src/platform-settings/platform-settings.service.ts  (remplace le fichier)
+// Réglages plateforme (ligne unique, id=1), modifiables par le super admin.
 // ============================================================================
 
 import { Injectable, Logger } from '@nestjs/common';
@@ -10,6 +8,8 @@ import { PrismaService } from '../prisma/prisma.service';
 
 const SINGLETON_ID = 1;
 const DEFAULTS = { preShiftReminderMinutes: 20 };
+
+export type SubscriptionPaymentProvider = 'YABETOOPAY' | 'MOTEKI' | 'CHARIOW';
 
 @Injectable()
 export class PlatformSettingsService {
@@ -30,7 +30,7 @@ export class PlatformSettingsService {
   }
 
   async update(
-    data: { preShiftReminderMinutes?: number },
+    data: { preShiftReminderMinutes?: number; paymentProvider?: SubscriptionPaymentProvider },
     actorUserId: string,
   ) {
     const updated = await this.prisma.platformSettings.upsert({

@@ -357,6 +357,7 @@ model Company {
   subscription               Subscription?
   bulletinTemplate           BulletinTemplate?
 
+leaveAppliesToContractors Boolean @default(false)
   // 🆕 RELATION PAIEMENTS (One-to-Many - accès direct)
   payments Payment[] @relation("CompanyPayments")
   
@@ -436,6 +437,11 @@ model Company {
   financeCategories   FinanceCategory[]
   financeTransactions FinanceTransaction[]
   financeBudgets      FinanceBudget[]
+
+  discountCodes DiscountCode[]
+  customQuotes  CustomQuote[]
+
+  invoices Invoice[]
 
   affiliatedBy          String?                   @db.Uuid
   affiliate             Affiliate?                @relation("AffiliateCompanies", fields: [affiliatedBy], references: [id], onDelete: SetNull)
@@ -2369,7 +2375,7 @@ model Leave {
   isManual         Boolean   @default(false)
 
   debitedCycleStartDate DateTime? @db.Date
-
+  balanceDebitedAt DateTime?
   cancelledAt        DateTime? @db.Timestamptz
   cancellationReason String?   @db.Text
 
@@ -4659,6 +4665,22 @@ model Payment {
   chariowProductId     String? @db.VarChar(100)
   chariowCustomerEmail String? @db.VarChar(255)
   chariowDiscountCode  String? @db.VarChar(100)
+  
+
+  originalAmount Int? @db.Integer // prix catalogue avant réduction
+  discountAmount Int? @db.Integer // montant déduit (0/null si aucun code)
+
+  discountCodeId String?       @db.Uuid
+  discountCode   DiscountCode? @relation(fields: [discountCodeId], references: [id], onDelete: SetNull)
+
+  customQuoteId String?      @db.Uuid
+  customQuote   CustomQuote? @relation(fields: [customQuoteId], references: [id], onDelete: SetNull)
+
+  discountRedemption DiscountRedemption?
+
+  invoice Invoice?
+
+
   // Montant
   amount               Int     @db.Integer
   currency             String  @default("XAF") @db.Char(3)
@@ -4691,6 +4713,8 @@ model Payment {
   @@index([companyId])
   @@index([status])
   @@index([yabetooIntentId])
+  @@index([discountCodeId])
+  @@index([customQuoteId])
   @@index([createdAt])
   @@map("payments")
 }
@@ -5363,6 +5387,7 @@ model CronLock {
 model PlatformSettings {
   id                      Int      @id @default(1)
   preShiftReminderMinutes Int      @default(20)
+  paymentProvider PaymentProvider @default(YABETOOPAY)
   updatedAt               DateTime @updatedAt @db.Timestamptz
   updatedByUserId         String?  @db.Uuid
 
@@ -5688,3 +5713,144 @@ model FinanceBudget {
   @@index([companyId, year, month])
   @@map("finance_budgets")
 }
+
+
+
+
+model PlanPrice {
+  plan            SubscriptionPlan @id
+  priceMonthly    Int              @db.Integer
+  priceYearly     Int              @db.Integer
+  updatedAt       DateTime         @updatedAt @db.Timestamptz
+  updatedByUserId String?          @db.Uuid
+
+  @@map("plan_prices")
+}
+
+model DiscountCode {
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+
+  code       String @unique @db.VarChar(50) // stocké en MAJUSCULES
+  percentOff Int    @db.Integer // 1..99
+
+  // null = utilisable par toute entreprise ; sinon réservé à CETTE entreprise
+  companyId String?  @db.Uuid
+  company   Company? @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  maxUses           Int? @db.Integer // total d'utilisations (null = illimité)
+  maxUsesPerCompany Int? @db.Integer // par entreprise (null = illimité → réduction à chaque paiement)
+
+  validFrom  DateTime? @db.Timestamptz
+  validUntil DateTime? @db.Timestamptz
+  isActive   Boolean   @default(true)
+  note       String?   @db.VarChar(500)
+
+  createdByUserId String? @db.Uuid
+  createdAt       DateTime @default(now()) @db.Timestamptz
+  updatedAt       DateTime @updatedAt @db.Timestamptz
+
+  payments    Payment[]
+  redemptions DiscountRedemption[]
+
+  @@index([companyId])
+  @@index([isActive])
+  @@map("discount_codes")
+}
+
+// Une ligne par paiement RÉUSSI ayant utilisé un code (sert aux limites + stats)
+model DiscountRedemption {
+  id             String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  discountCodeId String       @db.Uuid
+  discountCode   DiscountCode @relation(fields: [discountCodeId], references: [id], onDelete: Cascade)
+  companyId      String       @db.Uuid
+  paymentId      String       @unique @db.Uuid
+  payment        Payment      @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+
+  originalAmount Int @db.Integer
+  discountAmount Int @db.Integer
+  finalAmount    Int @db.Integer
+
+  createdAt DateTime @default(now()) @db.Timestamptz
+
+  @@index([discountCodeId])
+  @@index([companyId])
+  @@map("discount_redemptions")
+}
+
+enum CustomQuoteStatus {
+  ACTIVE
+  USED
+  CANCELED
+
+  @@map("custom_quote_status")
+}
+
+// Paiement « sur devis » : montant négocié, hors grille de prix
+model CustomQuote {
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+
+  companyId String  @db.Uuid
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  // Plan dont on applique les fonctionnalités/limites à l'activation
+  plan   SubscriptionPlan
+  amount Int              @db.Integer // montant total à payer
+  months Int              @default(1) @db.Integer // durée accordée
+
+  // false = utilisable une fois (passe en USED) ; true = reste ACTIVE → même tarif à chaque renouvellement
+  isRecurring Boolean           @default(false)
+  status      CustomQuoteStatus @default(ACTIVE)
+  validUntil  DateTime?         @db.Timestamptz
+  usedAt      DateTime?         @db.Timestamptz
+  note        String?           @db.VarChar(500)
+
+  createdByUserId String?  @db.Uuid
+  createdAt       DateTime @default(now()) @db.Timestamptz
+  updatedAt       DateTime @updatedAt @db.Timestamptz
+
+  payments Payment[]
+
+  @@index([companyId, status])
+  @@map("custom_quotes")
+}
+
+// Compteur annuel : numérotation séquentielle sans trou (FAC-2026-000001…)
+model InvoiceCounter {
+  year    Int @id
+  lastSeq Int @default(0)
+
+  @@map("invoice_counters")
+}
+
+model Invoice {
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+
+  number String @unique @db.VarChar(30)
+
+  paymentId String  @unique @db.Uuid
+  payment   Payment @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+
+  companyId String  @db.Uuid
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  issuedAt DateTime @default(now()) @db.Timestamptz
+
+  // Instantanés : une facture émise ne change plus, même si l'entreprise ou les prix évoluent
+  customer    Json // { name, address, city, phone, email, taxNumber }
+  lines       Json // [{ description, unitPrice, quantity, total }]
+  paymentInfo Json // { methodLabel, providerLabel, reference, paidAt }
+
+  subtotal  Int    @db.Integer
+  vatRate   Int    @default(0) @db.Integer
+  vatAmount Int    @default(0) @db.Integer
+  total     Int    @db.Integer
+  currency  String @default("XAF") @db.VarChar(3)
+
+  sentTo      String[]
+  emailSentAt DateTime? @db.Timestamptz
+  createdAt   DateTime  @default(now()) @db.Timestamptz
+
+  @@index([companyId, issuedAt])
+  @@map("invoices")
+}
+

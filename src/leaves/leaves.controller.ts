@@ -433,6 +433,12 @@ export class LeavesController {
     return this.leavesService.findMyLeaves(req.user.userId);
   }
 
+  /** Éligibilité aux congés de l'utilisateur connecté (masque le menu côté front) */
+  @Get('me/eligibility')
+  getMyLeaveEligibility(@Request() req) {
+    return this.leavesService.getMyLeaveEligibility(req.user.userId);
+  }
+
   /** Mon solde de congés (employé connecté) */
   @Get('me/balance')
   getMyBalance(@Request() req) {

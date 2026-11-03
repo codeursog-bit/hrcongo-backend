@@ -772,7 +772,18 @@ export class ApprovalDecisionsService {
   // Chaque élément porte companyId / companyName / external pour que l'écran sache
   // sur quelle entreprise donner l'avis (paramètre ?companyId=).
   // ══════════════════════════════════════════════════════════════════════════
-  async getInboxAll(userId: string) {
+  // Cache court (20 s) par utilisateur : le compteur de la sidebar / du portefeuille
+  // interroge cette route en boucle, et elle coûte ~15-20 requêtes SQL.
+  // `fresh=1` (après un avis / une décision) contourne le cache.
+  private readonly inboxAllCache = new Map<string, { at: number; data: { items: any[] } }>();
+  private static readonly INBOX_ALL_TTL_MS = 20_000;
+
+  async getInboxAll(userId: string, fresh = false) {
+    const hit = this.inboxAllCache.get(userId);
+    if (!fresh && hit && Date.now() - hit.at < ApprovalDecisionsService.INBOX_ALL_TTL_MS) {
+      return hit.data;
+    }
+
     const me = await this.prisma.user.findUnique({
       where: { id: userId },
       select: { companyId: true, isActive: true },
@@ -809,6 +820,14 @@ export class ApprovalDecisionsService {
     }
 
     out.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-    return { items: out };
+
+    const data = { items: out };
+    // Purge simple pour éviter que la Map grossisse indéfiniment
+    if (this.inboxAllCache.size > 500) {
+      const limit = Date.now() - ApprovalDecisionsService.INBOX_ALL_TTL_MS;
+      for (const [k, v] of this.inboxAllCache) if (v.at < limit) this.inboxAllCache.delete(k);
+    }
+    this.inboxAllCache.set(userId, { at: Date.now(), data });
+    return data;
   }
 }

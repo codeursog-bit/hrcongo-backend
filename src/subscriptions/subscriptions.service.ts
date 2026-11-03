@@ -555,6 +555,11 @@ import { randomUUID } from 'crypto';
 import { AffiliateService } from '../affiliate/affiliate.service'; // ← AJOUT
 import { NotificationsService } from '../notifications/notifications.service';
 import { MailService } from '../mail/mail.service';
+import { PricingService } from './pricing.service';
+import { DiscountCodesService } from './discount-codes.service';
+import { CustomQuotesService } from './custom-quotes.service';
+import { PlatformSettingsService } from '../platform-settings/platform-settings.service';
+import { InvoicesService } from '../invoices/invoices.service';
 
 @Injectable()
 export class SubscriptionsService {
@@ -569,7 +574,23 @@ export class SubscriptionsService {
     private affiliateService: AffiliateService, // ← AJOUT
     private notificationsService: NotificationsService, // ← rappels J-7/J-3/J-1
     private mailService: MailService, // ← rappels par email (module global, pas d'import module requis)
+    private pricingService: PricingService, // ← prix des plans modifiables (super admin)
+    private discountCodesService: DiscountCodesService, // ← codes de réduction
+    private customQuotesService: CustomQuotesService, // ← paiement sur devis
+    private platformSettings: PlatformSettingsService, // ← agrégateur actif choisi par le super admin
+    private invoicesService: InvoicesService, // ← facture PDF + email
   ) {}
+
+  /** Refuse l'initiation d'un paiement si l'agrégateur n'est pas celui choisi par le super admin.
+   *  Ne concerne QUE la création de paiement : webhooks et polling des paiements déjà en cours restent actifs. */
+  private async assertProvider(expected: 'YABETOOPAY' | 'MOTEKI' | 'CHARIOW') {
+    const { paymentProvider } = await this.platformSettings.get();
+    if (paymentProvider !== expected) {
+      throw new BadRequestException(
+        "Ce moyen de paiement n'est plus actif actuellement. Rechargez la page pour continuer.",
+      );
+    }
+  }
 
   // ==========================================================================
   // 🎁 CRÉER UN ABONNEMENT AVEC ESSAI GRATUIT 30 JOURS PRO
@@ -870,40 +891,83 @@ export class SubscriptionsService {
     dto: UpgradeCheckoutDto,
     userId: string,
   ) {
-    this.logger.log(
-      `💳 Creating payment intent for company: ${companyId} - Plan: ${dto.plan}`,
-    );
+    // L'agrégateur actif est choisi par le super admin
+    await this.assertProvider('YABETOOPAY');
 
     const currentSubscription = await this.prisma.subscription.findUnique({
       where: { companyId },
     });
-
     if (!currentSubscription) {
       throw new NotFoundException('Aucun abonnement trouvé');
     }
 
-    const amount = getPlanPrice(dto.plan, dto.billingPeriod);
-    const planConfig = PLANS[dto.plan];
+    let plan = dto.plan;
+    let billingPeriod = dto.billingPeriod;
+    let amount: number;
+    let originalAmount: number | null = null;
+    let discountAmount = 0;
+    let discountCodeId: string | null = null;
+    let customQuoteId: string | null = null;
+    let months: number | undefined;
 
-    this.logger.log(`💰 Amount: ${amount} XAF`);
+    if (dto.useQuote) {
+      // ── Tarif négocié : le devis impose plan, montant et durée ─────────────
+      if (dto.discountCode) {
+        throw new BadRequestException(
+          'Un code de réduction ne peut pas être cumulé avec un tarif négocié',
+        );
+      }
+      const quote = await this.customQuotesService.findActiveForCompany(companyId);
+      if (!quote) {
+        throw new BadRequestException('Aucun devis actif pour votre entreprise');
+      }
+      plan = quote.plan;
+      amount = quote.amount;
+      months = quote.months;
+      billingPeriod = quote.months >= 12 ? 'yearly' : 'monthly';
+      customQuoteId = quote.id;
+    } else {
+      // ── Tarif catalogue (prix lus en BDD) + code de réduction éventuel ─────
+      const listPrice = await this.pricingService.getPrice(plan, billingPeriod);
+      amount = listPrice;
+      if (dto.discountCode) {
+        const applied = await this.discountCodesService.apply(
+          dto.discountCode,
+          companyId,
+          listPrice,
+        );
+        amount = applied.finalAmount;
+        originalAmount = applied.originalAmount;
+        discountAmount = applied.discountAmount;
+        discountCodeId = applied.discountCodeId;
+      }
+    }
 
-    // 🚀 CRÉER LE PAYMENT INTENT (pas de session checkout)
+    const planConfig = await this.pricingService.getPlan(plan);
+    this.logger.log(
+      `💳 Intent company=${companyId} plan=${plan} amount=${amount} XAF` +
+        (discountCodeId ? ` (remise ${discountAmount})` : '') +
+        (customQuoteId ? ' (devis)' : ''),
+    );
+
     const intent = await this.yabetooPayService.createPaymentIntent({
       amount,
       currency: 'xaf',
       metadata: {
         companyId,
         subscriptionId: currentSubscription.id,
-        plan: dto.plan,
-        billingPeriod: dto.billingPeriod,
+        plan,
+        billingPeriod,
         userId,
       },
     });
 
-    this.logger.log(`✅ Payment intent created: ${intent.id}`);
-    this.logger.log(`🔑 Client secret: ${intent.client_secret}`);
+    const periodLabel = customQuoteId
+      ? `Tarif négocié (${months} mois)`
+      : billingPeriod === 'yearly'
+        ? 'Annuel'
+        : 'Mensuel';
 
-    // 💾 SAUVEGARDER EN BDD
     const payment = await this.prisma.payment.create({
       data: {
         subscriptionId: currentSubscription.id,
@@ -913,25 +977,33 @@ export class SubscriptionsService {
         amount,
         currency: 'XAF',
         status: 'PENDING',
-        description: `Abonnement ${planConfig.name} - ${dto.billingPeriod === 'yearly' ? 'Annuel' : 'Mensuel'}`,
+        description: `Abonnement ${planConfig.name} - ${periodLabel}`,
+        originalAmount,
+        discountAmount: discountCodeId ? discountAmount : null,
+        discountCodeId,
+        customQuoteId,
         metadata: {
-          plan: dto.plan,
-          billingPeriod: dto.billingPeriod,
+          plan,
+          billingPeriod,
+          months: months ?? null,
           intentId: intent.id,
+          userId,
         },
       },
     });
-
     this.logger.log(`💾 Payment record created: ${payment.id}`);
 
-    // Retourner intentId + clientSecret au frontend pour confirmer le paiement
     return {
       intentId: intent.id,
       clientSecret: intent.client_secret,
       paymentId: payment.id,
-      plan: dto.plan,
-      billingPeriod: dto.billingPeriod,
+      plan,
+      billingPeriod,
       amount,
+      originalAmount,
+      discountAmount,
+      isQuote: !!customQuoteId,
+      months: months ?? null,
     };
   }
 
@@ -1006,8 +1078,7 @@ export class SubscriptionsService {
   // ==========================================================================
 
   private async handlePaymentSuccess(payment: any, confirmation: any) {
-    const metadata = payment.metadata;
-    const { plan, billingPeriod } = metadata;
+    const { plan, billingPeriod, months } = payment.metadata;
 
     await this.prisma.payment.update({
       where: { id: payment.id },
@@ -1018,7 +1089,21 @@ export class SubscriptionsService {
       },
     });
 
-    await this.activateUpgrade(payment.companyId, plan, billingPeriod);
+    await this.activateUpgrade(payment.companyId, plan, billingPeriod, {
+      months: months ?? undefined,
+      // Devis : prix mensuel équivalent = montant payé / durée
+      pricePerMonth: months ? Math.round(payment.amount / months) : undefined,
+    });
+
+    // ─── Consommation du code de réduction / du devis ─────────────────────
+    try {
+      await this.discountCodesService.recordRedemption(payment);
+      if (payment.customQuoteId) {
+        await this.customQuotesService.markPaid(payment.customQuoteId);
+      }
+    } catch (err) {
+      this.logger.error('[Billing] Erreur enregistrement remise/devis:', err);
+    }
 
     // ─── COMMISSION AFFILIÉ ────────────────────────────────────────────────
     try {
@@ -1030,6 +1115,11 @@ export class SubscriptionsService {
         err,
       );
     }
+
+    // ─── FACTURE (PDF + email) — n'attend pas, ne bloque jamais l'activation ──
+    void this.invoicesService.issueForPayment(payment.id).catch((err) =>
+      this.logger.error('[Invoice] Erreur émission facture:', err),
+    );
   }
 
   // ==========================================================================
@@ -1138,6 +1228,7 @@ export class SubscriptionsService {
   // ==========================================================================
 
   async createMotekiCheckout(companyId: string, dto: MotekiCheckoutDto) {
+    await this.assertProvider('MOTEKI');
     this.logger.log(
       `🛒 [Moteki v2] Initiation paiement — company: ${companyId} — plan: ${dto.plan} (${dto.billingPeriod})`,
     );
@@ -1329,6 +1420,10 @@ export class SubscriptionsService {
         this.logger.error('[Affiliate] Erreur calcul commission (Moteki):', err);
       }
 
+      void this.invoicesService.issueForPayment(payment.id).catch((err) =>
+        this.logger.error('[Invoice] Erreur émission facture (Moteki):', err),
+      );
+
       this.logger.log(
         `🎉 [Moteki v2] Paiement ${payment.motekiPaymentReference} confirmé payé → abonnement activé pour company ${payment.companyId}`,
       );
@@ -1437,6 +1532,7 @@ export class SubscriptionsService {
   // ==========================================================================
 
   async createChariowCheckout(companyId: string, dto: ChariowCheckoutDto) {
+    await this.assertProvider('CHARIOW');
     this.logger.log(
       `🛒 [Chariow] Initiation checkout — company: ${companyId} — plan: ${dto.plan} (${dto.billingPeriod})`,
     );
@@ -1602,6 +1698,10 @@ export class SubscriptionsService {
         this.logger.error('[Affiliate] Erreur calcul commission (Chariow):', err);
       }
 
+      void this.invoicesService.issueForPayment(payment.id).catch((err) =>
+        this.logger.error('[Invoice] Erreur émission facture (Chariow):', err),
+      );
+
       this.logger.log(
         `🎉 [Chariow] Vente ${payment.chariowSaleId} confirmée payée → abonnement activé pour company ${payment.companyId}`,
       );
@@ -1697,12 +1797,13 @@ export class SubscriptionsService {
     companyId: string,
     plan: 'BASIC' | 'PRO' | 'ENTERPRISE',
     billingPeriod: 'monthly' | 'yearly',
+    opts?: { months?: number; pricePerMonth?: number },
   ) {
     this.logger.log(
       `✅ Activating upgrade for company: ${companyId} to ${plan} (${billingPeriod})`,
     );
 
-    const planConfig = PLANS[plan];
+    const planConfig = await this.pricingService.getPlan(plan);
     const now = new Date();
 
     const currentSubscription = await this.prisma.subscription.findUnique({
@@ -1727,7 +1828,9 @@ export class SubscriptionsService {
       : now;
 
     const periodEnd = new Date(periodStart);
-    if (billingPeriod === 'yearly') {
+    if (opts?.months) {
+      periodEnd.setMonth(periodEnd.getMonth() + opts.months);
+    } else if (billingPeriod === 'yearly') {
       periodEnd.setFullYear(periodEnd.getFullYear() + 1);
     } else {
       periodEnd.setMonth(periodEnd.getMonth() + 1);
@@ -1739,7 +1842,7 @@ export class SubscriptionsService {
         plan,
         status: 'ACTIVE',
         billingCycle: billingPeriod === 'yearly' ? 'YEARLY' : 'MONTHLY',
-        pricePerMonth: planConfig.priceMonthly,
+        pricePerMonth: opts?.pricePerMonth ?? planConfig.priceMonthly,
         trialEndsAt: null,
         currentPeriodStart: periodStart,
         currentPeriodEnd: periodEnd,
@@ -2126,7 +2229,11 @@ export class SubscriptionsService {
   // 📋 RÉCUPÉRER TOUS LES PLANS DISPONIBLES
   // ==========================================================================
 
-  getAvailablePlans() {
-    return { plans: PLANS };
+  async getAvailablePlans() {
+    // Avec Moteki/Chariow, les prix sont préconfigurés sur leurs dashboards : on affiche ceux de plans.config.ts.
+    const { paymentProvider } = await this.platformSettings.get();
+    return {
+      plans: paymentProvider === 'YABETOOPAY' ? await this.pricingService.getPlans() : PLANS,
+    };
   }
 }

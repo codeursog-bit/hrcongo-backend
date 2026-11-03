@@ -175,8 +175,11 @@ export class ApprovalsController {
 
   // ── Avis à donner, toutes entreprises confondues (la sienne + celles où l'admin lui a donné une fonction) ──
   @Get('inbox/all')
-  getInboxAll(@GetUser('id') userId: string) {
-    return this.decisions.getInboxAll(userId);
+  getInboxAll(
+    @GetUser('id') userId: string,
+    @Query('fresh') fresh?: string,
+  ) {
+    return this.decisions.getInboxAll(userId, fresh === '1');
   }
 
   // ── LOT B : avis à donner ─────────────────────────────────────────────────

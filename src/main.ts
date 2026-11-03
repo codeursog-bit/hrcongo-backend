@@ -127,15 +127,12 @@ async function bootstrap() {
         // Origine dans la liste explicite
         if (allowedOrigins.includes(origin)) return callback(null, true);
 
-        // Previews Vercel dynamiques (ex: konza-xyz-nathan-devs-projects.vercel.app)
-        const isVercelPreview =
-          origin.endsWith('.onrender.com') &&
-          origin.includes('nathan-devs-projects');
-
-        // Previews Render dynamiques (back appelé depuis preview front)
-        const isRenderPreview = origin.endsWith('.onrender.com');
-
-        if (isVercelPreview || isRenderPreview) return callback(null, true);
+        // 🔒 Previews Render : autorisées UNIQUEMENT hors production.
+        // Avant : tout « *.onrender.com » était accepté, même en prod. Or n'importe qui
+        // peut créer « evil.onrender.com » : avec `credentials: true` (cookies envoyés),
+        // une telle page pouvait appeler l'API au nom d'un utilisateur connecté ET lire
+        // les réponses. En production, seule la liste CORS_ORIGINS fait foi.
+        if (!isProd && origin.endsWith('.onrender.com')) return callback(null, true);
 
         logger.warn(`❌ CORS bloqué : ${origin}`);
         callback(new Error('Not allowed by CORS'));
