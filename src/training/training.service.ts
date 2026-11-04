@@ -575,6 +575,10 @@ export class TrainingService {
   // ══════════════════════════════════════════════════════════════════════════
   async getPasseport(targetEmployeeId: string, userId: string) {
     const user = await this.getUser(userId);
+    const target = await this.prisma.employee.findFirst({
+      where: { id: targetEmployeeId, companyId: user.companyId }, select: { id: true },
+    });
+    if (!target) throw new ForbiddenException('Salarié non autorisé.');
     const isRH = RH_ROLES.includes(user.role);
     const isManager = user.role === 'MANAGER';
 

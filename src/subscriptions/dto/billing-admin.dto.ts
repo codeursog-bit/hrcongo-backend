@@ -7,9 +7,8 @@ export class UpdatePlanPriceDto {
   @IsInt() @Min(100) @Max(100_000_000)
   priceMonthly: number;
 
-  // Si absent → 10 × mensuel (convention actuelle du catalogue)
-  @IsOptional() @IsInt() @Min(100) @Max(1_000_000_000)
-  priceYearly?: number;
+  @IsInt() @Min(100) @Max(1_000_000_000)
+  priceYearly: number;
 }
 
 export class CreateDiscountCodeDto {

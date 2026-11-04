@@ -57,6 +57,8 @@ export class AssetsService {
   // ── Créer un actif ──────────────────────────────────────────────────────────
   async create(dto: CreateAssetDto, userId: string) {
     const user = await this.getVerifiedUser(userId);
+    this.assertAssetManagerRole(user.role);
+    if (dto.employeeId) await this.assertEmployeeCompany(dto.employeeId, user.companyId);
 
     await this.subscriptionGuard.checkFeatureAccess(
       user.companyId,
@@ -103,6 +105,7 @@ export class AssetsService {
       select: { id: true, companyId: true, role: true, manageMultipleCompanies: true },
     });
     if (!user) throw new NotFoundException('Entreprise introuvable');
+    this.assertAssetManagerRole(user.role);
 
     // 🔒 CORRECTIF SÉCURITÉ (audit) : overrideCompanyId était accepté tel
     // quel dès que isCabinet était vrai, jamais vérifié contre
@@ -131,6 +134,7 @@ export class AssetsService {
     const user = await this.getVerifiedUser(userId);
     this.assertAssetManagerRole(user.role);
     await this.getAssetOrFail(assetId, user.companyId);
+    if (employeeId !== null) await this.assertEmployeeCompany(employeeId, user.companyId);
 
     return this.prisma.asset.update({
       where: { id: assetId },
@@ -241,10 +245,22 @@ export class AssetsService {
   }
 
   // ── Actifs d'un employé ─────────────────────────────────────────────────────
-  async findByEmployee(employeeId: string) {
+  async findByEmployee(employeeId: string, userId: string) {
+    const user = await this.getVerifiedUser(userId);
+    this.assertAssetManagerRole(user.role);
+    const employee = await this.prisma.employee.findFirst({
+      where: { id: employeeId, companyId: user.companyId }, select: { id: true },
+    });
+    if (!employee) throw new ForbiddenException('Salarié non autorisé.');
     return this.prisma.asset.findMany({
-      where: { assignedTo: employeeId },
+      where: { assignedTo: employeeId, companyId: user.companyId },
       orderBy: { createdAt: 'desc' },
     });
+  }
+
+  private async assertEmployeeCompany(employeeId: string, companyId: string) {
+    if (typeof employeeId !== 'string' || !employeeId) throw new BadRequestException('Salarié invalide.');
+    const employee = await this.prisma.employee.findFirst({ where: { id: employeeId, companyId }, select: { id: true } });
+    if (!employee) throw new ForbiddenException('Salarié non autorisé.');
   }
 }

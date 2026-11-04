@@ -63,6 +63,7 @@ import { NotificationsModule } from '../notifications/notifications.module';
 import { PlatformSettingsModule } from '../platform-settings/platform-settings.module';
 import { BillingAdminController } from './billing-admin.controller';
 import { PricingService } from './pricing.service';
+import { PublicPlansController } from './public-plans.controller';
 import { DiscountCodesService } from './discount-codes.service';
 import { CustomQuotesService } from './custom-quotes.service';
 import { InvoicesService } from '../invoices/invoices.service';
@@ -79,6 +80,7 @@ import { InvoicesService } from '../invoices/invoices.service';
   ],
   controllers: [
     SubscriptionsController,
+    PublicPlansController,
     WebhooksController, // ← webhook YabetooPay : conservé pour l'historique + les versements affiliés (disbursement.completed)
     MotekiWebhooksController, // ← webhook Moteki
     ChariowWebhooksController, // ← webhook Chariow (Pulse) : 3e prestataire, redondance de Moteki

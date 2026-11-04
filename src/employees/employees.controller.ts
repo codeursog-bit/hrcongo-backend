@@ -202,6 +202,8 @@ import {
   HttpException,
   HttpStatus,
   ForbiddenException,
+  BadRequestException,
+  ParseUUIDPipe,
 } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
 import { EmployeesService } from './employees.service';
@@ -302,9 +304,11 @@ export class EmployeesController {
   @Get()
   async findAll(@Request() req, @Query() query: any) {
     try {
-      const page = parseInt(query?.page) || 1;
+      const page = query?.page === undefined ? 1 : Number(query.page);
       // Plafond : le front demande jusqu'à 1000 ; sans borne, ?limit=1000000 chargeait tout d'un coup
-      const limit = Math.min(parseInt(query?.limit) || 50, 1000);
+      const requestedLimit = query?.limit === undefined ? 50 : Number(query.limit);
+      if (!Number.isSafeInteger(page) || page < 1 || !Number.isSafeInteger(requestedLimit) || requestedLimit < 1) throw new BadRequestException('Pagination invalide.');
+      const limit = Math.min(requestedLimit, 1000);
       // ✅ FIX BUG 5: passer companyId pour les rôles cabinet
       const companyId = query?.companyId ?? undefined;
       // 🆕 Recherche/filtres — doivent porter sur TOUS les employés, pas seulement la page affichée
@@ -412,7 +416,7 @@ export class EmployeesController {
   // ==========================================================================
   @Get(':id')
   async findOne(
-    @Param('id') id: string,
+    @Param('id', ParseUUIDPipe) id: string,
     @Request() req,
     @Query('companyId') companyId?: string,
   ) {

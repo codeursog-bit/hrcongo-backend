@@ -97,10 +97,12 @@
 
 import { ExtractJwt, Strategy } from 'passport-jwt';
 import { PassportStrategy } from '@nestjs/passport';
-import { Injectable, UnauthorizedException } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Request } from 'express';
 import { pickFreshestCookie } from '../common/utils/cookie.util';
+import { PrismaService } from '../prisma/prisma.service';
+import { validateAccessSession } from './access-session';
 
 // ─── Extracteur : cookie d'abord, puis header Bearer (rétrocompat mobile/SSE) ──
 function extractJwt(req: Request): string | null {
@@ -128,7 +130,7 @@ function extractJwt(req: Request): string | null {
 
 @Injectable()
 export class JwtStrategy extends PassportStrategy(Strategy) {
-  constructor(configService: ConfigService) {
+  constructor(configService: ConfigService, private readonly prisma: PrismaService) {
     super({
       jwtFromRequest: extractJwt,
       ignoreExpiration: false,
@@ -144,17 +146,6 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     // 2fa-pending, trusted-device...). Sans ce garde-fou, n'importe lequel de ces
     // tokens passerait ici comme identité d'accès, et des guards comme AdminGuard
     // (qui re-dérivent le rôle en base à partir du seul `sub`) l'accepteraient.
-    if (payload.type !== 'access') {
-      throw new UnauthorizedException('Type de token invalide');
-    }
-    return {
-      id: payload.sub, // ✅ AJOUT — req.user.id fonctionne partout
-      userId: payload.sub,
-      email: payload.email,
-      role: payload.role,
-      companyId: payload.companyId ?? null,
-      cabinetId: payload.cabinetId ?? null,
-      managedByCabinet: payload.managedByCabinet ?? false,
-    };
+    return validateAccessSession(this.prisma, payload);
   }
 }

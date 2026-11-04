@@ -522,7 +522,14 @@ export class AuthService {
     userId: string,
     refreshToken: string | undefined,
     res: Response,
+    sessionId?: string,
   ) {
+    if (sessionId) {
+      await this.prisma.userSession.updateMany({
+        where: { jti: sessionId, userId, revokedAt: null },
+        data: { revokedAt: new Date() },
+      });
+    }
     if (refreshToken) {
       try {
         const payload = this.jwtService.verify(refreshToken);
@@ -686,6 +693,7 @@ export class AuthService {
   private async issueTokensAndSetCookies(user: any, res: Response) {
     const jti = uuidv4();
     const accessPayload = {
+      sid: jti,
       email: user.email,
       sub: user.id,
       role: user.role,

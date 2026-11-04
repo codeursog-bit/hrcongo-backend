@@ -68,6 +68,11 @@ export class BillingAdminController {
     return this.discountCodes.update(id, dto);
   }
 
+  @Delete('discount-codes/:id')
+  deleteCode(@Param('id', ParseUUIDPipe) id: string) {
+    return this.discountCodes.remove(id);
+  }
+
   // ── Devis ───────────────────────────────────────────────────────────────
   @Get('quotes')
   listQuotes(@Query('companyId') companyId?: string) {

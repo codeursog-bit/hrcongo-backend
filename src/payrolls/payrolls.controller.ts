@@ -1,3 +1,4 @@
+import { validateSimulationItems } from './payroll-simulation-validation';
 // ============================================================================
 // 📁 payrolls.controller.ts — VERSION FINALE
 // ✅ PATCH /:id/recalculate — recalcul complet après modification bulletin
@@ -182,6 +183,7 @@ export class PayrollsController {
     @Request() req: any,
   ) {
     const { employeeId, month, year, ...rest } = body;
+    validateSimulationItems(rest.bonuses, 'bonuses');
 
     // Normaliser les noms de champs (front cabinet → back)
     const overrides: any = {
@@ -197,6 +199,7 @@ export class PayrollsController {
           amount: b.amount,
           isTaxable: b.isTaxable ?? true,
           isCnss: b.isCnss ?? true,
+          fiscalType: b.fiscalType,
         })) ?? rest.manualBonuses,
       advanceAmount: rest.advanceAmount,
       loanDeduction: rest.loanDeduction,

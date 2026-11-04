@@ -668,6 +668,8 @@ import { CreateCandidateDto } from './dto/create-candidate.dto';
 import { CloudinaryService } from '../cloudinary/cloudinary.service';
 import { PrismaService } from '../prisma/prisma.service';
 import type { Request } from 'express';
+import { RecruitmentTestAccessService } from './recruitment-test-access.service';
+import { SubmitTestDto } from './dto/submit-test.dto';
 
 const MAX_TAB_SWITCHES = 3;
 
@@ -678,6 +680,7 @@ export class PublicRecruitmentController {
     private readonly recruitmentAIService: RecruitmentAIService,
     private readonly cloudinaryService: CloudinaryService,
     private readonly prisma: PrismaService,
+    private readonly testAccess: RecruitmentTestAccessService,
   ) {}
 
   @Get('portal')
@@ -962,9 +965,7 @@ export class PublicRecruitmentController {
 
     if (existingCandidate) {
       if (existingCandidate.canRetake) {
-        await this.prisma.candidate.delete({
-          where: { id: existingCandidate.id },
-        });
+        throw new BadRequestException('Utilisez le lien de reprise communiqué par le recruteur.');
       } else {
         const statusMsg = existingCandidate.autoDisqualified
           ? 'Disqualifié pour activité suspecte'
@@ -1104,7 +1105,8 @@ export class PublicRecruitmentController {
           message: `Félicitations ${data.firstName} ! Passez le test.`,
           isEligible: true,
           shouldTakeTest: true,
-          testUrl: `/jobs/${id}/test/${candidate.id}`,
+          testToken: this.testAccess.issue(candidate),
+          testUrl: `/jobs/ia/${id}/test/${candidate.id}`,
           cvScore: preScreening.cvScore,
           strengths: preScreening.strengths,
         };
@@ -1160,7 +1162,8 @@ export class PublicRecruitmentController {
   }
 
   @Get(':jobId/test-questions')
-  async getTestQuestions(@Param('jobId') jobId: string) {
+  async getTestQuestions(@Param('jobId') jobId: string, @Req() req: Request) {
+    await this.testAccess.authorize(jobId, req.headers.authorization?.replace(/^Bearer /i, ''));
     const questions = await this.prisma.jobOfferTestQuestion.findMany({
       where: { jobOfferId: jobId },
       orderBy: { order: 'asc' },
@@ -1195,33 +1198,34 @@ export class PublicRecruitmentController {
   async submitTest(
     @Param('jobId') jobId: string,
     @Param('candidateId') candidateId: string,
-    @Body()
-    data: {
-      answers: Record<string, string>;
-      tabSwitchCount?: number;
-      testDuration?: number;
-    },
+    @Body() data: SubmitTestDto,
+    @Req() req: Request,
   ) {
-    const candidate = await this.prisma.candidate.findFirst({
-      where: { id: candidateId, jobOfferId: jobId },
-    });
-    if (!candidate) throw new NotFoundException('Candidat introuvable');
-    if (candidate.testCompletedAt)
-      throw new BadRequestException('Vous avez déjà soumis ce test');
+    const candidate = await this.testAccess.authorize(jobId, req.headers.authorization?.replace(/^Bearer /i, ''), candidateId);
+    const answerEntries = Object.entries(data.answers);
+    if (answerEntries.length > 200 || answerEntries.some(([id, answer]) => !/^[0-9a-f-]{36}$/i.test(id) || typeof answer !== 'string' || answer.length > 10000)) {
+      throw new BadRequestException('Réponses invalides.');
+    }
+    const validQuestions = await this.prisma.jobOfferTestQuestion.count({ where: { jobOfferId: jobId, id: { in: answerEntries.map(([id]) => id) } } });
+    if (validQuestions !== answerEntries.length) throw new BadRequestException('Question non autorisée.');
 
     const tabSwitches = data.tabSwitchCount || 0;
-    if (tabSwitches >= MAX_TAB_SWITCHES) {
-      await this.prisma.candidate.update({
-        where: { id: candidateId },
-        data: {
+    const disqualified = tabSwitches >= MAX_TAB_SWITCHES;
+    await this.prisma.$transaction(async tx => {
+      const claimed = await tx.candidate.updateMany({
+        where: { id: candidateId, jobOfferId: jobId, testCompletedAt: null, retakeGrantedAt: candidate.retakeGrantedAt },
+        data: { testCompletedAt: new Date(), testDuration: data.testDuration,
           tabSwitchCount: tabSwitches,
-          suspiciousActivity: true,
-          autoDisqualified: true,
-          autoDisqualifiedAt: new Date(),
-          status: 'DISQUALIFIED',
-          testCompletedAt: new Date(),
+          ...(disqualified ? { suspiciousActivity: true, autoDisqualified: true, autoDisqualifiedAt: new Date(), status: 'DISQUALIFIED' } : {}),
         },
       });
+      if (claimed.count !== 1) throw new BadRequestException('Ce test a déjà été soumis ou révoqué.');
+      if (!disqualified) for (const [questionId, selectedOption] of answerEntries) {
+        await tx.candidateTestAnswer.upsert({ where: { candidateId_questionId: { candidateId, questionId } },
+          create: { candidateId, questionId, selectedOption }, update: { selectedOption } });
+      }
+    });
+    if (disqualified) {
       return {
         success: false,
         disqualified: true,
@@ -1231,22 +1235,6 @@ export class PublicRecruitmentController {
     }
 
     try {
-      for (const [questionId, selectedOption] of Object.entries(data.answers)) {
-        await this.prisma.candidateTestAnswer.upsert({
-          where: { candidateId_questionId: { candidateId, questionId } },
-          create: { candidateId, questionId, selectedOption },
-          update: { selectedOption },
-        });
-      }
-      await this.prisma.candidate.update({
-        where: { id: candidateId },
-        data: {
-          tabSwitchCount: tabSwitches,
-          suspiciousActivity: tabSwitches > 3,
-          testDuration: data.testDuration,
-          testCompletedAt: new Date(),
-        },
-      });
       const grading = await this.recruitmentAIService.gradeTest(candidateId);
       const finalResult =
         await this.recruitmentAIService.calculateFinalScore(candidateId);
@@ -1265,6 +1253,7 @@ export class PublicRecruitmentController {
 
   @Get(':jobId/share-links')
   async generateShareLinks(@Param('jobId') jobId: string) {
+    await this.recruitmentService.findOnePublicJob(jobId);
     const job = await this.prisma.jobOffer.findUnique({
       where: { id: jobId },
       include: {

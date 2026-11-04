@@ -1168,9 +1168,12 @@ import {
   PayrollAlreadyPaidException,
 } from '../exceptions/business.exceptions';
 
+import { validateSimulationInput } from './payroll-simulation-validation';
+
 export interface SimulatePayrollOverrides {
   baseSalary?: number;
   workedDays?: number;
+  absentDays?: number;
   // ✅ Jours théoriques du mois (ex: 24 saisi à l'étape période de la paie en masse)
   workDays?: number;
   overtimeHours10?: number;
@@ -1228,8 +1231,11 @@ export class PayrollsService {
     ];
     const index = months.indexOf(month.toLowerCase());
     if (index !== -1) return index + 1;
-    const parsed = parseInt(month, 10);
-    return isNaN(parsed) ? new Date().getMonth() + 1 : parsed;
+    const parsed = /^\d+$/.test(month.trim()) ? Number(month) : NaN;
+    if (!Number.isInteger(parsed) || parsed < 1 || parsed > 12) {
+      throw new BadRequestException('Le mois doit être compris entre 1 et 12.');
+    }
+    return parsed;
   }
 
   private async shouldEmployeeBePaid(
@@ -2885,12 +2891,22 @@ export class PayrollsService {
   ) {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
-      select: { companyId: true },
+      select: { id: true, companyId: true, role: true, manageMultipleCompanies: true },
     });
     if (!user?.companyId) throw new CompanyNotFoundException();
 
     const monthNum =
       typeof month === 'string' ? this.getMonthNumber(month) : month;
+    validateSimulationInput(monthNum, year, overrides);
+    const companyId = await resolveVerifiedCompanyId(this.prisma, user, (overrides as any)?.companyId);
+    if (!companyId) throw new CompanyNotFoundException();
+
+    const ownedEmployee = await this.prisma.employee.findFirst({
+      where: { id: employeeId, companyId }, select: { id: true },
+    });
+    if (!ownedEmployee) throw new ForbiddenException('Salarié non autorisé.');
+    // All calculations below must use the same verified company as the employee.
+    user.companyId = companyId;
 
     const [employee, company] = await Promise.all([
       this.prisma.employee.findUnique({
@@ -2933,13 +2949,20 @@ export class PayrollsService {
       ? { ...settingsBase, workDaysPerMonth: overrides.workDays }
       : settingsBase;
 
+    if (overrides?.workedDays != null && overrides.workedDays > settings.workDaysPerMonth) {
+      throw new BadRequestException('Les jours travaillés dépassent les jours théoriques.');
+    }
+    if (overrides?.absentDays != null && ((overrides.workedDays ?? 0) + overrides.absentDays > settings.workDaysPerMonth)) {
+      throw new BadRequestException('Jours travaillés et absences incompatibles avec la période.');
+    }
+
     let daysToPay = settings.workDaysPerMonth;
     let att10 = 0,
       att25 = 0,
       att50 = 0,
       att100 = 0;
 
-    const hasWorkedDaysOverride = overrides?.workedDays != null;
+    const hasWorkedDaysOverride = overrides?.workedDays != null || overrides?.absentDays != null;
     const hasOvertimeOverride =
       overrides?.overtimeHours10 != null ||
       overrides?.overtimeHours25 != null ||
@@ -2988,7 +3011,7 @@ export class PayrollsService {
       }
     }
 
-    if (hasWorkedDaysOverride) daysToPay = overrides.workedDays!;
+    if (hasWorkedDaysOverride) daysToPay = overrides?.workedDays ?? (settings.workDaysPerMonth - overrides!.absentDays!);
     const eff10 =
       overrides?.overtimeHours10 != null ? overrides.overtimeHours10 : att10;
     const eff25 =
@@ -3289,6 +3312,14 @@ export class PayrollsService {
       summariesMaxAgeMs?: number;
     },
   ) {
+    validateSimulationInput(month, year, { workDays: opts?.workDays });
+    if (!Array.isArray(employeeIds) || employeeIds.length === 0 ||
+        employeeIds.some(id => typeof id !== 'string' || !id)) {
+      throw new BadRequestException('La liste des employés est invalide.');
+    }
+    for (const id of employeeIds) {
+      validateSimulationInput(month, year, { workedDays: opts?.daysOverrides?.[id] });
+    }
     const simulations = await Promise.allSettled(
       employeeIds.map((id) => {
         const workedDays = opts?.daysOverrides?.[id];

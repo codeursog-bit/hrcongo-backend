@@ -1,3 +1,4 @@
+import { buildShiftUpdate } from './work-shift-validation';
 // ============================================================================
 // 📁 src/attendance/attendance.service.ts
 // ✅ v5.1 — Orchestrateur principal — cohérent avec tous les services v5
@@ -12,7 +13,7 @@
 
 import { atCongoTime, congoDayOfWeek } from '../common/utils/congo-time';
 import { resolveUserEmployeeId } from '../common/utils/user-employee.util';
-import { Injectable, ForbiddenException } from '@nestjs/common';
+import { Injectable, ForbiddenException, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateAttendanceDto } from './dto/create-attendance.dto';
 import {
@@ -497,7 +498,7 @@ export class AttendanceService {
       dayStatuses,
       settings: {
         workDays,
-        officialStartHour: payrollSettings?.officialStartHour || 8,
+        officialStartHour: payrollSettings?.officialStartHour ?? 8,
         officialStartMinute: payrollSettings?.officialStartMinute ?? 0,
         lateToleranceMinutes: payrollSettings?.lateToleranceMinutes || 0,
       },
@@ -839,25 +840,20 @@ export class AttendanceService {
     color?: string;
     isDefault?: boolean;
   }) {
-    const sm = data.startMinute ?? 0;
-    const em = data.endMinute ?? 0;
-    const startTotal = data.startHour * 60 + sm;
-    let endTotal = data.endHour * 60 + em;
-    const crosses = endTotal <= startTotal;
-    if (crosses) endTotal += 24 * 60;
-    const duration = parseFloat(((endTotal - startTotal) / 60).toFixed(2));
+    const { companyId, ...input } = data;
+    const normalized = buildShiftUpdate(input);
 
     return this.prisma.workShift.create({
       data: {
         companyId: data.companyId,
-        name: data.name,
+        name: normalized.name,
         startHour: data.startHour,
-        startMinute: sm,
+        startMinute: normalized.startMinute,
         endHour: data.endHour,
-        endMinute: em,
-        durationHours: duration,
-        crossesMidnight: crosses,
-        isNightShift: data.isNightShift ?? crosses,
+        endMinute: normalized.endMinute,
+        durationHours: normalized.durationHours,
+        crossesMidnight: normalized.crossesMidnight,
+        isNightShift: data.isNightShift ?? normalized.crossesMidnight,
         nightPremiumRate: data.nightPremiumRate ?? 0,
         color: data.color ?? '#0EA5E9',
         isDefault: data.isDefault ?? false,
@@ -879,22 +875,8 @@ export class AttendanceService {
     });
     if (!shift) throw new Error('Shift introuvable');
 
-    if (data.startHour !== undefined || data.endHour !== undefined) {
-      const sh = data.startHour ?? shift.startHour;
-      const sm = data.startMinute ?? Number(shift.startMinute ?? 0);
-      const eh = data.endHour ?? shift.endHour;
-      const em = data.endMinute ?? Number(shift.endMinute ?? 0);
-      const startTotal = sh * 60 + sm;
-      let endTotal = eh * 60 + em;
-      const crosses = endTotal <= startTotal;
-      if (crosses) endTotal += 24 * 60;
-      data.durationHours = parseFloat(
-        ((endTotal - startTotal) / 60).toFixed(2),
-      );
-      data.crossesMidnight = crosses;
-    }
-
-    return this.prisma.workShift.update({ where: { id: shiftId }, data });
+    const normalized = buildShiftUpdate(data, shift);
+    return this.prisma.workShift.update({ where: { id: shiftId }, data: normalized });
   }
 
   async deleteShift(shiftId: string, companyId: string) {
@@ -917,7 +899,23 @@ export class AttendanceService {
     validFrom?: Date;
     validUntil?: Date;
     notes?: string;
-  }) {
+  }, userId: string) {
+    const user = await this.getVerifiedUser(userId);
+    if (data.companyId !== user.companyId) throw new ForbiddenException();
+    await this.assertCanAccessEmployee(user.id, user.companyId, user.role, data.employeeId, user.canRecordAttendanceForAll);
+    if (data.specificDate !== undefined) {
+      const parsed = new Date(`${data.specificDate}T00:00:00Z`);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(data.specificDate) || Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== data.specificDate) throw new BadRequestException('Date de planning invalide.');
+    } else if (!Number.isInteger(data.dayOfWeek) || data.dayOfWeek! < 0 || data.dayOfWeek! > 6) {
+      throw new BadRequestException('Jour de planning invalide.');
+    }
+    if ((data.validFrom && Number.isNaN(data.validFrom.getTime())) || (data.validUntil && Number.isNaN(data.validUntil.getTime())) ||
+        (data.validFrom && data.validUntil && data.validUntil < data.validFrom)) throw new BadRequestException('Période de planning invalide.');
+    const [employee, shift] = await Promise.all([
+      this.prisma.employee.findFirst({ where: { id: data.employeeId, companyId: data.companyId }, select: { id: true } }),
+      this.prisma.workShift.findFirst({ where: { id: data.shiftId, companyId: data.companyId, isActive: true }, select: { id: true } }),
+    ]);
+    if (!employee || !shift) throw new ForbiddenException('Salarié ou shift non autorisé.');
     if (data.specificDate) {
       return this.prisma.employeeShiftAssignment.upsert({
         where: {
@@ -949,17 +947,27 @@ export class AttendanceService {
     });
   }
 
-  async getEmployeeShifts(employeeId: string) {
+  async getEmployeeShifts(employeeId: string, userId: string) {
+    const user = await this.getVerifiedUser(userId);
+    const employee = await this.prisma.employee.findFirst({
+      where: { id: employeeId, companyId: user.companyId }, select: { id: true },
+    });
+    if (!employee) throw new ForbiddenException('Salarié non autorisé.');
+    await this.assertCanAccessEmployee(user.id, user.companyId, user.role, employeeId, user.canRecordAttendanceForAll);
     return this.prisma.employeeShiftAssignment.findMany({
-      where: { employeeId },
+      where: { employeeId, companyId: user.companyId },
       include: { shift: true },
       orderBy: [{ specificDate: 'asc' }, { dayOfWeek: 'asc' }],
     });
   }
 
-  async getAllShiftAssignments(companyId: string) {
+  async getAllShiftAssignments(userId: string) {
+    const user = await this.getVerifiedUser(userId);
+    const companyId = user.companyId;
+    const departmentId = user.role === 'MANAGER' && !user.canRecordAttendanceForAll ? await this.getManagerDeptId(user.id, companyId) : undefined;
+    if (departmentId === null) throw new ForbiddenException();
     return this.prisma.employeeShiftAssignment.findMany({
-      where: { companyId },
+      where: { companyId, ...(departmentId ? { employee: { departmentId } } : {}) },
       include: {
         shift: true,
         employee: {
@@ -981,12 +989,16 @@ export class AttendanceService {
     employeeId: string,
     companyId: string,
     date: string,
+    userId: string,
   ): Promise<any | null> {
+    const user = await this.getVerifiedUser(userId);
+    if (companyId !== user.companyId) throw new ForbiddenException();
+    await this.assertCanAccessEmployee(user.id, companyId, user.role, employeeId, user.canRecordAttendanceForAll);
     const dateObj = new Date(date);
     const dayOfWeek = congoDayOfWeek(dateObj);
 
     const specific = await this.prisma.employeeShiftAssignment.findFirst({
-      where: { employeeId, specificDate: date },
+      where: { employeeId, companyId, specificDate: date, shift: { companyId, isActive: true } },
       include: { shift: true },
     });
     if (specific) return specific.shift;
@@ -994,6 +1006,8 @@ export class AttendanceService {
     const recurring = await this.prisma.employeeShiftAssignment.findFirst({
       where: {
         employeeId,
+        companyId,
+        shift: { companyId, isActive: true },
         dayOfWeek,
         specificDate: null,
         OR: [{ validFrom: null }, { validFrom: { lte: dateObj } }],

@@ -1,3 +1,4 @@
+import { validateSimulationInput } from '../payrolls/payroll-simulation-validation';
 // ============================================================================
 // 📁 src/attendance/attendance.controller.ts — COMPLET
 // ============================================================================
@@ -62,6 +63,7 @@ export class AttendanceController {
         { clientIp: req.ip }, // IP publique réelle (trust proxy) — secours du GPS
       );
     } catch (error: any) {
+      if (error instanceof HttpException) throw error;
       throw new HttpException(
         error.message || "Erreur lors du pointage d'entrée",
         HttpStatus.BAD_REQUEST,
@@ -81,6 +83,7 @@ export class AttendanceController {
         { clientIp: req.ip },
       );
     } catch (error: any) {
+      if (error instanceof HttpException) throw error;
       throw new HttpException(
         error.message || 'Erreur lors du pointage de sortie',
         HttpStatus.BAD_REQUEST,
@@ -103,6 +106,7 @@ export class AttendanceController {
         req.user.userId,
       );
     } catch (error: any) {
+      if (error instanceof HttpException) throw error;
       throw new HttpException(
         error.message || 'Erreur lors de la récupération des employés',
         error.status || HttpStatus.BAD_REQUEST,
@@ -124,6 +128,7 @@ export class AttendanceController {
         body.date,
       );
     } catch (error: any) {
+      if (error instanceof HttpException) throw error;
       throw new HttpException(
         error.message || 'Erreur',
         error.status || HttpStatus.INTERNAL_SERVER_ERROR,
@@ -140,6 +145,7 @@ export class AttendanceController {
     try {
       return await this.attendanceService.findToday(req.user.userId);
     } catch (error: any) {
+      if (error instanceof HttpException) throw error;
       throw new HttpException(
         error.message || 'Erreur',
         HttpStatus.INTERNAL_SERVER_ERROR,
@@ -164,10 +170,12 @@ export class AttendanceController {
     dayStatuses: DayStatus[][];
   }> {
     try {
-      const m = month ? parseInt(month) : new Date().getMonth() + 1;
-      const y = year ? parseInt(year) : new Date().getFullYear();
+      const m = month === undefined ? new Date().getMonth() + 1 : Number(month);
+      const y = year === undefined ? new Date().getFullYear() : Number(year);
+      validateSimulationInput(m, y);
       return await this.attendanceService.findAll(req.user.userId, m, y);
     } catch (error: any) {
+      if (error instanceof HttpException) throw error;
       throw new HttpException(
         error.message || 'Erreur',
         HttpStatus.INTERNAL_SERVER_ERROR,
@@ -183,8 +191,9 @@ export class AttendanceController {
     @Request() req,
   ): Promise<MonthlyReportItem[]> {
     try {
-      const m = month ? parseInt(month) : new Date().getMonth() + 1;
-      const y = year ? parseInt(year) : new Date().getFullYear();
+      const m = month === undefined ? new Date().getMonth() + 1 : Number(month);
+      const y = year === undefined ? new Date().getFullYear() : Number(year);
+      validateSimulationInput(m, y);
 
       // ── Cabinet : passe son companyId cible ─────────────────────────────
       // ── Entreprise : undefined → service utilise user.companyId (inchangé)
@@ -200,6 +209,7 @@ export class AttendanceController {
         override,
       );
     } catch (error: any) {
+      if (error instanceof HttpException) throw error;
       throw new HttpException(
         error.message || 'Erreur lors de la génération du rapport',
         HttpStatus.INTERNAL_SERVER_ERROR,
@@ -215,8 +225,9 @@ export class AttendanceController {
     @Request() req,
   ): Promise<DayStatus[]> {
     try {
-      const m = month ? parseInt(month) : new Date().getMonth() + 1;
-      const y = year ? parseInt(year) : new Date().getFullYear();
+      const m = month === undefined ? new Date().getMonth() + 1 : Number(month);
+      const y = year === undefined ? new Date().getFullYear() : Number(year);
+      validateSimulationInput(m, y);
       return await this.attendanceService.getEmployeeDayStatuses(
         req.user.userId,
         employeeId,
@@ -224,6 +235,7 @@ export class AttendanceController {
         y,
       );
     } catch (error: any) {
+      if (error instanceof HttpException) throw error;
       throw new HttpException(
         error.message || 'Erreur',
         error.status || HttpStatus.INTERNAL_SERVER_ERROR,
@@ -240,10 +252,12 @@ export class AttendanceController {
     @Request() req,
   ) {
     try {
-      const m = month ? parseInt(month) : new Date().getMonth() + 1;
-      const y = year ? parseInt(year) : new Date().getFullYear();
+      const m = month === undefined ? new Date().getMonth() + 1 : Number(month);
+      const y = year === undefined ? new Date().getFullYear() : Number(year);
+      validateSimulationInput(m, y);
       return await this.attendanceService.getLogs(req.user.userId, m, y);
     } catch (error: any) {
+      if (error instanceof HttpException) throw error;
       throw new HttpException(
         error.message || 'Erreur',
         error.status || HttpStatus.INTERNAL_SERVER_ERROR,
@@ -258,6 +272,7 @@ export class AttendanceController {
     try {
       return await this.attendanceService.createManual(req.user.userId, body);
     } catch (error: any) {
+      if (error instanceof HttpException) throw error;
       throw new HttpException(
         error.message || 'Erreur',
         error.status || HttpStatus.INTERNAL_SERVER_ERROR,
@@ -285,6 +300,7 @@ export class AttendanceController {
         this.summaryService,
       );
     } catch (error: any) {
+      if (error instanceof HttpException) throw error;
       throw new HttpException(
         error.message || 'Erreur',
         error.status || HttpStatus.INTERNAL_SERVER_ERROR,
@@ -310,6 +326,7 @@ export class AttendanceController {
         year,
       );
     } catch (error: any) {
+      if (error instanceof HttpException) throw error;
       throw new HttpException(
         error.message || 'Erreur',
         error.status || HttpStatus.INTERNAL_SERVER_ERROR,
@@ -335,6 +352,7 @@ export class AttendanceController {
         year,
       );
     } catch (error: any) {
+      if (error instanceof HttpException) throw error;
       throw new HttpException(
         error.message || 'Erreur',
         error.status || HttpStatus.INTERNAL_SERVER_ERROR,
@@ -363,6 +381,7 @@ export class AttendanceController {
         body.year,
       );
     } catch (error: any) {
+      if (error instanceof HttpException) throw error;
       throw new HttpException(
         error.message || 'Erreur',
         error.status || HttpStatus.INTERNAL_SERVER_ERROR,
@@ -386,6 +405,7 @@ export class AttendanceController {
         req,
       );
     } catch (error: any) {
+      if (error instanceof HttpException) throw error;
       throw new HttpException(
         error.message || 'Erreur',
         error.status || HttpStatus.BAD_REQUEST,
@@ -411,6 +431,7 @@ export class AttendanceController {
         req,
       );
     } catch (error: any) {
+      if (error instanceof HttpException) throw error;
       throw new HttpException(
         error.message || 'Erreur',
         error.status || HttpStatus.BAD_REQUEST,
@@ -431,13 +452,15 @@ export class AttendanceController {
     @Request() req,
   ) {
     try {
-      const m = month ? parseInt(month) : new Date().getMonth() + 1;
-      const y = year ? parseInt(year) : new Date().getFullYear();
+      const m = month === undefined ? new Date().getMonth() + 1 : Number(month);
+      const y = year === undefined ? new Date().getFullYear() : Number(year);
+      validateSimulationInput(m, y);
       const companyId = await this.attendanceService.getCompanyId(
         req.user.userId,
       );
       return await this.summaryService.getMonthlyStats(companyId, m, y);
     } catch (error: any) {
+      if (error instanceof HttpException) throw error;
       throw new HttpException(
         error.message || 'Erreur',
         error.status || HttpStatus.INTERNAL_SERVER_ERROR,
@@ -461,6 +484,7 @@ export class AttendanceController {
         message: "Journée clôturée à l'heure officielle.",
       };
     } catch (error: any) {
+      if (error instanceof HttpException) throw error;
       throw new HttpException(
         error.message || 'Erreur',
         HttpStatus.BAD_REQUEST,
@@ -480,6 +504,7 @@ export class AttendanceController {
         message: "Demande d'heures supplémentaires envoyée au responsable.",
       };
     } catch (error: any) {
+      if (error instanceof HttpException) throw error;
       throw new HttpException(
         error.message || 'Erreur',
         HttpStatus.BAD_REQUEST,
@@ -498,6 +523,7 @@ export class AttendanceController {
       await this.cronService.approveOvertime(attendanceId, req.user.userId);
       return { success: true, message: 'Heures supplémentaires validées.' };
     } catch (error: any) {
+      if (error instanceof HttpException) throw error;
       throw new HttpException(
         error.message || 'Erreur',
         HttpStatus.BAD_REQUEST,
@@ -521,6 +547,7 @@ export class AttendanceController {
       );
       return { success: true, message: 'Heures supplémentaires refusées.' };
     } catch (error: any) {
+      if (error instanceof HttpException) throw error;
       throw new HttpException(
         error.message || 'Erreur',
         HttpStatus.BAD_REQUEST,
@@ -546,6 +573,7 @@ export class AttendanceController {
       );
       return await this.attendanceService.createShift({ ...body, companyId });
     } catch (error: any) {
+      if (error instanceof HttpException) throw error;
       throw new HttpException(
         error.message || 'Erreur création shift',
         HttpStatus.BAD_REQUEST,
@@ -562,6 +590,7 @@ export class AttendanceController {
       );
       return await this.attendanceService.getShifts(companyId);
     } catch (error: any) {
+      if (error instanceof HttpException) throw error;
       throw new HttpException(
         error.message || 'Erreur',
         HttpStatus.INTERNAL_SERVER_ERROR,
@@ -584,6 +613,7 @@ export class AttendanceController {
       );
       return await this.attendanceService.updateShift(shiftId, companyId, body);
     } catch (error: any) {
+      if (error instanceof HttpException) throw error;
       throw new HttpException(
         error.message || 'Erreur mise à jour shift',
         HttpStatus.BAD_REQUEST,
@@ -603,6 +633,7 @@ export class AttendanceController {
       await this.attendanceService.deleteShift(shiftId, companyId);
       return { success: true, message: 'Shift désactivé.' };
     } catch (error: any) {
+      if (error instanceof HttpException) throw error;
       throw new HttpException(
         error.message || 'Erreur suppression shift',
         HttpStatus.BAD_REQUEST,
@@ -636,8 +667,9 @@ export class AttendanceController {
         companyId,
         validFrom: body.validFrom ? new Date(body.validFrom) : undefined,
         validUntil: body.validUntil ? new Date(body.validUntil) : undefined,
-      });
+      }, req.user.userId);
     } catch (error: any) {
+      if (error instanceof HttpException) throw error;
       throw new HttpException(
         error.message || 'Erreur assignation shift',
         HttpStatus.BAD_REQUEST,
@@ -654,8 +686,9 @@ export class AttendanceController {
       const companyId = await this.attendanceService.getCompanyId(
         req.user.userId,
       );
-      return await this.attendanceService.getAllShiftAssignments(companyId);
+      return await this.attendanceService.getAllShiftAssignments(req.user.userId);
     } catch (error: any) {
+      if (error instanceof HttpException) throw error;
       throw new HttpException(
         error.message || 'Erreur',
         HttpStatus.INTERNAL_SERVER_ERROR,
@@ -664,10 +697,11 @@ export class AttendanceController {
   }
   // ── Récupérer les shifts d'un employé ────────────────────────────────────
   @Get('shift-assignments/:employeeId')
-  async getEmployeeShifts(@Param('employeeId') employeeId: string) {
+  async getEmployeeShifts(@Param('employeeId') employeeId: string, @Request() req) {
     try {
-      return await this.attendanceService.getEmployeeShifts(employeeId);
+      return await this.attendanceService.getEmployeeShifts(employeeId, req.user.userId);
     } catch (error: any) {
+      if (error instanceof HttpException) throw error;
       throw new HttpException(
         error.message || 'Erreur',
         HttpStatus.INTERNAL_SERVER_ERROR,
@@ -690,8 +724,10 @@ export class AttendanceController {
         employeeId,
         companyId,
         date,
+        req.user.userId,
       );
     } catch (error: any) {
+      if (error instanceof HttpException) throw error;
       throw new HttpException(
         error.message || 'Erreur',
         HttpStatus.INTERNAL_SERVER_ERROR,
@@ -817,7 +853,7 @@ export class AttendanceController {
 //     @Request() req
 //   ): Promise<{ employees: any[]; attendances: any[]; dayStatuses: DayStatus[][] }> {
 //     try {
-//       const m = month ? parseInt(month) : new Date().getMonth() + 1;
+//       const m = month === undefined ? new Date().getMonth() + 1 : Number(month);
 //       const y = year  ? parseInt(year)  : new Date().getFullYear();
 //       // 🔒 Le service filtre par département si MANAGER
 //       return await this.attendanceService.findAll(req.user.userId, m, y);
@@ -836,7 +872,7 @@ export class AttendanceController {
 //     @Request() req
 //   ): Promise<MonthlyReportItem[]> {
 //     try {
-//       const m = month ? parseInt(month) : new Date().getMonth() + 1;
+//       const m = month === undefined ? new Date().getMonth() + 1 : Number(month);
 //       const y = year  ? parseInt(year)  : new Date().getFullYear();
 //       return await this.attendanceService.generateMonthlyReport(req.user.userId, m, y);
 //     } catch (error: any) {
@@ -855,7 +891,7 @@ export class AttendanceController {
 //     @Request() req
 //   ): Promise<DayStatus[]> {
 //     try {
-//       const m = month ? parseInt(month) : new Date().getMonth() + 1;
+//       const m = month === undefined ? new Date().getMonth() + 1 : Number(month);
 //       const y = year  ? parseInt(year)  : new Date().getFullYear();
 
 //       // 🔒 getEmployeeDayStatuses vérifie l'accès + filtre département
@@ -887,7 +923,7 @@ export class AttendanceController {
 //     @Request() req
 //   ) {
 //     try {
-//       const m = month ? parseInt(month) : new Date().getMonth() + 1;
+//       const m = month === undefined ? new Date().getMonth() + 1 : Number(month);
 //       const y = year  ? parseInt(year)  : new Date().getFullYear();
 //       return await this.attendanceService.getLogs(req.user.userId, m, y);
 //     } catch (error: any) {
@@ -1056,7 +1092,7 @@ export class AttendanceController {
 //     @Request() req
 //   ) {
 //     try {
-//       const m = month ? parseInt(month) : new Date().getMonth() + 1;
+//       const m = month === undefined ? new Date().getMonth() + 1 : Number(month);
 //       const y = year  ? parseInt(year)  : new Date().getFullYear();
 //       const companyId = await this.attendanceService.getCompanyId(req.user.userId);
 //       return await this.summaryService.getMonthlyStats(companyId, m, y);

@@ -165,4 +165,22 @@ export class DiscountCodesService {
     if ('validUntil' in dto) data.validUntil = dto.validUntil ? new Date(dto.validUntil) : null;
     return (this.prisma as any).discountCode.update({ where: { id }, data });
   }
+
+  /**
+   * Suppression définitive d'un code.
+   * - Les paiements déjà faits gardent leur montant réduit (discountCodeId passe à null).
+   * - L'historique d'utilisation du code (discount_redemptions) est supprimé avec lui.
+   * - Un paiement en attente avec ce code reste valable au montant réduit déjà calculé.
+   */
+  async remove(id: string) {
+    const existing = await (this.prisma as any).discountCode.findUnique({
+      where: { id },
+      include: { _count: { select: { redemptions: true } } },
+    });
+    if (!existing) throw new NotFoundException('Code introuvable');
+
+    await (this.prisma as any).discountCode.delete({ where: { id } });
+    this.logger.log(`🗑️ Code de réduction ${existing.code} supprimé (${existing._count.redemptions} utilisation(s) effacée(s))`);
+    return { success: true, code: existing.code, redemptionsRemoved: existing._count.redemptions };
+  }
 }

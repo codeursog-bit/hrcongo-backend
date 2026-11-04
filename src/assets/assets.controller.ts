@@ -99,7 +99,7 @@ export class AssetsController {
 
   // GET /assets/employee/:id — Actifs d'un employé
   @Get('employee/:id')
-  findByEmployee(@Param('id') id: string) {
-    return this.assetsService.findByEmployee(id);
+  findByEmployee(@Param('id') id: string, @Request() req) {
+    return this.assetsService.findByEmployee(id, req.user.userId);
   }
 }

@@ -335,6 +335,13 @@ export class UsersService {
       throw new ForbiddenException("Vous n'avez pas accès à cet utilisateur.");
     }
 
+    const companyRoles = ['ADMIN', 'HR_MANAGER', 'MANAGER', 'EMPLOYEE'];
+    if (requester.role !== 'SUPER_ADMIN' &&
+        (!companyRoles.includes(target.role) ||
+         (updateUserDto.role !== undefined && !companyRoles.includes(updateUserDto.role)))) {
+      throw new ForbiddenException('Ce rôle est réservé à l’administration de la plateforme.');
+    }
+
     // 🔒 role / isActive / canRecordAttendanceForAll sont des champs sensibles :
     // réservés aux ADMIN/SUPER_ADMIN de la même entreprise, et jamais sur son propre compte.
     const SENSITIVE_FIELDS = ['role', 'isActive', 'canRecordAttendanceForAll'] as const;
@@ -365,6 +372,11 @@ export class UsersService {
         ...updateUserDto,
         role: updateUserDto.role as UserRole | undefined,
       },
+      select: {
+        id: true, email: true, firstName: true, lastName: true,
+        role: true, isActive: true, canRecordAttendanceForAll: true,
+        companyId: true, employeeId: true, updatedAt: true,
+      },
     });
   }
 
@@ -392,6 +404,10 @@ export class UsersService {
       throw new ForbiddenException(
         'Vous ne pouvez pas supprimer votre propre compte.',
       );
+    }
+    if (requester.role !== 'SUPER_ADMIN' &&
+        !['ADMIN', 'HR_MANAGER', 'MANAGER', 'EMPLOYEE'].includes(target.role)) {
+      throw new ForbiddenException('Ce compte est réservé à l’administration de la plateforme.');
     }
 
     // Ne jamais laisser une entreprise sans aucun admin

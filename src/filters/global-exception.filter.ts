@@ -106,11 +106,12 @@ export class GlobalExceptionFilter implements ExceptionFilter {
             : 'ERROR';
 
     // ── Réponse au client ────────────────────────────────────────────────────
+    const containsInternalDetails = /prisma\.|Invalid `|\.service\.ts:\d|[A-Z]:\\.*\\src\\/i.test(String(message));
     response.status(statusCode).json({
       statusCode,
-      message: Array.isArray(message) ? message : message,
-      error: errorCode,
-      ...(validationErrors ? { details: validationErrors } : {}),
+      message: statusCode >= 500 ? 'Erreur interne du serveur' : containsInternalDetails ? 'Requête invalide.' : message,
+      error: statusCode >= 500 ? 'INTERNAL_ERROR' : errorCode,
+      ...(statusCode < 500 && validationErrors ? { details: validationErrors } : {}),
     });
 
     // ── Ne pas stocker certains statuts / chemins ────────────────────────────

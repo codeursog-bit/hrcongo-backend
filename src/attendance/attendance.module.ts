@@ -11,7 +11,6 @@ import { AttendanceBreakController } from './attendance-break.controller'; // �
 import { LiveAttendanceSummaryService } from './live-attendance-summary.service'; // 🆕 dashboards temps réel (lecture seule)
 import { AttendanceCronModule } from './cron/attendance-cron.module'; // 🆕 Import du MODULE
 import { PrismaModule } from '../prisma/prisma.module';
-import { AppGateway } from '../app.gateway';
 import { SubscriptionsModule } from '../subscriptions/subscriptions.module';
 import { CompaniesModule } from '../companies/companies.module';
 
@@ -32,7 +31,6 @@ import { CompaniesModule } from '../companies/companies.module';
     AttendanceReportService,
     AttendanceBreakService,
     LiveAttendanceSummaryService, // 🆕 dashboards temps réel (lecture seule, n'écrit rien)
-    AppGateway,
   ],
   exports: [
     AttendanceService,

@@ -7,6 +7,8 @@ import {
 import { Server, Socket } from 'socket.io';
 import { JwtService } from '@nestjs/jwt';
 import { Logger } from '@nestjs/common';
+import { validateAccessSession } from './auth/access-session';
+import { PrismaService } from './prisma/prisma.service';
 
 // 🐛 CORRIGÉ : l'origine CORS était codée en dur sur 'http://localhost:3000',
 // séparément de la config CORS dynamique déjà utilisée dans main.ts
@@ -43,7 +45,7 @@ export class AppGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
   private readonly logger = new Logger(AppGateway.name);
 
-  constructor(private readonly jwtService: JwtService) {}
+  constructor(private readonly jwtService: JwtService, private readonly prisma: PrismaService) {}
 
   // ============================================================================
   // ✅ FIX FUITE MULTI-TENANT (Sept 2026)
@@ -102,7 +104,7 @@ export class AppGateway implements OnGatewayConnection, OnGatewayDisconnect {
     return null;
   }
 
-  handleConnection(client: Socket) {
+  async handleConnection(client: Socket) {
     try {
       const token = this.extractToken(client);
 
@@ -116,6 +118,7 @@ export class AppGateway implements OnGatewayConnection, OnGatewayDisconnect {
         // 🔒 Plus de secret de repli codé en dur : main.ts refuse déjà de démarrer sans JWT_SECRET.
         secret: process.env.JWT_SECRET as string,
       });
+      await validateAccessSession(this.prisma, payload);
 
       const companyId = payload?.companyId;
       if (!companyId) {
@@ -127,6 +130,7 @@ export class AppGateway implements OnGatewayConnection, OnGatewayDisconnect {
       client.join(`company:${companyId}`);
       client.data.companyId = companyId;
       client.data.userId = payload?.sub;
+      client.data.accessPayload = payload;
     } catch (err) {
       this.logger.warn(`Socket ${client.id} : token invalide — déconnexion (${(err as Error).message})`);
       client.disconnect();
@@ -149,7 +153,7 @@ export class AppGateway implements OnGatewayConnection, OnGatewayDisconnect {
       );
       return;
     }
-    this.server.to(`company:${payload.companyId}`).emit('admin-notification', payload);
+    void this.sendToActiveSessions('admin-notification', payload, true);
   }
 
   // Notification pour TOUS les employés d'UNE SEULE entreprise (ex: Nouvelle formation, Note de service)
@@ -160,6 +164,27 @@ export class AppGateway implements OnGatewayConnection, OnGatewayDisconnect {
       );
       return;
     }
-    this.server.to(`company:${payload.companyId}`).emit('company-notification', payload);
+    void this.sendToActiveSessions('company-notification', payload, false);
+  }
+
+  private async sendToActiveSessions(event: string, payload: any, adminOnly: boolean) {
+    try {
+      const clients = await this.server.in(`company:${payload.companyId}`).fetchSockets();
+      await Promise.all(clients.map(async client => {
+        try {
+          const token = client.data.accessPayload;
+          if (!token || token.exp * 1000 <= Date.now()) throw new Error('Token expiré');
+          const user = await validateAccessSession(this.prisma, token);
+          if (user.companyId !== payload.companyId) throw new Error('Entreprise invalide');
+          if (!adminOnly || ['ADMIN', 'SUPER_ADMIN', 'HR_MANAGER'].includes(user.role)) {
+            client.emit(event, payload);
+          }
+        } catch {
+          client.disconnect(true);
+        }
+      }));
+    } catch (error) {
+      this.logger.error('Diffusion des notifications interrompue', (error as Error).message);
+    }
   }
 }

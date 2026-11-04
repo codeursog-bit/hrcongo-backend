@@ -399,10 +399,6 @@ Réponds en JSON (sans \`\`\`json) :
       include: { question: true },
     });
 
-    if (answers.length === 0) {
-      throw new NotFoundException('Aucune réponse trouvée');
-    }
-
     let totalScore = 0;
     const corrections: TestCorrection[] = [];
 

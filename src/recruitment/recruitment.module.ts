@@ -9,11 +9,13 @@ import { PDFExtractionService } from './pdf-extraction.service';
 import { PrismaModule } from '../prisma/prisma.module';
 import { CloudinaryModule } from '../cloudinary/cloudinary.module';
 import { SubscriptionsModule } from '../subscriptions/subscriptions.module';
+import { RecruitmentTestAccessService } from './recruitment-test-access.service';
 
 @Module({
   imports: [PrismaModule, SubscriptionsModule, CloudinaryModule],
   controllers: [RecruitmentController, PublicRecruitmentController],
   providers: [
+    RecruitmentTestAccessService,
     RecruitmentService,
     RecruitmentAIService,
     JobExpirationService,

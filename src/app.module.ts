@@ -51,7 +51,7 @@ import { UserActivityModule } from './user-activity/user-activity.module';
 import { BonusTemplatesModule } from './bonus-templates/bonus-templates.module';
 import { CompanyTaxModule } from './company-taxes/company-tax.module';
 import { CabinetModule } from './cabinet/cabinet.module';
-import { AppGateway } from './app.gateway';
+import { RealtimeModule } from './realtime.module';
 
 // 🆕 NOUVEAUX MODULES
 import { ContractsModule } from './contracts/contracts.module'; // Scheduler expiry existant
@@ -81,6 +81,7 @@ import { FinanceModule } from './finance/finance.module';
 
 @Module({
   imports: [
+    RealtimeModule,
     ConfigModule.forRoot({ isGlobal: true }),
     ScheduleModule.forRoot(),
 
@@ -181,7 +182,6 @@ import { FinanceModule } from './finance/finance.module';
   controllers: [AppController],
   providers: [
     AppService,
-    AppGateway,
     // ✅ Rate limiting appliqué sur TOUTES les routes (surchargeable par @Throttle)
     { provide: APP_GUARD, useClass: ThrottlerGuard },
     // ✅ Audit log automatique sur les actions sensibles

@@ -1,7 +1,7 @@
 // ============================================================================
 // src/subscriptions/pricing.service.ts
 // Source de vérité des PRIX des plans : table plan_prices (modifiable par le
-// super admin) avec repli sur plans.config.ts quand aucune ligne n'existe.
+// super admin). Un prix payant absent reste non configuré.
 // Les limites/fonctionnalités des plans restent dans plans.config.ts.
 // ============================================================================
 
@@ -12,6 +12,11 @@ import { PLANS, Plan } from './config/plans.config';
 export type BillingPeriod = 'monthly' | 'yearly';
 export const PAID_PLANS = ['BASIC', 'PRO', 'ENTERPRISE'] as const;
 export type PaidPlan = (typeof PAID_PLANS)[number];
+export type CatalogPlan = Omit<Plan, 'priceMonthly' | 'priceYearly'> & {
+  priceMonthly: number | null;
+  priceYearly: number | null;
+  isPriceConfigured: boolean;
+};
 
 @Injectable()
 export class PricingService {
@@ -19,17 +24,20 @@ export class PricingService {
 
   constructor(private prisma: PrismaService) {}
 
-  /** Tous les plans, prix surchargés par la BDD quand une ligne existe. */
-  async getPlans(): Promise<Record<string, Plan>> {
+  /** Les tarifs payants proviennent exclusivement des prix enregistrés. */
+  async getPlans(): Promise<Record<string, CatalogPlan>> {
     const rows = await (this.prisma as any).planPrice.findMany();
     const byPlan = new Map<string, any>(rows.map((r: any) => [r.plan, r]));
 
-    const out: Record<string, Plan> = {};
+    const out: Record<string, CatalogPlan> = {};
     for (const [key, plan] of Object.entries(PLANS)) {
       const row = byPlan.get(key);
-      out[key] = row
-        ? { ...plan, priceMonthly: row.priceMonthly, priceYearly: row.priceYearly }
-        : plan;
+      out[key] = {
+        ...plan,
+        priceMonthly: key === 'FREE' ? 0 : row?.priceMonthly ?? null,
+        priceYearly: key === 'FREE' ? 0 : row?.priceYearly ?? null,
+        isPriceConfigured: key === 'FREE' || !!row,
+      };
     }
     return out;
   }
@@ -37,7 +45,10 @@ export class PricingService {
   async getPlan(plan: string): Promise<Plan> {
     const p = (await this.getPlans())[plan];
     if (!p) throw new NotFoundException(`Plan inconnu : ${plan}`);
-    return p;
+    if (p.priceMonthly === null || p.priceYearly === null) {
+      throw new BadRequestException('Le tarif de ce plan n’est pas encore configuré. Contactez le support.');
+    }
+    return { ...p, priceMonthly: p.priceMonthly, priceYearly: p.priceYearly };
   }
 
   async getPrice(plan: string, period: BillingPeriod): Promise<number> {
@@ -57,8 +68,7 @@ export class PricingService {
       name: current[plan].name,
       priceMonthly: current[plan].priceMonthly,
       priceYearly: current[plan].priceYearly,
-      defaultMonthly: PLANS[plan].priceMonthly,
-      defaultYearly: PLANS[plan].priceYearly,
+      isPriceConfigured: current[plan].isPriceConfigured,
       isCustomized: byPlan.has(plan),
       updatedAt: byPlan.get(plan)?.updatedAt ?? null,
     }));
@@ -66,14 +76,17 @@ export class PricingService {
 
   async updatePrice(
     plan: string,
-    dto: { priceMonthly: number; priceYearly?: number },
+    dto: { priceMonthly: number; priceYearly: number },
     actorUserId: string,
   ) {
     if (!PAID_PLANS.includes(plan as PaidPlan)) {
       throw new BadRequestException('Seuls BASIC, PRO et ENTERPRISE ont un prix modifiable');
     }
-    // Convention actuelle du catalogue : annuel = 10 × mensuel
-    const priceYearly = dto.priceYearly ?? dto.priceMonthly * 10;
+    if (!Number.isInteger(dto.priceMonthly) || !Number.isInteger(dto.priceYearly) ||
+        dto.priceMonthly < 100 || dto.priceYearly < 100) {
+      throw new BadRequestException('Renseignez un tarif mensuel et un tarif annuel valides.');
+    }
+    const priceYearly = dto.priceYearly;
 
     const saved = await (this.prisma as any).planPrice.upsert({
       where: { plan },
@@ -86,7 +99,7 @@ export class PricingService {
     return saved;
   }
 
-  /** Revient au prix de plans.config.ts */
+  /** Retire le tarif du catalogue, sans réintroduire un prix par défaut. */
   async resetPrice(plan: string) {
     await (this.prisma as any).planPrice.deleteMany({ where: { plan } });
     return { plan, reset: true };

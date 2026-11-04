@@ -129,7 +129,7 @@ export class AuthController {
     @Res() res: Response,
   ) {
     const refreshToken = pickFreshestCookie(expressReq, 'refresh_token') ?? undefined;
-    return this.authService.logout(req.user.userId, refreshToken, res);
+    return this.authService.logout(req.user.userId, refreshToken, res, req.user.sessionId);
   }
 
   // ── Forgot password ───────────────────────────────────────────────────────

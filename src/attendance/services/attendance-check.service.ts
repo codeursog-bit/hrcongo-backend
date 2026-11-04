@@ -778,6 +778,9 @@ export class AttendanceCheckService {
       checkIn?: Date | string;
       checkOut?: Date | string;
       totalHours?: number;
+      breakStart?: Date | string; // 🆕 pause
+      breakEnd?: Date | string; // 🆕 pause
+      removeBreak?: boolean; // 🆕 pause
       reason: string;
     },
     req?: any,
@@ -804,6 +807,7 @@ export class AttendanceCheckService {
     const current = await this.prisma.attendance.findUnique({
       where: { id: attendanceId },
       include: {
+        pause: true, // 🆕 pause de la journée
         employee: { select: { id: true, firstName: true, lastName: true } },
       },
     });
@@ -824,23 +828,81 @@ export class AttendanceCheckService {
     if (effIn && effOut && effOut.getTime() <= effIn.getTime()) {
       throw new Error("L'heure de sortie doit être après l'heure d'entrée");
     }
-    // ✅ Durée recalculée quand les heures changent (pause déduite), sauf si
-    // la durée est fournie explicitement.
+    // ── 🆕 Pause : insertion / modification / suppression ──────────────────
+    // Le temps réellement travaillé = (sortie − entrée) − pause.
+    const existingPause: any = (current as any).pause ?? null;
+    const oldBreakMinutes = Number((current as any).breakMinutes ?? 0);
+    const fmtPause = (a: Date, b: Date) => `${a.toISOString()}→${b.toISOString()}`;
+    let breakChange:
+      | { action: 'upsert'; start: Date; end: Date; minutes: number }
+      | { action: 'delete'; minutes: 0 }
+      | null = null;
+
+    const bStartIn = updates.breakStart ? new Date(updates.breakStart) : undefined;
+    const bEndIn = updates.breakEnd ? new Date(updates.breakEnd) : undefined;
+    if (updates.removeBreak) {
+      if (existingPause) breakChange = { action: 'delete', minutes: 0 };
+    } else if (bStartIn || bEndIn) {
+      const bs = bStartIn ?? (existingPause ? new Date(existingPause.startedAt) : undefined);
+      const be =
+        bEndIn ?? (existingPause?.endedAt ? new Date(existingPause.endedAt) : undefined);
+      if (!bs || !be || Number.isNaN(bs.getTime()) || Number.isNaN(be.getTime())) {
+        throw new Error('Renseignez le début ET la fin de la pause');
+      }
+      if (be.getTime() <= bs.getTime()) {
+        throw new Error('La fin de la pause doit être après son début');
+      }
+      if (!effIn) throw new Error("Impossible d'ajouter une pause sans heure d'entrée");
+      if (bs.getTime() < effIn.getTime()) {
+        throw new Error("La pause ne peut pas commencer avant l'heure d'entrée");
+      }
+      const upper = effOut ?? new Date();
+      if (be.getTime() > upper.getTime()) {
+        throw new Error(
+          effOut
+            ? "La pause doit se terminer avant l'heure de sortie"
+            : 'La pause ne peut pas se terminer dans le futur',
+        );
+      }
+      const sameAsExisting =
+        existingPause?.endedAt &&
+        new Date(existingPause.startedAt).getTime() === bs.getTime() &&
+        new Date(existingPause.endedAt).getTime() === be.getTime();
+      if (!sameAsExisting) {
+        breakChange = {
+          action: 'upsert',
+          start: bs,
+          end: be,
+          minutes: Math.round((be.getTime() - bs.getTime()) / 60_000),
+        };
+      }
+    }
+    const newBreakMinutes = breakChange ? breakChange.minutes : oldBreakMinutes;
+
+    // ✅ Durée recalculée quand les heures OU la pause changent (pause déduite),
+    // sauf si la durée est fournie explicitement.
     let recomputedTotalHours: number | undefined;
     if (
       updates.totalHours == null &&
-      (checkInDate || checkOutDate) &&
+      (checkInDate || checkOutDate || breakChange) &&
       effIn &&
       effOut
     ) {
-      const breakH = Number((current as any).breakMinutes ?? 0) / 60;
       recomputedTotalHours = parseFloat(
         Math.max(
           0,
-          (effOut.getTime() - effIn.getTime()) / 3_600_000 - breakH,
+          (effOut.getTime() - effIn.getTime()) / 3_600_000 - newBreakMinutes / 60,
         ).toFixed(2),
       );
     }
+    // Heures normales : on retire/rend uniquement la variation de pause
+    const breakDeltaHours = (newBreakMinutes - oldBreakMinutes) / 60;
+    const adjustedNormalHours =
+      breakChange && current.normalHours != null && breakDeltaHours !== 0
+        ? parseFloat(
+            Math.max(0, Number(current.normalHours) - breakDeltaHours).toFixed(2),
+          )
+        : undefined;
 
     const changes: AuditChange[] = [];
     if (updates.status && updates.status !== current.status) {
@@ -868,6 +930,19 @@ export class AttendanceCheckService {
       });
     }
 
+    if (breakChange) {
+      changes.push({
+        field: 'pause',
+        oldValue: existingPause?.endedAt
+          ? fmtPause(new Date(existingPause.startedAt), new Date(existingPause.endedAt))
+          : 'aucune',
+        newValue:
+          breakChange.action === 'delete'
+            ? 'supprimée'
+            : fmtPause(breakChange.start, breakChange.end),
+      });
+    }
+
     await this.prisma.attendanceLog.create({
       data: {
         attendanceId,
@@ -881,17 +956,64 @@ export class AttendanceCheckService {
       },
     });
 
-    const updated = await this.prisma.attendance.update({
+    const attendanceUpdate = this.prisma.attendance.update({
       where: { id: attendanceId },
       data: {
         status: (updates.status || current.status) as AttendanceStatus,
         checkIn: updates.checkIn || current.checkIn,
         checkOut: updates.checkOut || current.checkOut,
         totalHours:
-          updates.totalHours || recomputedTotalHours || current.totalHours,
+          updates.totalHours ?? recomputedTotalHours ?? current.totalHours,
+        ...(breakChange ? { breakMinutes: newBreakMinutes } : {}),
+        ...(adjustedNormalHours !== undefined
+          ? { normalHours: adjustedNormalHours }
+          : {}),
         notes: `${current.notes || ''}\n[Modifié ${new Date().toLocaleString('fr-FR')} par ${user.firstName} ${user.lastName} — ${updates.reason}]`,
       },
     });
+
+    // 🆕 La pause et le pointage sont modifiés ensemble (tout ou rien)
+    let updated: any;
+    if (breakChange?.action === 'upsert') {
+      const bc = breakChange;
+      const pauseWrite = (this.prisma as any).attendanceBreak.upsert({
+        where: { attendanceId },
+        create: {
+          attendanceId,
+          companyId: current.companyId,
+          employeeId: current.employeeId,
+          startedAt: bc.start,
+          expectedEndAt: bc.end,
+          endedAt: bc.end,
+          minutes: bc.minutes,
+          lateMinutes: 0,
+          resumedAuto: false,
+          endMethod: 'MANUAL',
+          editedBy: userId,
+          editReason: updates.reason,
+          editedAt: new Date(),
+        },
+        update: {
+          startedAt: bc.start,
+          endedAt: bc.end,
+          minutes: bc.minutes,
+          lateMinutes: 0,
+          resumedAuto: false,
+          endMethod: 'MANUAL',
+          editedBy: userId,
+          editReason: updates.reason,
+          editedAt: new Date(),
+        },
+      });
+      [, updated] = await this.prisma.$transaction([pauseWrite, attendanceUpdate]);
+    } else if (breakChange?.action === 'delete') {
+      const pauseDelete = (this.prisma as any).attendanceBreak.delete({
+        where: { attendanceId },
+      });
+      [, updated] = await this.prisma.$transaction([pauseDelete, attendanceUpdate]);
+    } else {
+      updated = await attendanceUpdate;
+    }
 
     const admins = await this.prisma.user.findMany({
       where: {

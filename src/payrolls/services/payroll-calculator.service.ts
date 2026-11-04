@@ -337,7 +337,7 @@ export class PayrollCalculatorService {
       grossSalary - totalDeductions + nonTaxableBonuses,
     );
     const totalEmployerCost =
-      grossSalary + cnssEmployer + tusTotal + employerCustomTaxTotal;
+      grossSalary + nonTaxableBonuses + cnssEmployer + tusTotal + employerCustomTaxTotal;
 
     this.logger.log(
       `📊 NET = ${netSalary.toLocaleString()} FCFA | COÛT EMP = ${totalEmployerCost.toLocaleString()} FCFA`,

@@ -545,7 +545,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { YabetooPayService } from '../payments/yabetoopay.service';
 import { MotekiService } from '../payments/moteki.service';
 import { ChariowService } from '../payments/chariow.service';
-import { PLANS, getPlanPrice } from './config/plans.config';
+import { PLANS } from './config/plans.config';
 import { getMotekiPlanRef } from './config/moteki.config';
 import { getChariowProductId } from './config/chariow.config';
 import { UpgradeCheckoutDto } from './dto/upgrade-checkout.dto';
@@ -943,7 +943,8 @@ export class SubscriptionsService {
       }
     }
 
-    const planConfig = await this.pricingService.getPlan(plan);
+    const planConfig = PLANS[plan];
+    if (!planConfig) throw new BadRequestException('Plan inconnu.');
     this.logger.log(
       `💳 Intent company=${companyId} plan=${plan} amount=${amount} XAF` +
         (discountCodeId ? ` (remise ${discountAmount})` : '') +
@@ -1092,7 +1093,7 @@ export class SubscriptionsService {
     await this.activateUpgrade(payment.companyId, plan, billingPeriod, {
       months: months ?? undefined,
       // Devis : prix mensuel équivalent = montant payé / durée
-      pricePerMonth: months ? Math.round(payment.amount / months) : undefined,
+      pricePerMonth: Math.round(payment.amount / (months ?? (billingPeriod === 'yearly' ? 12 : 1))),
     });
 
     // ─── Consommation du code de réduction / du devis ─────────────────────
@@ -1241,7 +1242,7 @@ export class SubscriptionsService {
     }
 
     const planRef = getMotekiPlanRef(dto.plan, dto.billingPeriod);
-    const expectedAmount = getPlanPrice(dto.plan, dto.billingPeriod);
+    const expectedAmount = await this.pricingService.getPrice(dto.plan, dto.billingPeriod);
     const planConfig = PLANS[dto.plan];
 
     // Congo-Brazzaville uniquement pour l'instant (voir profil KonzaRH) —
@@ -1269,9 +1270,7 @@ export class SubscriptionsService {
     });
 
     if (intent.amount && intent.amount !== expectedAmount) {
-      this.logger.warn(
-        `⚠️ [Moteki v2] Montant reçu (${intent.amount}) ≠ tarif attendu (${expectedAmount}) pour ${dto.plan}/${dto.billingPeriod} — vérifier la config des subscription_plans sur le dashboard Moteki.`,
-      );
+      throw new BadRequestException('Le tarif du prestataire de paiement ne correspond pas au catalogue. Contactez le support.');
     }
 
     const payment = await this.prisma.payment.create({
@@ -1412,7 +1411,9 @@ export class SubscriptionsService {
         data: { status: 'SUCCEEDED', paidAt: new Date() },
       });
 
-      await this.activateUpgrade(payment.companyId, plan, billingPeriod);
+      await this.activateUpgrade(payment.companyId, plan, billingPeriod, {
+        pricePerMonth: Math.round(Number(payment.amount) / (billingPeriod === 'yearly' ? 12 : 1)),
+      });
 
       try {
         await this.affiliateService.handleSuccessfulPayment(payment.id);
@@ -1545,7 +1546,7 @@ export class SubscriptionsService {
     }
 
     const productId = getChariowProductId(dto.plan, dto.billingPeriod);
-    const expectedAmount = getPlanPrice(dto.plan, dto.billingPeriod);
+    const expectedAmount = await this.pricingService.getPrice(dto.plan, dto.billingPeriod);
     const planConfig = PLANS[dto.plan];
 
     // On pré-génère l'id du Payment AVANT d'appeler Chariow, pour pouvoir
@@ -1690,7 +1691,9 @@ export class SubscriptionsService {
       // ✅ Même logique d'ancrage de date que Moteki/YabetooPay — un
       // paiement Chariow est un paiement ponctuel comme un autre, la date
       // d'expiration réelle vient de notre propre calcul, pas de Chariow.
-      await this.activateUpgrade(payment.companyId, plan, billingPeriod);
+      await this.activateUpgrade(payment.companyId, plan, billingPeriod, {
+        pricePerMonth: Math.round(Number(actualAmount) / (billingPeriod === 'yearly' ? 12 : 1)),
+      });
 
       try {
         await this.affiliateService.handleSuccessfulPayment(payment.id);
@@ -1803,7 +1806,7 @@ export class SubscriptionsService {
       `✅ Activating upgrade for company: ${companyId} to ${plan} (${billingPeriod})`,
     );
 
-    const planConfig = await this.pricingService.getPlan(plan);
+    const monthlyAmount = opts?.pricePerMonth ?? await this.pricingService.getPrice(plan, 'monthly');
     const now = new Date();
 
     const currentSubscription = await this.prisma.subscription.findUnique({
@@ -1842,7 +1845,7 @@ export class SubscriptionsService {
         plan,
         status: 'ACTIVE',
         billingCycle: billingPeriod === 'yearly' ? 'YEARLY' : 'MONTHLY',
-        pricePerMonth: opts?.pricePerMonth ?? planConfig.priceMonthly,
+        pricePerMonth: monthlyAmount,
         trialEndsAt: null,
         currentPeriodStart: periodStart,
         currentPeriodEnd: periodEnd,
@@ -1907,7 +1910,7 @@ export class SubscriptionsService {
           (periodEnd.getTime() - Date.now()) / (1000 * 60 * 60 * 24),
         ),
         willRevertToFree: false, // géré par le cabinet, pas de "retour au Gratuit" pour la PME elle-même
-        planDetails: PLANS['ENTERPRISE'] ?? {
+        planDetails: (await this.pricingService.getPlans())['ENTERPRISE'] ?? {
           name: 'Cabinet géré',
           limits: {
             maxEmployees: -1,
@@ -1984,7 +1987,7 @@ export class SubscriptionsService {
 
     return {
       ...subscription,
-      planDetails: PLANS[subscription.plan],
+      planDetails: (await this.pricingService.getPlans())[subscription.plan],
       daysLeftInTrial,
       daysLeftInPeriod,
       willRevertToFree,
@@ -2204,7 +2207,9 @@ export class SubscriptionsService {
 
     const metadata = payment.metadata as any;
     const { plan, billingPeriod } = metadata;
-    await this.activateUpgrade(payment.companyId, plan, billingPeriod);
+    await this.activateUpgrade(payment.companyId, plan, billingPeriod, {
+      pricePerMonth: Math.round(Number(payment.amount) / (billingPeriod === 'yearly' ? 12 : 1)),
+    });
 
     try {
       await this.affiliateService.handleSuccessfulPayment(payment.id);
@@ -2230,10 +2235,8 @@ export class SubscriptionsService {
   // ==========================================================================
 
   async getAvailablePlans() {
-    // Avec Moteki/Chariow, les prix sont préconfigurés sur leurs dashboards : on affiche ceux de plans.config.ts.
-    const { paymentProvider } = await this.platformSettings.get();
     return {
-      plans: paymentProvider === 'YABETOOPAY' ? await this.pricingService.getPlans() : PLANS,
+      plans: await this.pricingService.getPlans(),
     };
   }
 }

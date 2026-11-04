@@ -587,9 +587,13 @@ import { PrismaService } from '../prisma/prisma.service';
 import { AISuggestion } from '@prisma/client';
 import { JobExpirationService } from './job-expiration.service';
 import { MailService } from '../mail/mail.service';
+import { RolesGuard } from '../auth/guards/roles.guard';
+import { Roles } from '../auth/decorators/roles.decorator';
+import { RecruitmentTestAccessService } from './recruitment-test-access.service';
 
 @Controller('recruitment')
-@UseGuards(AuthGuard('jwt'))
+@UseGuards(AuthGuard('jwt'), RolesGuard)
+@Roles('ADMIN', 'SUPER_ADMIN', 'HR_MANAGER', 'CABINET_ADMIN', 'CABINET_GESTIONNAIRE')
 export class RecruitmentController {
   constructor(
     private readonly recruitmentService: RecruitmentService,
@@ -598,6 +602,7 @@ export class RecruitmentController {
     private readonly prisma: PrismaService,
     private readonly jobExpirationService: JobExpirationService,
     private readonly mailService: MailService,
+    private readonly testAccess: RecruitmentTestAccessService,
   ) {}
 
   @Post('jobs')
@@ -961,6 +966,15 @@ export class RecruitmentController {
       where: { id },
       data: {
         canRetake: true,
+        testCompletedAt: null,
+        autoDisqualified: false,
+        autoDisqualifiedAt: null,
+        tabSwitchCount: 0,
+        suspiciousActivity: false,
+        testScore: 0,
+        totalScore: 0,
+        status: 'EN_ATTENTE_TEST',
+        testAnswers: { deleteMany: {} },
         retakeReason: reason || 'Autorisé par le recruteur',
         retakeGrantedBy: req.user.userId,
         retakeGrantedAt: new Date(),
@@ -968,7 +982,8 @@ export class RecruitmentController {
     });
     return {
       success: true,
-      message: `✅ ${candidate.firstName} ${candidate.lastName} peut re-postuler.`,
+      message: `Un nouveau lien de test est disponible pour ${candidate.firstName} ${candidate.lastName}.`,
+      testUrl: `/jobs/ia/${candidate.jobOfferId}/test/${id}#access_token=${encodeURIComponent(this.testAccess.issue(updated))}`,
       candidate: updated,
     };
   }
@@ -982,7 +997,7 @@ export class RecruitmentController {
         canRetake: false,
         retakeReason: null,
         retakeGrantedBy: null,
-        retakeGrantedAt: null,
+        retakeGrantedAt: new Date(),
       },
     });
     return {

@@ -74,15 +74,14 @@ export interface Plan {
 // 🎯 PLANS DISPONIBLES
 // ============================================================================
 
-export const PLANS: Record<string, Plan> = {
+// Les prix sont stockés dans plan_prices et résolus par PricingService.
+export const PLANS: Record<string, Omit<Plan, 'priceMonthly' | 'priceYearly'>> = {
   // ============================================================================
   // 🆓 FREE - PLAN DE BASE APRÈS ESSAI
   // ============================================================================
   FREE: {
     name: 'Gratuit',
     description: 'Pour tester les fonctionnalités de base',
-    priceMonthly: 0,
-    priceYearly: 0,
     currency: 'XAF',
     popular: false,
     limits: {
@@ -149,8 +148,6 @@ export const PLANS: Record<string, Plan> = {
   BASIC: {
     name: 'Basique',
     description: 'Pour les petites entreprises en croissance',
-    priceMonthly: 25000,
-    priceYearly: 250000, // 10 mois pour le prix de 12
     currency: 'XAF',
     popular: false,
     limits: {
@@ -216,8 +213,6 @@ export const PLANS: Record<string, Plan> = {
   PRO: {
     name: 'Pro',
     description: 'Pour les entreprises qui veulent tout automatiser',
-    priceMonthly: 75000,
-    priceYearly: 750000, // 10 mois pour le prix de 12
     currency: 'XAF',
     popular: true, // ⭐ Plan populaire
     limits: {
@@ -283,8 +278,6 @@ export const PLANS: Record<string, Plan> = {
   ENTERPRISE: {
     name: 'Enterprise',
     description: 'Pour les grandes entreprises avec besoins spécifiques',
-    priceMonthly: 200000,
-    priceYearly: 2000000, // 10 mois pour le prix de 12
     currency: 'XAF',
     popular: false,
     limits: {
@@ -344,17 +337,6 @@ export const PLANS: Record<string, Plan> = {
 
 export function getPlanLimits(plan: string): PlanLimits {
   return PLANS[plan]?.limits || PLANS.FREE.limits;
-}
-
-export function getPlanPrice(
-  plan: string,
-  billingPeriod: 'monthly' | 'yearly',
-): number {
-  const planConfig = PLANS[plan];
-  if (!planConfig) return 0;
-  return billingPeriod === 'yearly'
-    ? planConfig.priceYearly
-    : planConfig.priceMonthly;
 }
 
 export function canUseFeature(

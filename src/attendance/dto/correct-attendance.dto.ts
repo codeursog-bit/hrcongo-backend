@@ -5,6 +5,7 @@ import {
   IsNumber,
   IsNotEmpty,
   IsEnum,
+  IsBoolean,
 } from 'class-validator';
 import { DayStatusEnum } from '../attendance.service';
 
@@ -27,6 +28,20 @@ export class CorrectAttendanceDto {
   @IsOptional()
   @IsNumber()
   totalHours?: number;
+
+  // 🆕 Pause de la journée : début + fin (ISO). Crée la pause si elle n'existe pas.
+  @IsOptional()
+  @IsDateString()
+  breakStart?: string;
+
+  @IsOptional()
+  @IsDateString()
+  breakEnd?: string;
+
+  // 🆕 Supprime la pause de la journée (le temps de pause redevient du temps travaillé)
+  @IsOptional()
+  @IsBoolean()
+  removeBreak?: boolean;
 
   @IsNotEmpty()
   @IsString()
