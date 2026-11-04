@@ -9,6 +9,7 @@ import {
   Body,
   UseGuards,
   Request,
+  Query,
   HttpCode,
   HttpStatus,
 } from '@nestjs/common';
@@ -41,8 +42,8 @@ export class TrainingController {
 
   @Get('courses')
   @UseGuards(AuthGuard('jwt'))
-  findAllCourses(@Request() req: any) {
-    return this.trainingService.findAllCourses(req.user.userId);
+  findAllCourses(@Request() req: any, @Query('companyId') companyId?: string) {
+    return this.trainingService.findAllCourses(req.user.userId, companyId);
   }
 
   @Post('join/:courseId')

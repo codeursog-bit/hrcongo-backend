@@ -30,7 +30,7 @@ export class CabinetSubscriptionController {
 
   // GET /cabinet/:cabinetId/subscription
   @Get(':cabinetId/subscription')
-  @UseGuards(CabinetMemberGuard)
+  @UseGuards(CabinetMemberGuard, CabinetAdminGuard)
   getSubscription(@Param('cabinetId') cabinetId: string) {
     return this.svc.getSubscription(cabinetId);
   }
@@ -51,7 +51,7 @@ export class CabinetSubscriptionController {
   // POST /cabinet/:cabinetId/subscription/confirm-payment
   // Envoie la demande Mobile Money sur le téléphone de l'utilisateur
   @Post(':cabinetId/subscription/confirm-payment')
-  @UseGuards(CabinetMemberGuard)
+  @UseGuards(CabinetMemberGuard, CabinetAdminGuard)
   @HttpCode(HttpStatus.OK)
   confirmPayment(
     @Param('cabinetId') cabinetId: string,

@@ -7,7 +7,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 
 const SINGLETON_ID = 1;
-const DEFAULTS = { preShiftReminderMinutes: 20 };
+const DEFAULTS = { preShiftReminderMinutes: 20, paymentProvider: 'YABETOOPAY' as const };
 
 export type SubscriptionPaymentProvider = 'YABETOOPAY' | 'MOTEKI' | 'CHARIOW';
 

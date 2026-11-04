@@ -34,7 +34,7 @@ import { Throttle } from '@nestjs/throttler';
 import { ForcePasswordChangeDto } from './dto/force-password-change.dto';
 import { SwitchCompanyDto } from './dto/switch-company.dto';
 import { PrismaService } from '../prisma/prisma.service';
-import { CabinetService } from 'src/cabinet/services/cabinet.service';
+import { CabinetService } from '../cabinet/services/cabinet.service';
 import { pickFreshestCookie } from '../common/utils/cookie.util';
 
 @Controller('auth')
@@ -49,7 +49,7 @@ export class AuthController {
   // 5 tentatives max / 15 min par IP — verrouillage compte géré dans le service
   @Post('login')
   @HttpCode(HttpStatus.OK)
-  @Throttle({ default: { limit: 5, ttl: 900000 } })
+  @Throttle({ short: { limit: 5, ttl: 900000 } })
   async login(
     @Body() loginDto: LoginDto,
     @Ip() ip: string,
@@ -64,7 +64,7 @@ export class AuthController {
   // ── Register ─────────────────────────────────────────────────────────────
   @Post('register')
   @HttpCode(HttpStatus.CREATED)
-  @Throttle({ default: { limit: 3, ttl: 3600000 } }) // 3 créations / heure par IP
+  @Throttle({ short: { limit: 3, ttl: 3600000 } }) // 3 créations / heure par IP
   async register(@Body() dto: RegisterDto, @Res() res: Response) {
     return this.authService.register(dto, res);
   }
@@ -72,7 +72,7 @@ export class AuthController {
   // ── Auto-inscription portefeuille (page publique dédiée) ───────────────────
   @Post('register-portfolio')
   @HttpCode(HttpStatus.CREATED)
-  @Throttle({ default: { limit: 3, ttl: 3600000 } })
+  @Throttle({ short: { limit: 3, ttl: 3600000 } })
   async registerPortfolio(
     @Body() dto: { email: string; password: string; firstName: string; lastName: string },
     @Res() res: Response,
@@ -83,7 +83,7 @@ export class AuthController {
   // ── Force password change (premier login) ─────────────────────────────────
   @Post('force-password-change')
   @HttpCode(HttpStatus.OK)
-  @Throttle({ default: { limit: 3, ttl: 300000 } })
+  @Throttle({ short: { limit: 3, ttl: 300000 } })
   async forcePasswordChange(
     @Body() dto: ForcePasswordChangeDto,
     @Res() res: Response,
@@ -99,7 +99,7 @@ export class AuthController {
   @Post('change-password')
   @UseGuards(JwtAuthGuard)
   @HttpCode(HttpStatus.OK)
-  @Throttle({ default: { limit: 3, ttl: 300000 } })
+  @Throttle({ short: { limit: 3, ttl: 300000 } })
   async changePassword(@Request() req: any, @Body() dto: ChangePasswordDto) {
     return this.authService.changePassword(req.user.userId, dto);
   }
@@ -136,7 +136,7 @@ export class AuthController {
   // 3 demandes max / 15 min par IP — anti-spam email
   @Post('forgot-password')
   @HttpCode(HttpStatus.OK)
-  @Throttle({ default: { limit: 3, ttl: 900000 } })
+  @Throttle({ short: { limit: 3, ttl: 900000 } })
   async forgotPassword(@Body('email') email: string) {
     if (!email) throw new BadRequestException('Email requis');
     return this.authService.forgotPassword(email);
@@ -146,7 +146,7 @@ export class AuthController {
   // 5 tentatives max / 15 min par IP
   @Post('reset-password')
   @HttpCode(HttpStatus.OK)
-  @Throttle({ default: { limit: 5, ttl: 900000 } })
+  @Throttle({ short: { limit: 5, ttl: 900000 } })
   async resetPassword(
     @Body('token') token: string,
     @Body('newPassword') newPassword: string,
@@ -188,7 +188,7 @@ export class AuthController {
     let cabinetId: string | null = null;
     if (user.role === 'CABINET_ADMIN' || user.role === 'CABINET_GESTIONNAIRE') {
       const cu = await this.prisma.cabinetUser.findFirst({
-        where: { userId: user.id },
+        where: { userId: user.id, ...(req.user.cabinetId ? { cabinetId: req.user.cabinetId } : {}), cabinet: { isActive: true } },
         select: { cabinetId: true },
       });
       cabinetId = cu?.cabinetId ?? null;
@@ -211,7 +211,7 @@ export class AuthController {
         email: user.email,
         firstName: user.firstName,
         lastName: user.lastName,
-        role: user.role,
+        role: req.user.role,
         companyId: user.companyId ?? null,
         cabinetId,
         managedByCabinet,
@@ -284,7 +284,7 @@ export class AuthController {
       if (company) company.name = company.tradeName || company.legalName;
     }
 
-    return { ...user, company };
+    return { ...user, role: req.user.role, cabinetId: req.user.cabinetId ?? null, company };
   }
 
   // ── Switch company (ADMIN multi-entreprises) ───────────────────────────────
@@ -294,7 +294,7 @@ export class AuthController {
   @Post('switch-company')
   @UseGuards(JwtAuthGuard)
   @HttpCode(HttpStatus.OK)
-  @Throttle({ default: { limit: 20, ttl: 60000 } })
+  @Throttle({ short: { limit: 20, ttl: 60000 } })
   async switchCompany(
     @Request() req: any,
     @Body() dto: SwitchCompanyDto,

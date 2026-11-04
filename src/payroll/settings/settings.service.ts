@@ -259,8 +259,8 @@ export class PayrollSettingsService {
     if (dto.workDays !== undefined) data.workDays = dto.workDays;
     if (dto.cnssSalarialRate !== undefined)
       data.cnssSalarialRate = dto.cnssSalarialRate;
-    if (dto.cnssEmployerRate !== undefined)
-      data.cnssEmployerRate = dto.cnssEmployerRate;
+    // 🔒 Le taux CNSS patronal au Congo est fixé par décret à 20.28% (non personnalisable)
+    data.cnssEmployerRate = CONST.DEFAULT_CNSS_EMPLOYER_RATE;
     if (dto.cnssCeiling !== undefined) data.cnssCeiling = dto.cnssCeiling;
     if (dto.overtimeRate15 !== undefined)
       data.overtimeRate15 = dto.overtimeRate15;

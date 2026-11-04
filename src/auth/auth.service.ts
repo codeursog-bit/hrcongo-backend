@@ -197,9 +197,10 @@ export class AuthService {
     let cabinetId: string | null = null;
     if (user.role === 'CABINET_ADMIN' || user.role === 'CABINET_GESTIONNAIRE') {
       const cu = await this.prisma.cabinetUser.findFirst({
-        where: { userId: user.id },
+        where: { userId: user.id, cabinet: { isActive: true } },
         select: { cabinetId: true },
       });
+      if (!cu) throw new UnauthorizedException('Accès au cabinet révoqué ou cabinet désactivé');
       cabinetId = cu?.cabinetId ?? null;
     }
 

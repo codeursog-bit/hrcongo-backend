@@ -31,7 +31,7 @@ export class ContactController {
   // ── POST /contact — PUBLIC (throttle serré anti-spam) ─────────────────────
   @Post()
   @HttpCode(HttpStatus.OK)
-  @Throttle({ default: { limit: 3, ttl: 60_000 } }) // max 3 messages/min par IP
+  @Throttle({ short: { limit: 3, ttl: 60_000 } }) // max 3 messages/min par IP
   async create(@Body() body: CreateContactDto, @Req() req: Request) {
     const ip =
       (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() ||

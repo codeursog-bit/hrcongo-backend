@@ -2013,16 +2013,14 @@ export class PayrollsService {
       },
     });
     if (!user) throw new ForbiddenException('Utilisateur non trouvé');
-    if (overrideCompanyId && user.manageMultipleCompanies) {
-      user.companyId = overrideCompanyId;
-    }
-    if (user.companyId !== payroll.companyId)
+    if (overrideCompanyId && overrideCompanyId !== payroll.companyId)
       throw new ForbiddenException('Accès refusé');
+    await assertCompanyAccess(this.prisma, userId, payroll.companyId);
     if (user.role === 'EMPLOYEE') {
       const isOwner = user.employeeId === payroll.employeeId;
       if (!isOwner) {
         const emp = await this.prisma.employee.findFirst({
-          where: { email: user.email, companyId: user.companyId },
+          where: { email: user.email, companyId: user.companyId ?? undefined },
         });
         if (!emp || emp.id !== payroll.employeeId)
           throw new ForbiddenException('Accès à vos bulletins uniquement');

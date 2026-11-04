@@ -46,7 +46,7 @@ export class AuditEngineController {
 
   @Post('run')
   @Roles('ADMIN', 'HR_MANAGER')
-  @Throttle({ default: { limit: 6, ttl: 60_000 } })
+  @Throttle({ short: { limit: 6, ttl: 60_000 } })
   async run(@Req() req: any, @Body() dto: RunAuditDto) {
     const companyId = await this.company(req, dto.companyId, true);
     return this.engine.run(companyId, { month: dto.month, year: dto.year, trigger: 'MANUAL', actor: await this.actor(req) });

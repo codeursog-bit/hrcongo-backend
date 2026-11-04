@@ -72,7 +72,7 @@ export class ServerMonitorController {
   }
 
   @Post('purge/execute')
-  @Throttle({ default: { limit: 10, ttl: 60000 } })
+  @Throttle({ short: { limit: 10, ttl: 60000 } })
   purgeExecute(@Body() dto: PurgeExecuteDto, @Request() req: any) {
     return this.purge.execute(dto.items, dto.confirm, dto.confirmText, {
       userId: req.user?.userId ?? req.user?.id,

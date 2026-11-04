@@ -51,6 +51,7 @@ export class DocumentsController {
     @Query('status') status?: DocumentStatus,
     @Query('expiringInDays') expiringInDays?: string,
     @Query('includeArchived') includeArchived?: string,
+    @Query('companyId') companyId?: string,
   ) {
     return this.documentsService.findAll(req.user.userId, {
       employeeId,
@@ -58,6 +59,7 @@ export class DocumentsController {
       status,
       expiringInDays: expiringInDays ? parseInt(expiringInDays) : undefined,
       includeArchived: includeArchived === 'true',
+      companyId,
     });
   }
 

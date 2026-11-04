@@ -121,11 +121,6 @@ export class MotekiService {
   private readonly secretKey: string;
 
   constructor(private configService: ConfigService) {
-    // 🧪 MODE TEST TEMPORAIRE — décommente la ligne suivante pour forcer la
-    // clé en dur et vérifier si le problème vient de ConfigService/l'env,
-    // ou de la clé elle-même. À RETIRER une fois le diagnostic fait.
-    // const secretKey = 'sk_2gUfizdaI10JCzacRtYVeYTnSjV7HUye6Ujb4K8Y4R9cnaYZ';
-
     const secretKey = this.configService.get<string>('MOTEKI_SECRET_KEY');
     this.secretKey = secretKey ?? '';
 
@@ -134,17 +129,6 @@ export class MotekiService {
         '⚠️  MOTEKI_SECRET_KEY absent de la config (.env) — MotekiService inactif, un autre prestataire prend le relais si configuré.',
       );
     }
-
-    // 🔍 DIAGNOSTIC — ne jamais logger la clé en clair, juste sa "forme".
-    // Compare la longueur et le préfixe avec ce que montre le dashboard
-    // Moteki. Si ça ne matche pas ici, le souci est la valeur/le chargement
-    // de la variable (env du conteneur pas à jour, ordre ConfigModule, etc.)
-    // — pas le code d'appel HTTP plus bas.
-    this.logger.debug(
-      `🔍 MOTEKI_SECRET_KEY chargée — longueur: ${this.secretKey.length}, ` +
-        `début: "${this.secretKey.slice(0, 6)}", fin: "${this.secretKey.slice(-4)}", ` +
-        `contient espace/retour-ligne: ${/\s/.test(this.secretKey)}`,
-    );
 
     // ⚠️ baseURL = racine du domaine, PAS /api/v1 — v1 (/api/v1/...) et v2
     // (/api/v2/...) n'ont pas le même préfixe, donc chaque méthode qualifie
@@ -161,18 +145,6 @@ export class MotekiService {
         Authorization: `Bearer ${this.secretKey}`,
       },
       timeout: 30000,
-    });
-
-    // 🔍 DIAGNOSTIC — confirme le header EXACT envoyé à chaque requête (utile
-    // si tu soupçonnes un intercepteur ou une config qui écrase le header
-    // après coup). À retirer une fois le diagnostic terminé.
-    this.client.interceptors.request.use((config) => {
-      const authHeader = config.headers?.Authorization as string | undefined;
-      this.logger.debug(
-        `🔍 [Moteki] Requête ${config.method?.toUpperCase()} ${config.url} — ` +
-          `Authorization présent: ${!!authHeader}, longueur: ${authHeader?.length ?? 0}`,
-      );
-      return config;
     });
 
     this.logger.log(`🔧 MotekiService initialisé — base URL: ${baseURL}`);

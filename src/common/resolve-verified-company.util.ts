@@ -80,7 +80,7 @@ export async function resolveVerifiedCompanyId(
   // de l'accorder.
   if (isCabinet) {
     const memberships = await prisma.cabinetUser.findMany({
-      where: { userId: user.id },
+      where: { userId: user.id, cabinet: { isActive: true } },
       select: { cabinetId: true },
     });
     if (memberships.length > 0) {

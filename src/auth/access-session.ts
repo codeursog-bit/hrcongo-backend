@@ -16,14 +16,25 @@ export async function validateAccessSession(prisma: PrismaService, payload: any)
       session.expiresAt <= new Date() || !session.user.isActive) {
     throw new UnauthorizedException('Session invalide ou révoquée. Reconnectez-vous.');
   }
+  let role = session.user.role;
+  let cabinetId = payload.cabinetId ?? null;
+  if (role === 'CABINET_ADMIN' || role === 'CABINET_GESTIONNAIRE') {
+    const member = await prisma.cabinetUser.findFirst({
+      where: { userId: payload.sub, ...(cabinetId ? { cabinetId } : {}), cabinet: { isActive: true } },
+      select: { cabinetId: true, role: true },
+    });
+    if (!member) throw new UnauthorizedException('Accès au cabinet révoqué ou cabinet désactivé');
+    cabinetId = member.cabinetId;
+    role = member.role === 'CABINET_ADMIN' ? 'CABINET_ADMIN' : 'CABINET_GESTIONNAIRE';
+  }
   return {
     id: payload.sub, // ✅ AJOUT — req.user.id fonctionne partout
     userId: payload.sub,
     sessionId: payload.sid,
     email: session.user.email,
-    role: session.user.role,
+    role,
     companyId: payload.companyId ?? null,
-    cabinetId: payload.cabinetId ?? null,
+    cabinetId,
     managedByCabinet: payload.managedByCabinet ?? false,
   };
 }

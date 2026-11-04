@@ -41,7 +41,7 @@ export class TrainingService {
 
   // ── Helpers ────────────────────────────────────────────────────────────────
 
-  private async getUser(userId: string) {
+  private async getUser(userId: string, requestedCompanyId?: string) {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
       select: {
@@ -54,11 +54,13 @@ export class TrainingService {
         manageMultipleCompanies: true,
       },
     });
-    if (!user || !user.companyId)
+    if (!user) throw new ForbiddenException('Utilisateur introuvable');
+    const companyId = await resolveVerifiedCompanyId(this.prisma, user, requestedCompanyId);
+    if (!companyId)
       throw new ForbiddenException(
         'Utilisateur non rattaché à une entreprise.',
       );
-    return { ...user, companyId: user.companyId };
+    return { ...user, companyId };
   }
 
   private async getEmployee(userId: string, companyId: string) {
@@ -147,7 +149,7 @@ export class TrainingService {
   // 2. CATALOGUE
   // ══════════════════════════════════════════════════════════════════════════
   async findAllCourses(userId: string, overrideCompanyId?: string) {
-    const user = await this.getUser(userId);
+    const user = await this.getUser(userId, overrideCompanyId);
 
     const isCabinet =
       user.role === 'CABINET_ADMIN' || user.role === 'CABINET_GESTIONNAIRE';

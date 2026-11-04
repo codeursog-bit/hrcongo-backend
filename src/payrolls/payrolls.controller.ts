@@ -331,8 +331,8 @@ export class PayrollsController {
   // GET /payrolls/:id
   // ─────────────────────────────────────────────────────────────────────────
   @Get(':id')
-  findOne(@Param('id') id: string, @Request() req: any) {
-    return this.payrollsService.findOne(id, req.user.userId);
+  findOne(@Param('id') id: string, @Request() req: any, @Query('companyId') companyId?: string) {
+    return this.payrollsService.findOne(id, req.user.userId, companyId);
   }
 
   // ─────────────────────────────────────────────────────────────────────────

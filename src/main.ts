@@ -3,7 +3,7 @@
 // Sécurité production + Cookies HttpOnly + CORS Vercel/Render + Keep-Alive
 // ============================================================================
 import { NestFactory } from '@nestjs/core';
-import { ValidationPipe, Logger } from '@nestjs/common';
+import { ValidationPipe, Logger, ForbiddenException } from '@nestjs/common';
 import { AppModule } from './app.module';
 import helmet from 'helmet';
 import cookieParser from 'cookie-parser';
@@ -127,15 +127,8 @@ async function bootstrap() {
         // Origine dans la liste explicite
         if (allowedOrigins.includes(origin)) return callback(null, true);
 
-        // 🔒 Previews Render : autorisées UNIQUEMENT hors production.
-        // Avant : tout « *.onrender.com » était accepté, même en prod. Or n'importe qui
-        // peut créer « evil.onrender.com » : avec `credentials: true` (cookies envoyés),
-        // une telle page pouvait appeler l'API au nom d'un utilisateur connecté ET lire
-        // les réponses. En production, seule la liste CORS_ORIGINS fait foi.
-        if (!isProd && origin.endsWith('.onrender.com')) return callback(null, true);
-
         logger.warn(`❌ CORS bloqué : ${origin}`);
-        callback(new Error('Not allowed by CORS'));
+        callback(new ForbiddenException('Origine non autorisée'));
       },
       methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE', 'OPTIONS'],
       credentials: true, // OBLIGATOIRE pour envoyer/recevoir les cookies

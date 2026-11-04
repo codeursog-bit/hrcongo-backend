@@ -19,14 +19,21 @@ export class CabinetMemberGuard implements CanActivate {
     const req = context.switchToHttp().getRequest();
     const cabinetId = req.params.cabinetId;
     if (!cabinetId) throw new ForbiddenException('Cabinet non spécifié');
-    if (req.user?.role === 'SUPER_ADMIN') return true;
+    if (req.user?.role === 'SUPER_ADMIN') {
+      req.cabinetId = cabinetId;
+      req.cabinetRole = 'CABINET_ADMIN';
+      return true;
+    }
 
     const member = await this.prisma.cabinetUser.findUnique({
       where: { cabinetId_userId: { cabinetId, userId: req.user.userId } },
+      include: { cabinet: { select: { isActive: true } } },
     });
 
     if (!member)
       throw new ForbiddenException("Vous n'êtes pas membre de ce cabinet");
+    if (!member.cabinet.isActive)
+      throw new ForbiddenException('Ce cabinet est désactivé');
 
     req.cabinetRole = member.role;
     req.cabinetId = cabinetId;

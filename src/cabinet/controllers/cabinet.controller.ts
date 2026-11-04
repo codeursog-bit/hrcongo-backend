@@ -14,6 +14,7 @@ import { JwtAuthGuard } from '../../auth/jwt-auth.guard';
 import {
   CabinetMemberGuard,
   CabinetAdminGuard,
+  CabinetCompanyIsolationGuard,
 } from '../guards/cabinet.guards';
 import { CabinetService } from '../services/cabinet.service';
 import { CabinetWalletService } from '../services/cabinet-wallet.service';
@@ -41,29 +42,41 @@ export class CabinetController {
   }
 
   @Get(':cabinetId')
-  @UseGuards(CabinetMemberGuard)
+  @UseGuards(CabinetMemberGuard, CabinetAdminGuard)
   findOne(@Param('cabinetId') cabinetId: string) {
     return this.cabinetService.findById(cabinetId);
   }
 
   // ── Alias /profile → même que GET :cabinetId (le front appelle les deux) ──
   @Get(':cabinetId/profile')
-  @UseGuards(CabinetMemberGuard)
+  @UseGuards(CabinetMemberGuard, CabinetAdminGuard)
   getProfile(@Param('cabinetId') cabinetId: string) {
     return this.cabinetService.findById(cabinetId);
   }
 
   // ── GET :cabinetId/gestionnaires — liste des membres du cabinet ──
   @Get(':cabinetId/gestionnaires')
-  @UseGuards(CabinetMemberGuard)
+  @UseGuards(CabinetMemberGuard, CabinetAdminGuard)
   getGestionnaires(@Param('cabinetId') cabinetId: string) {
     return this.cabinetService.getMembers(cabinetId);
   }
 
   @Get(':cabinetId/dashboard')
   @UseGuards(CabinetMemberGuard)
-  getDashboard(@Param('cabinetId') cabinetId: string) {
-    return this.cabinetService.getDashboard(cabinetId);
+  getDashboard(@Param('cabinetId') cabinetId: string, @Request() req) {
+    return this.cabinetService.getDashboard(cabinetId, req.cabinetRole === 'CABINET_ADMIN');
+  }
+
+  @Get(':cabinetId/access')
+  @UseGuards(CabinetMemberGuard)
+  getAccess(@Param('cabinetId') cabinetId: string, @Request() req) {
+    return { cabinetId, role: req.cabinetRole, canAdminister: req.cabinetRole === 'CABINET_ADMIN' };
+  }
+
+  @Get(':cabinetId/companies/:companyId/context')
+  @UseGuards(CabinetMemberGuard, CabinetCompanyIsolationGuard)
+  getCompanyContext(@Param('companyId') companyId: string, @Request() req) {
+    return this.cabinetService.getCompanyContext(req.cabinetId, companyId, req.cabinetRole);
   }
 
   // NOTE: GET :cabinetId/subscription est maintenant géré par CabinetSubscriptionController
@@ -135,7 +148,7 @@ export class CabinetController {
   // ── PME — Recherche ─────────────────────────────────────────────────────────
 
   @Get(':cabinetId/companies/search')
-  @UseGuards(CabinetMemberGuard)
+  @UseGuards(CabinetMemberGuard, CabinetAdminGuard)
   searchCompanies(
     @Param('cabinetId') cabinetId: string,
     @Query('q') q: string,

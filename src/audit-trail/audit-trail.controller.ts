@@ -70,7 +70,7 @@ export class AuditTrailController {
   /** Recalcule toute la chaîne de hash : prouve que le journal n'a pas été altéré. */
   @Get('verify')
   @Roles('ADMIN', 'SUPER_ADMIN')
-  @Throttle({ default: { limit: 3, ttl: 60_000 } })
+  @Throttle({ short: { limit: 3, ttl: 60_000 } })
   async verify(@Req() req: any, @Query() q: AuditHistoryQueryDto) {
     const companyId = await this.resolveCompany(req, q.companyId);
     return this.trail.verifyChain(companyId);

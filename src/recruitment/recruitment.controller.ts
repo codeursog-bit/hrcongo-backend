@@ -611,6 +611,7 @@ export class RecruitmentController {
     @Body() data: CreateJobDto,
     @Request() req: any,
     @UploadedFile() image?: Express.Multer.File,
+    @Query('companyId') companyId?: string,
   ) {
     let imageUrl: string | null = null;
     if (image) {
@@ -629,12 +630,23 @@ export class RecruitmentController {
     return this.recruitmentService.createJobOffer(
       { ...data, imageUrl: imageUrl || undefined },
       req.user.userId,
+      companyId,
     );
   }
 
   @Get('jobs')
-  findAllJobs(@Request() req: any) {
-    return this.recruitmentService.findAllJobOffers(req.user.userId);
+  findAllJobs(@Request() req: any, @Query('companyId') companyId?: string) {
+    return this.recruitmentService.findAllJobOffers(req.user.userId, companyId);
+  }
+
+  @Get('jobs/:id/candidates')
+  async findJobCandidates(@Param('id') id: string, @Request() req: any) {
+    await this.recruitmentService.findOneJobOffer(id, req.user.userId);
+    return this.prisma.candidate.findMany({
+      where: { jobOfferId: id },
+      select: { id: true, firstName: true, lastName: true, email: true, status: true, createdAt: true },
+      orderBy: { createdAt: 'desc' },
+    });
   }
 
   @Get('jobs/:id')
@@ -1021,6 +1033,7 @@ export class RecruitmentController {
     ];
     if (!validDecisions.includes(data.hrDecision as AISuggestion))
       throw new BadRequestException('hrDecision invalide');
+    await this.recruitmentService.findOneCandidate(id, req.user.userId);
     return this.prisma.candidate.update({
       where: { id },
       data: {
@@ -1028,6 +1041,13 @@ export class RecruitmentController {
         hrNotes: data.hrNotes || null,
         hrDecidedBy: req.user.userId,
         hrDecidedAt: new Date(),
+      },
+      select: {
+        id: true,
+        hrDecision: true,
+        hrNotes: true,
+        hrDecidedBy: true,
+        hrDecidedAt: true,
       },
     });
   }
@@ -1191,10 +1211,12 @@ export class RecruitmentController {
   }
 
   @Post('jobs/:jobId/questions')
-  createQuestion(
+  async createQuestion(
     @Param('jobId') jobId: string,
     @Body() data: CreateQuestionDto,
+    @Request() req: any,
   ) {
+    await this.recruitmentService.findOneJobOffer(jobId, req.user.userId);
     return this.prisma.jobOfferTestQuestion.create({
       data: {
         jobOfferId: jobId,
@@ -1209,12 +1231,14 @@ export class RecruitmentController {
   }
 
   @Post('candidates/:id/grade-test')
-  gradeTest(@Param('id') id: string) {
+  async gradeTest(@Param('id') id: string, @Request() req: any) {
+    await this.recruitmentService.findOneCandidate(id, req.user.userId);
     return this.recruitmentAIService.gradeTest(id);
   }
 
   @Post('candidates/:id/calculate-score')
-  calculateScore(@Param('id') id: string) {
+  async calculateScore(@Param('id') id: string, @Request() req: any) {
+    await this.recruitmentService.findOneCandidate(id, req.user.userId);
     return this.recruitmentAIService.calculateFinalScore(id);
   }
 

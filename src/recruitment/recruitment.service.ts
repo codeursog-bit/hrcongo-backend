@@ -1,3 +1,5 @@
+import { ForbiddenException, BadRequestException } from '@nestjs/common';
+import { assertCompanyAccess, resolveVerifiedCompanyId } from '../common/resolve-verified-company.util';
 // import { Injectable, NotFoundException } from '@nestjs/common';
 // import { PrismaService } from '../prisma/prisma.service';
 // import { CreateJobDto } from './dto/create-job.dto';
@@ -352,34 +354,38 @@ export class RecruitmentService {
     private subscriptionGuard: SubscriptionGuard,
   ) {}
 
-  async createJobOffer(data: CreateJobDto, userId: string) {
+  async createJobOffer(data: CreateJobDto, userId: string, requestedCompanyId?: string) {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
-      select: { companyId: true },
+      select: { id: true, companyId: true, role: true, manageMultipleCompanies: true },
     });
-    if (!user || !user.companyId) throw new Error('Accès refusé');
+    if (!user) throw new ForbiddenException('Accès refusé');
+    const companyId = await resolveVerifiedCompanyId(this.prisma, user, requestedCompanyId);
+    if (!companyId) throw new ForbiddenException('Entreprise non sélectionnée');
+    const department = await this.prisma.department.findFirst({ where: { id: data.departmentId, companyId }, select: { id: true } });
+    if (!department) throw new BadRequestException('Département non autorisé');
 
     await this.subscriptionGuard.checkLimit(
-      user.companyId,
+      companyId,
       'maxJobOffers',
       "Vous avez atteint la limite d'offres d'emploi de votre plan.",
     );
 
     if (data.processingMode === 'AI_ASSISTED') {
       await this.subscriptionGuard.checkFeatureAccess(
-        user.companyId,
+        companyId,
         'hasRecruitmentAI',
       );
     }
 
     // ✅ Génère le slug entreprise si absent
     const company = await this.prisma.company.findUnique({
-      where: { id: user.companyId },
+      where: { id: companyId },
       select: { id: true, legalName: true, slug: true },
     });
     if (company && !company.slug) {
       await this.prisma.company.update({
-        where: { id: user.companyId },
+        where: { id: companyId },
         data: {
           slug: generateSlug(company.legalName, company.id.substring(0, 6)),
         },
@@ -388,7 +394,7 @@ export class RecruitmentService {
 
     return this.prisma.jobOffer.create({
       data: {
-        companyId: user.companyId,
+        companyId: companyId,
         status: data.status
           ? (data.status as JobOfferStatus)
           : JobOfferStatus.PUBLISHED,
@@ -425,14 +431,16 @@ export class RecruitmentService {
     });
   }
 
-  async findAllJobOffers(userId: string) {
+  async findAllJobOffers(userId: string, requestedCompanyId?: string) {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
-      select: { companyId: true },
+      select: { id: true, companyId: true, role: true, manageMultipleCompanies: true },
     });
-    if (!user || !user.companyId) return [];
+    if (!user) throw new ForbiddenException('Accès refusé');
+    const companyId = await resolveVerifiedCompanyId(this.prisma, user, requestedCompanyId);
+    if (!companyId) return [];
     return this.prisma.jobOffer.findMany({
-      where: { companyId: user.companyId },
+      where: { companyId },
       include: {
         department: { select: { id: true, name: true } },
         _count: { select: { candidates: true } },
@@ -442,17 +450,12 @@ export class RecruitmentService {
   }
 
   async findOneJobOffer(jobId: string, userId: string) {
-    const user = await this.prisma.user.findUnique({
-      where: { id: userId },
-      select: { companyId: true },
-    });
-    if (!user || !user.companyId) throw new NotFoundException('Accès refusé');
     const job = await this.prisma.jobOffer.findUnique({
       where: { id: jobId },
       include: { department: true, _count: { select: { candidates: true } } },
     });
-    if (!job || job.companyId !== user.companyId)
-      throw new NotFoundException('Offre introuvable');
+    if (!job) throw new NotFoundException('Offre introuvable');
+    await assertCompanyAccess(this.prisma, userId, job.companyId);
     return job;
   }
 
@@ -552,11 +555,6 @@ export class RecruitmentService {
   }
 
   async findOneCandidate(candidateId: string, userId: string) {
-    const user = await this.prisma.user.findUnique({
-      where: { id: userId },
-      select: { companyId: true },
-    });
-    if (!user || !user.companyId) throw new NotFoundException('Accès refusé');
     const candidate = await this.prisma.candidate.findUnique({
       where: { id: candidateId },
       include: {
@@ -564,8 +562,8 @@ export class RecruitmentService {
         testAnswers: { include: { question: true } },
       },
     });
-    if (!candidate || candidate.jobOffer.companyId !== user.companyId)
-      throw new NotFoundException('Candidat introuvable');
+    if (!candidate) throw new NotFoundException('Candidat introuvable');
+    await assertCompanyAccess(this.prisma, userId, candidate.jobOffer.companyId);
     return candidate;
   }
 

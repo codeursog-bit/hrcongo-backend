@@ -1,3 +1,4 @@
+import { resolveVerifiedCompanyId } from '../common/resolve-verified-company.util';
 // ============================================================================
 // 📄 src/documents/documents.service.ts — CORRIGÉ (aligned avec le vrai schéma)
 // ============================================================================
@@ -28,6 +29,7 @@ export interface CreateDocumentInput {
 }
 
 export interface FindAllFilters {
+  companyId?: string;
   employeeId?: string;
   type?: DocumentType;
   status?: DocumentStatus;
@@ -116,14 +118,16 @@ export class DocumentsService {
 
   // ── Contexte utilisateur ──────────────────────────────────────────────────
 
-  private async getUserCtx(userId: string) {
+  private async getUserCtx(userId: string, requestedCompanyId?: string) {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
-      select: { id: true, companyId: true, role: true, email: true },
+      select: { id: true, companyId: true, role: true, email: true, manageMultipleCompanies: true },
     });
-    if (!user?.companyId) throw new ForbiddenException('Accès refusé');
+    if (!user) throw new ForbiddenException('Accès refusé');
+    const companyId = await resolveVerifiedCompanyId(this.prisma, user, requestedCompanyId);
+    if (!companyId) throw new ForbiddenException('Accès refusé');
     // On retourne avec companyId garanti non-null
-    return user as typeof user & { companyId: string };
+    return { ...user, companyId };
   }
 
   // ── Vérifier accès à un employé ──────────────────────────────────────────
@@ -224,7 +228,7 @@ export class DocumentsService {
   // ==========================================================================
 
   async findAll(userId: string, filters: FindAllFilters = {}) {
-    const user = await this.getUserCtx(userId);
+    const user = await this.getUserCtx(userId, filters.companyId);
     const companyId = user.companyId;
 
     const where: Prisma.DocumentWhereInput = {
@@ -242,7 +246,11 @@ export class DocumentsService {
       where.employeeId = emp.id;
     }
 
-    if (filters.employeeId) where.employeeId = filters.employeeId;
+    if (filters.employeeId) {
+      if (user.role === 'EMPLOYEE' && filters.employeeId !== where.employeeId)
+        throw new ForbiddenException('Accès à vos documents uniquement');
+      where.employeeId = filters.employeeId;
+    }
     if (filters.type) where.type = filters.type;
     if (filters.status) where.status = filters.status;
 
@@ -272,7 +280,6 @@ export class DocumentsService {
   // ==========================================================================
 
   async findOne(documentId: string, userId: string) {
-    const user = await this.getUserCtx(userId);
     const doc = await this.prisma.document.findUnique({
       where: { id: documentId },
       include: {
@@ -289,6 +296,7 @@ export class DocumentsService {
       },
     });
     if (!doc) throw new NotFoundException('Document introuvable');
+    const user = await this.getUserCtx(userId, doc.companyId);
     if (doc.companyId !== user.companyId)
       throw new ForbiddenException('Accès refusé');
     if (user.role === 'EMPLOYEE' && doc.employee?.email !== user.email) {

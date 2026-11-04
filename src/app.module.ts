@@ -99,12 +99,12 @@ import { FinanceModule } from './finance/finance.module';
       {
         name: 'short',
         ttl: 60_000, // 1 minute
-        limit: 120, // max 120 req/min par IP (toutes routes confondues)
+        limit: 120, // max 120 req/min par route et par IP
       },
       {
         name: 'medium',
         ttl: 900_000, // 15 minutes
-        limit: 500, // max 500 req/15min par IP
+        limit: 500, // max 500 req/15min par route et par IP
       },
     ]),
 

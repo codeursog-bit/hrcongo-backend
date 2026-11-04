@@ -37,7 +37,7 @@ export class TwoFactorController {
   @Post('activate')
   @UseGuards(JwtAuthGuard)
   @HttpCode(HttpStatus.OK)
-  @Throttle({ default: { limit: 5, ttl: 300000 } })
+  @Throttle({ short: { limit: 5, ttl: 300000 } })
   async activate(@Req() req: any, @Body('code') code: string) {
     if (!code) throw new BadRequestException('Code requis');
     return this.twoFactorService.activate(req.user.userId, code);
@@ -47,7 +47,7 @@ export class TwoFactorController {
   // Public — l'utilisateur a un tempToken2fa, pas encore de session complète
   @Post('authenticate')
   @HttpCode(HttpStatus.OK)
-  @Throttle({ default: { limit: 5, ttl: 300000 } })
+  @Throttle({ short: { limit: 5, ttl: 300000 } })
   async authenticate(
     @Body() body: Record<string, string>,
     @Res() res: Response,
@@ -66,7 +66,7 @@ export class TwoFactorController {
   // C'est cette route que le frontend appelle (POST /auth/2fa/validate)
   @Post('validate')
   @HttpCode(HttpStatus.OK)
-  @Throttle({ default: { limit: 5, ttl: 300000 } })
+  @Throttle({ short: { limit: 5, ttl: 300000 } })
   async validate(@Body() body: Record<string, string>, @Res() res: Response) {
     // ✅ Accepte "tempToken2fa" (frontend) ET "tempToken" (legacy)
     const tempToken = body.tempToken2fa ?? body.tempToken;

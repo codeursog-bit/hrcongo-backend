@@ -14,6 +14,7 @@ export class CabinetWalletController {
 
   // GET /cabinet/:cabinetId/wallet
   @Get()
+  @UseGuards(CabinetAdminGuard)
   getWallet(@Param('cabinetId') cabinetId: string) {
     return this.walletService.getWallet(cabinetId);
   }

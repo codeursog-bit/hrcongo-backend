@@ -23,4 +23,18 @@ describe('Access session authorization', () => {
   it('rejects legacy tokens without a session identifier', async () => {
     await expect(validateAccessSession(prisma(session()), { ...payload, sid: undefined })).rejects.toThrow();
   });
+  it('uses the membership role immediately after a cabinet admin is demoted', async () => {
+    const value = { ...session(), user: { ...session().user, role: 'CABINET_ADMIN' } };
+    const db: any = prisma(value);
+    db.cabinetUser = { findFirst: jest.fn().mockResolvedValue({ cabinetId: 'cabinet', role: 'GESTIONNAIRE' }) };
+    const result = await validateAccessSession(db, { ...payload, cabinetId: 'cabinet' });
+    expect(result.role).toBe('CABINET_GESTIONNAIRE');
+    expect(db.cabinetUser.findFirst).toHaveBeenCalledWith(expect.objectContaining({ where: { userId: payload.sub, cabinetId: 'cabinet', cabinet: { isActive: true } } }));
+  });
+  it('rejects an existing cabinet session once membership is removed', async () => {
+    const value = { ...session(), user: { ...session().user, role: 'CABINET_GESTIONNAIRE' } };
+    const db: any = prisma(value);
+    db.cabinetUser = { findFirst: jest.fn().mockResolvedValue(null) };
+    await expect(validateAccessSession(db, payload)).rejects.toThrow();
+  });
 });

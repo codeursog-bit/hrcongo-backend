@@ -149,18 +149,19 @@ export class CabinetService {
   // ─── Gestionnaires ────────────────────────────────────────────────────────
 
   async addUser(cabinetId: string, dto: AddCabinetUserDto) {
+    const email = dto.email.trim().toLowerCase();
     // Chercher si l'utilisateur existe
     let user = await this.prisma.user.findUnique({
-      where: { email: dto.email },
+      where: { email },
     });
 
     // S'il n'existe pas → créer le compte avec mot de passe temporaire
     if (!user) {
-      const tempPassword = `Konza#${Math.random().toString(36).slice(2, 8)}`;
+      const tempPassword = `Konza#${crypto.randomBytes(18).toString('base64url')}`;
       const hashed = await bcrypt.hash(tempPassword, 10);
       user = await this.prisma.user.create({
         data: {
-          email: dto.email.trim().toLowerCase(),
+          email,
           password: hashed,
           firstName: '',
           lastName: '',
@@ -189,12 +190,19 @@ export class CabinetService {
     }
 
     // Vérifier si déjà membre
+    if (!['CABINET_ADMIN', 'CABINET_GESTIONNAIRE'].includes(user.role)) {
+      throw new BadRequestException('Utilisez un compte dédié au cabinet, distinct du compte utilisateur d’une PME.');
+    }
     const existing = await this.prisma.cabinetUser.findUnique({
       where: { cabinetId_userId: { cabinetId, userId: user.id } },
     });
 
     if (existing) {
       if (existing.role !== dto.role) {
+        if (existing.role === 'CABINET_ADMIN' && dto.role !== 'CABINET_ADMIN' &&
+            await this.prisma.cabinetUser.count({ where: { cabinetId, role: 'CABINET_ADMIN' } }) <= 1) {
+          throw new ForbiddenException('Le cabinet doit conserver au moins un administrateur');
+        }
         return this.prisma.cabinetUser.update({
           where: { id: existing.id },
           data: { role: dto.role },
@@ -626,7 +634,7 @@ export class CabinetService {
 
   // ─── Dashboard ────────────────────────────────────────────────────────────
 
-  async getDashboard(cabinetId: string) {
+  async getDashboard(cabinetId: string, includeAdministration = true) {
     const [companies, pendingPayrolls, wallet] = await Promise.all([
       this.prisma.cabinetCompany.findMany({
         where: { cabinetId, isActive: true },
@@ -662,13 +670,13 @@ export class CabinetService {
           },
         },
       }),
-      this.walletService.getWallet(cabinetId).catch(() => null),
+      includeAdministration ? this.walletService.getWallet(cabinetId).catch(() => null) : Promise.resolve(null),
     ]);
 
     return {
       totalCompanies: companies.length,
       pendingPayrolls,
-      wallet,
+      ...(includeAdministration ? { wallet } : {}),
       companies: (companies as any[]).map((cc) => ({
         linkId: cc.id,
         companyId: cc.company.id,
@@ -707,6 +715,15 @@ export class CabinetService {
       pmePortalEnabled: link.pmePortalEnabled,
       employeeAccessEnabled: link.employeeAccessEnabled,
     };
+  }
+
+  async getCompanyContext(cabinetId: string, companyId: string, role: string) {
+    const company = await this.prisma.company.findUnique({
+      where: { id: companyId },
+      select: { id: true, legalName: true, tradeName: true, city: true },
+    });
+    if (!company) throw new NotFoundException('Entreprise introuvable');
+    return { cabinetId, companyId, role, canAdminister: role === 'CABINET_ADMIN', company };
   }
 
   // ── Liste des membres (gestionnaires) du cabinet ────────────────────────
