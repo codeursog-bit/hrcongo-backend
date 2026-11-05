@@ -671,7 +671,7 @@ export class ExportService {
 
     if (requester.role === 'CABINET_ADMIN' || requester.role === 'CABINET_GESTIONNAIRE') {
       const memberships = await this.prisma.cabinetUser.findMany({
-        where: { userId: requester.id },
+        where: { userId: requester.id, cabinet: { isActive: true } },
         select: { cabinetId: true },
       });
       if (memberships.length > 0) {

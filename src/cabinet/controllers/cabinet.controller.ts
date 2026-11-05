@@ -133,16 +133,17 @@ export class CabinetController {
   addCompany(
     @Param('cabinetId') cabinetId: string,
     @Body() dto: AddCompanyToCabinetDto,
+    @Request() req,
   ) {
-    return this.cabinetService.addCompany(cabinetId, dto);
+    return this.cabinetService.addCompany(cabinetId, dto, req.user.userId);
   }
 
   // ── PME — Créer + Lier ──────────────────────────────────────────────────────
 
   @Post(':cabinetId/companies/create')
   @UseGuards(CabinetMemberGuard, CabinetAdminGuard)
-  createAndLink(@Param('cabinetId') cabinetId: string, @Body() dto: any) {
-    return this.cabinetService.createAndLinkCompany(cabinetId, dto);
+  createAndLink(@Param('cabinetId') cabinetId: string, @Body() dto: any, @Request() req) {
+    return this.cabinetService.createAndLinkCompany(cabinetId, dto, req.user.userId);
   }
 
   // ── PME — Recherche ─────────────────────────────────────────────────────────
@@ -153,11 +154,13 @@ export class CabinetController {
     @Param('cabinetId') cabinetId: string,
     @Query('q') q: string,
     @Query('limit') limit = '10',
+    @Request() req,
   ) {
     return this.cabinetService.searchAvailableCompanies(
       cabinetId,
       q,
       parseInt(limit),
+      req.user.userId,
     );
   }
 

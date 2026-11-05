@@ -259,7 +259,13 @@ export class CabinetService {
 
   // ─── PME clientes — Lier une PME existante ────────────────────────────────
 
-  async addCompany(cabinetId: string, dto: AddCompanyToCabinetDto) {
+  async addCompany(cabinetId: string, dto: AddCompanyToCabinetDto, requesterId: string) {
+    const requester = await this.prisma.user.findUnique({ where: { id: requesterId }, select: { role: true, companyId: true } });
+    if (!requester) throw new ForbiddenException('Accès refusé');
+    if (requester.role !== 'SUPER_ADMIN' && requester.companyId !== dto.companyId) {
+      const ownerLink = await this.prisma.userCompany.findUnique({ where: { userId_companyId: { userId: requesterId, companyId: dto.companyId } }, select: { id: true } });
+      if (!ownerLink) throw new ForbiddenException('Le rattachement nécessite l’autorisation du propriétaire de cette entreprise');
+    }
     const canGen = await this.walletService.canGenerateBulletin(cabinetId);
     if (!canGen.allowed) throw new ForbiddenException(canGen.reason);
 
@@ -317,6 +323,7 @@ export class CabinetService {
       industry?: string;
       startDate?: string;
     },
+    requesterId: string,
   ) {
     const existing = await this.prisma.company.findFirst({
       where: { rccmNumber: dto.rccmNumber },
@@ -325,10 +332,15 @@ export class CabinetService {
       return this.addCompany(cabinetId, {
         companyId: existing.id,
         startDate: dto.startDate,
-      });
+      }, requesterId);
     }
 
-    const { startDate, ...companyFields } = dto;
+    const { startDate } = dto;
+    const companyFields = {
+      legalName: dto.legalName, tradeName: dto.tradeName, rccmNumber: dto.rccmNumber,
+      cnssNumber: dto.cnssNumber, address: dto.address, city: dto.city,
+      phone: dto.phone, email: dto.email, country: dto.country, industry: dto.industry,
+    };
 
     const result = await this.prisma.$transaction(async (tx) => {
       const company = await tx.company.create({
@@ -395,7 +407,14 @@ export class CabinetService {
 
   // ─── PME — Recherche pour liaison ─────────────────────────────────────────
 
-  async searchAvailableCompanies(cabinetId: string, q: string, limit = 10) {
+  async searchAvailableCompanies(cabinetId: string, q: string, limit = 10, requesterId?: string) {
+    if (!requesterId) throw new ForbiddenException('Accès refusé');
+    if (!Number.isInteger(limit) || limit < 1 || limit > 50) throw new BadRequestException('Limite invalide');
+    const requester = await this.prisma.user.findUnique({ where: { id: requesterId }, select: { role: true, companyId: true } });
+    if (!requester) throw new ForbiddenException('Accès refusé');
+    const owned = await this.prisma.userCompany.findMany({ where: { userId: requesterId }, select: { companyId: true } });
+    const allowedIds = requester.role === 'SUPER_ADMIN' ? undefined : [...new Set([...(requester.companyId ? [requester.companyId] : []), ...owned.map(link => link.companyId)])];
+    if (allowedIds && !allowedIds.length) return { data: [] };
     const alreadyLinked = await this.prisma.cabinetCompany.findMany({
       where: { cabinetId, isActive: true },
       select: { companyId: true },
@@ -404,7 +423,7 @@ export class CabinetService {
 
     const companies = await this.prisma.company.findMany({
       where: {
-        id: excludeIds.length > 0 ? { notIn: excludeIds } : undefined,
+        id: { ...(excludeIds.length > 0 ? { notIn: excludeIds } : {}), ...(allowedIds ? { in: allowedIds } : {}) },
         ...(q?.trim()
           ? {
               OR: [

@@ -36,7 +36,7 @@ export class AssetsService {
 
   // ── Helper : réservé aux rôles habilités à réassigner/changer le statut d'un actif ──
   private assertAssetManagerRole(role: string) {
-    const allowed = ['ADMIN', 'HR_MANAGER', 'SUPER_ADMIN'];
+    const allowed = ['ADMIN', 'HR_MANAGER', 'SUPER_ADMIN', 'CABINET_ADMIN', 'CABINET_GESTIONNAIRE'];
     if (!allowed.includes(role)) {
       throw new ForbiddenException(
         "Cette action est réservée à l'administration et aux RH.",

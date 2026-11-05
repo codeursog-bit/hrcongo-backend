@@ -2200,12 +2200,9 @@ export class PayrollsService {
       // 🆕 Admin multi-entreprises : autorisé si le companyId fourni par
       // l'appelant (déjà vérifié en amont par PortfolioPayrollService)
       // correspond bien à l'entreprise du bulletin.
-      const isPortfolioMatch =
-        user?.manageMultipleCompanies &&
-        overrideCompanyId &&
-        overrideCompanyId === payroll.companyId;
-      if (!isPortfolioMatch && user?.companyId !== payroll.companyId)
+      if (overrideCompanyId && overrideCompanyId !== payroll.companyId)
         throw new ForbiddenException('Accès refusé');
+      await assertCompanyAccess(this.prisma, userId, payroll.companyId, { write: true });
     }
 
     // ✅ Si manualBonuses ou manualDeductions présents → recalcul complet via recalculatePayroll()

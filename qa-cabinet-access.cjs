@@ -28,11 +28,17 @@ async function main(){
  await check('manager dashboard omits cabinet wallet',async()=>{const r=await req(base+'/dashboard',manager);assert.equal(r.status,200);assert.ok(!('wallet'in r.data));assert.ok(r.data.companies.some(c=>c.companyId===companyA));});
  await check('manager enters linked company context',async()=>{const r=await req(`${base}/companies/${companyA}/context`,manager);assert.equal(r.status,200);assert.equal(r.data.company.id,companyA);assert.equal(r.data.canAdminister,false);});
  await check('manager cannot substitute unlinked company',async()=>assert.equal((await req(`${base}/companies/${b.companyId}/context`,manager)).status,404));
+ await check('admin cannot attach a foreign company by guessing its ID',async()=>{assert.equal((await req(base+'/companies',admin,'POST',{companyId:b.companyId})).status,403);assert.equal(await db.cabinetCompany.count({where:{cabinetId:cabId,companyId:b.companyId}}),0);});
+ await check('company search does not expose unrelated companies',async()=>{const r=await req(base+'/companies/search?q=QA',admin);assert.equal(r.status,200);assert.ok(!r.data.data.some(c=>c.id===b.companyId));});
  for(const path of ['/employees','/assets','/training/courses','/documents','/recruitment/jobs']){
   await check('linked company read '+path,async()=>{const r=await req(path+'?companyId='+companyA,manager);assert.equal(r.status,200);if(path==='/documents')assert.ok(r.data.some(d=>d.id===doc.id));});
   await check('foreign company read denied '+path,async()=>assert.equal((await req(path+'?companyId='+b.companyId,manager)).status,403));
  }
  await check('linked payroll detail is readable',async()=>{const r=await req('/payrolls/'+payroll.id+'?companyId='+companyA,manager);assert.equal(r.status,200);assert.equal(r.data.id,payroll.id);});
+ await check('linked payroll can be validated',async()=>{const r=await req('/payrolls/'+payroll.id,manager,'PATCH',{status:'VALIDATED'});assert.equal(r.status,200);assert.equal(r.data.status,'VALIDATED');});
+ await check('outside cabinet cannot validate payroll',async()=>assert.equal((await req('/payrolls/'+payroll.id,outside,'PATCH',{status:'VALIDATED'})).status,403));
+ await check('linked Sage export returns a file',async()=>{const r=await req('/payrolls/export/sage',manager,'POST',{payrollIds:[payroll.id],companyId:companyA});assert.equal(r.status,201);assert.equal(typeof r.data,'string');assert.ok(r.data.length>0);});
+ await check('outside cabinet cannot export payroll',async()=>assert.equal((await req('/payrolls/export/sage',outside,'POST',{payrollIds:[payroll.id],companyId:companyA})).status,403));
  await check('outside cabinet cannot read payroll',async()=>assert.equal((await req('/payrolls/'+payroll.id,outside)).status,403));
  await check('outside cabinet cannot read private document',async()=>assert.equal((await req('/documents/'+doc.id,outside)).status,403));
  const offer={title:tag+'_JOB',description:'Offre de test fictive',departmentId:alice.departmentId,contractType:'CDI',status:'DRAFT',processingMode:'MANUAL',showOnPortal:false};

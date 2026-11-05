@@ -38,6 +38,7 @@ import {
   Param,
   UseGuards,
   Request,
+  Query,
 } from '@nestjs/common';
 import { AssetsService } from './assets.service';
 import { CreateAssetDto } from './dto/create-asset.dto';
@@ -57,8 +58,8 @@ export class AssetsController {
 
   // GET /assets — Lister tous les actifs de l'entreprise
   @Get()
-  findAll(@Request() req) {
-    return this.assetsService.findAll(req.user.userId);
+  findAll(@Request() req, @Query('companyId') companyId?: string) {
+    return this.assetsService.findAll(req.user.userId, companyId);
   }
 
   // PATCH /assets/:id — Modifier les informations d'un actif
