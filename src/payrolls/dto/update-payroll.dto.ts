@@ -129,8 +129,8 @@ export class UpdatePayrollDto {
   // ── Champs workflow (existants — conservés) ──────────────────────────────
 
   @IsOptional()
-  @IsEnum(['DRAFT', 'VALIDATED', 'PAID', 'CANCELLED'])
-  status?: 'DRAFT' | 'VALIDATED' | 'PAID' | 'CANCELLED';
+  @IsEnum(['DRAFT', 'VALIDATED', 'TO_PAY', 'PAID', 'CANCELLED'])
+  status?: 'DRAFT' | 'VALIDATED' | 'TO_PAY' | 'PAID' | 'CANCELLED';
 
   @IsOptional()
   @IsBoolean()

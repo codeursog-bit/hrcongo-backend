@@ -212,7 +212,7 @@ export class WorkforceDashboardService {
     // ── Net payé (réservé aux rôles finance/RH) ──
     if (canSeeNet && model === 'POWERMAN' && ids.length > 0) {
       const pays = await this.prisma.payroll.findMany({
-        where: { employeeId: { in: ids }, status: { in: ['VALIDATED', 'PAID'] }, OR: monthOr },
+        where: { employeeId: { in: ids }, status: { in: ['VALIDATED', 'TO_PAY', 'PAID'] }, OR: monthOr },
         select: { employeeId: true, month: true, year: true, netSalary: true },
       });
       const idx = new Map(employees.map((e) => [e.id, e]));

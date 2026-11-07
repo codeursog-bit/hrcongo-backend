@@ -3,6 +3,7 @@
 // Ajout : CnssDeclarationModule, ContractRuptureModule, UnpaidSalaryModule
 // ContractsModule (déjà existant, vérifier s'il est bien importé)
 // ============================================================================
+import { ComptaConnectorModule } from './compta-connector/compta-connector.module';
 import { Module } from '@nestjs/common';
 import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { CryptoModule } from './crypto/crypto.module';
@@ -110,6 +111,7 @@ import { FinanceModule } from './finance/finance.module';
 
     // ── CORE ─────────────────────────────────────────────────────────────────
     PrismaModule,
+    ComptaConnectorModule,
     UsersModule,
     AuthModule,
 

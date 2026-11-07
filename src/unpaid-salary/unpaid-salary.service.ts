@@ -48,7 +48,7 @@ export interface MoisNonPaye {
   montant:        number;           // net du bulletin, ou net simulé (comme la paie), ou salaire de base en dernier repli
   isApproximate:  boolean;          // true = pas de bulletin (montant calculé par simulation)
   estimateSource: EstimateSource;   // 🆕 d'où vient le montant
-  bulletinStatus: 'NONE' | 'DRAFT' | 'VALIDATED';
+  bulletinStatus: 'NONE' | 'DRAFT' | 'VALIDATED' | 'TO_PAY';
   dueDate:        Date;
   daysOverdue:    number;
   phase:          'NO_BULLETIN' | 'UNPAID_BULLETIN';
@@ -133,8 +133,7 @@ export class UnpaidSalaryService {
     private payrolls: PayrollsService, // 🆕 simulation de paie (lecture seule, ne crée aucun bulletin)
   ) {}
 
-  // ── Bulletin réglé ? (status PAID = ce que fait « Marquer comme payé » / paie en masse) ──
-  // Pour considérer aussi « Validé » comme réglé, ajouter 'VALIDATED' ici.
+  // ── Bulletin réglé ? Seul le statut PAID clôt la dette salariale. ──
   private isSettled(p: { status: string; paid: boolean | null }): boolean {
     return p.status === 'PAID' || p.paid === true;
   }
@@ -379,7 +378,7 @@ export class UnpaidSalaryService {
           month: period.month, year: period.year,
           montant: Number(bulletin.netSalary),
           isApproximate: false, estimateSource: 'BULLETIN',
-          bulletinStatus: bulletin.status === 'VALIDATED' ? 'VALIDATED' : 'DRAFT',
+          bulletinStatus: bulletin.status === 'TO_PAY' ? 'TO_PAY' : bulletin.status === 'VALIDATED' ? 'VALIDATED' : 'DRAFT',
           dueDate, daysOverdue, phase: 'UNPAID_BULLETIN',
         });
       }

@@ -318,6 +318,7 @@
 //     if (user?.role === 'EMPLOYEE') throw new ForbiddenException('Recalcul réservé aux admins/RH');
 //     if (user?.companyId !== payroll.companyId) throw new ForbiddenException('Accès refusé');
 
+//     if(await this.prisma.comptaDelivery.findFirst({where:{payrollId:id},select:{id:true}}))throw new ForbiddenException('Bulletin transmis à Compta : annulez-le avant toute correction comptable.');
 //     const [employee, company, settings, companyTaxes] = await Promise.all([
 //       this.prisma.employee.findUnique({ where: { id: payroll.employeeId }, select: { id: true, firstName: true, lastName: true, baseSalary: true, maritalStatus: true, numberOfChildren: true, isSubjectToIrpp: true, isSubjectToCnss: true, isSubjectToTus: true, taxExemptionReason: true, tolZone: true, contractType: true, isResident: true } }),
 //       this.prisma.company.findUnique({ where: { id: payroll.companyId }, select: { appliesCnssEmployer: true, cnssEmployerRate: true, isSubjectToTus: true } }),
@@ -2190,6 +2191,13 @@ export class PayrollsService {
     const payroll = await this.prisma.payroll.findUnique({ where: { id } });
     if (!payroll) throw new PayrollNotFoundException(id);
     if (payroll.status === 'PAID') throw new PayrollAlreadyPaidException();
+    const updateKeys = Object.keys(updatePayrollDto);
+    if (payroll.status === 'TO_PAY' && updateKeys.some(key => key !== 'notes' && !(key === 'status' && updatePayrollDto.status === 'CANCELLED')))
+      throw new ForbiddenException('Bulletin à payer verrouillé : annulez la demande avant toute correction.');
+    if (updatePayrollDto.status === 'TO_PAY' && payroll.status !== 'VALIDATED')
+      throw new ForbiddenException('Seul un bulletin validé peut passer au statut À payer.');
+    if (updatePayrollDto.status === 'PAID' && await this.prisma.comptaConnector.findFirst({where:{companyId:payroll.companyId,enabled:true},select:{id:true}}))
+      throw new ForbiddenException('Le paiement de cette entreprise doit être enregistré dans Compta.');
     if (userId) {
       const user = await this.prisma.user.findUnique({
         where: { id: userId },
@@ -2205,6 +2213,11 @@ export class PayrollsService {
       await assertCompanyAccess(this.prisma, userId, payroll.companyId, { write: true });
     }
 
+    const exported=await this.prisma.comptaDelivery.findFirst({where:{payrollId:id},select:{id:true}});
+    if(exported){
+      const keys=Object.keys(updatePayrollDto).filter(key=>key!=='notes');
+      if(keys.length && !(keys.length===1 && keys[0]==='status' && updatePayrollDto.status==='CANCELLED'))throw new ForbiddenException('Bulletin transmis à Compta : paiement dans Compta, correction par annulation puis nouvelle écriture.');
+    }
     // ✅ Si manualBonuses ou manualDeductions présents → recalcul complet via recalculatePayroll()
     // Ces champs ne vont pas en DB directement — ils servent à recalculer tout le bulletin.
     const hasRecalc =
@@ -2278,7 +2291,9 @@ export class PayrollsService {
     // utilisateur — tout ADMIN/RH pouvait supprimer un bulletin non payé
     // d'une autre entreprise. Le rôle reste vérifié par @Roles côté route.
     await assertCompanyAccess(this.prisma, userId, payroll.companyId);
+    if (await this.prisma.comptaDelivery.findFirst({where:{payrollId:id},select:{id:true}})) throw new ForbiddenException('Bulletin transmis à Compta : conservez l’historique et utilisez une annulation.');
     if (payroll.status === 'PAID') throw new PayrollAlreadyPaidException();
+    if (payroll.status === 'TO_PAY') throw new ForbiddenException('Bulletin à payer verrouillé : annulez la demande avant toute correction.');
 
     // ♻️ Supprimer un bulletin ANNULE ses déductions : prêts, avances et
     // retenues diverses prélevés sur ce bulletin sont remis (solde + statut)
@@ -2314,6 +2329,7 @@ export class PayrollsService {
     });
     if (!payroll) throw new PayrollNotFoundException(id);
     if (payroll.status === 'PAID') throw new PayrollAlreadyPaidException();
+    if (payroll.status === 'TO_PAY') throw new ForbiddenException('Bulletin à payer verrouillé : annulez la demande avant tout recalcul.');
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
       select: { role: true, companyId: true },
@@ -2323,6 +2339,7 @@ export class PayrollsService {
     if (user?.companyId !== payroll.companyId)
       throw new ForbiddenException('Accès refusé');
 
+    if (await this.prisma.comptaDelivery.findFirst({where:{payrollId:id},select:{id:true}})) throw new ForbiddenException('Bulletin transmis à Compta : conservez l’historique et utilisez une annulation.');
     const [employee, company, settings, companyTaxes] = await Promise.all([
       this.prisma.employee.findUnique({
         where: { id: payroll.employeeId },

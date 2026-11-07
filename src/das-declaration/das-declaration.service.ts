@@ -267,7 +267,7 @@ export class DasDeclarationService {
         // ✅ Seules les paies VALIDATED/PAID entrent dans le DAS légal —
         // exclut à la fois les brouillons (DRAFT) et les paies annulées
         // (CANCELLED, précédemment incluses par erreur avec 'not: DRAFT').
-        status: { in: ['VALIDATED', 'PAID'] },
+        status: { in: ['VALIDATED', 'TO_PAY', 'PAID'] },
         // ⚠️ DAS I ne concerne que les salariés CDI/CDD — les prestataires,
         // stagiaires, consultants et intérimaires n'y figurent pas.
         employee: { contractType: { in: ['CDI', 'CDD'] } },
@@ -303,7 +303,7 @@ export class DasDeclarationService {
         // ✅ Seules les paies VALIDATED/PAID entrent dans le DAS légal —
         // exclut à la fois les brouillons (DRAFT) et les paies annulées
         // (CANCELLED, précédemment incluses par erreur avec 'not: DRAFT').
-        status: { in: ['VALIDATED', 'PAID'] },
+        status: { in: ['VALIDATED', 'TO_PAY', 'PAID'] },
         // ⚠️ DAS I ne concerne que les salariés CDI/CDD — les prestataires,
         // stagiaires, consultants et intérimaires n'y figurent pas.
         employee: { contractType: { in: ['CDI', 'CDD'] } },

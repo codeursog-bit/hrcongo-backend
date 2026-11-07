@@ -173,7 +173,7 @@ export class LeavesIndemnityService {
           employeeId,
           // ✅ DRAFT inclus : un bulletin généré mais pas encore validé reste
           // le dernier brut connu (jamais CANCELLED).
-          status: { in: ['DRAFT', 'VALIDATED', 'PAID'] },
+          status: { in: ['DRAFT', 'VALIDATED', 'TO_PAY', 'PAID'] },
           OR: [
             { year: { lt: refYear } },
             { year: refYear, month: { lt: refMonth } },
@@ -324,7 +324,7 @@ export class LeavesIndemnityService {
     // ressurgir sur un cas limite, alors qu'il est censé n'avoir servi
     // qu'au tout début.
     const totalRealPayrollsEver = await this.prisma.payroll.count({
-      where: { employeeId, status: { in: ['VALIDATED', 'PAID'] } },
+      where: { employeeId, status: { in: ['VALIDATED', 'TO_PAY', 'PAID'] } },
     });
     const openingStillEligible = totalRealPayrollsEver < 12;
 
@@ -366,7 +366,7 @@ export class LeavesIndemnityService {
           // les bulletins sont créés en DRAFT par le générateur — ne compter
           // que VALIDATED/PAID faisait disparaître tout bulletin généré mais
           // pas encore validé. Seul CANCELLED est exclu.
-          status: { in: ['DRAFT', 'VALIDATED', 'PAID'] },
+          status: { in: ['DRAFT', 'VALIDATED', 'TO_PAY', 'PAID'] },
           AND: [
             {
               OR: [
@@ -759,7 +759,7 @@ export class LeavesIndemnityService {
     const lastPayroll = await this.prisma.payroll.findFirst({
       where: {
         employeeId,
-        status: { in: ['VALIDATED', 'PAID'] },
+        status: { in: ['VALIDATED', 'TO_PAY', 'PAID'] },
         OR: [{ year: { lt: year } }, { year, month: { lt: month } }],
       },
       orderBy: [{ year: 'desc' }, { month: 'desc' }],

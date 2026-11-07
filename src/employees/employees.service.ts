@@ -1277,7 +1277,8 @@ export class EmployeesService {
               department: { select: { id: true, name: true } },
               departmentId: true,
             },
-        orderBy: [{ lastName: 'asc' }, { firstName: 'asc' }],
+        // Les homonymes doivent conserver le même ordre entre deux pages.
+        orderBy: [{ lastName: 'asc' }, { firstName: 'asc' }, { id: 'asc' }],
         skip,
         take: limit,
       }),

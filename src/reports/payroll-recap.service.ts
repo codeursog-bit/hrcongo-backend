@@ -554,7 +554,7 @@ export class PayrollRecapService {
     // bien les brouillons DRAFT que les paies CANCELLED, contrairement au
     // filtre précédent 'not: CANCELLED' qui laissait passer les DRAFT).
     const payrolls = await this.prisma.payroll.findMany({
-      where: { companyId, year, status: { in: ['VALIDATED', 'PAID'] } },
+      where: { companyId, year, status: { in: ['VALIDATED', 'TO_PAY', 'PAID'] } },
       include: {
         employee: {
           select: {
@@ -721,7 +721,7 @@ export class PayrollRecapService {
 
     // Mêmes statuts que le reste des rapports/DAS — cf. correction ci-dessus.
     const payrolls = await this.prisma.payroll.findMany({
-      where: { companyId, year, status: { in: ['VALIDATED', 'PAID'] } },
+      where: { companyId, year, status: { in: ['VALIDATED', 'TO_PAY', 'PAID'] } },
       select: { employeeId: true, month: true, its: true },
     });
 

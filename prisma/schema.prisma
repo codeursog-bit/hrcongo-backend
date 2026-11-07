@@ -250,6 +250,7 @@ model UserCompany {
 // ===========================================================================
 
 model Company {
+  comptaConnector ComptaConnector?
   id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
 
   // Identité légale
@@ -1230,6 +1231,7 @@ enum GeneratedContractStatus {
 // ===========================================================================
 
 model Payroll {
+  comptaDeliveries ComptaDelivery[]
   id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
 
   employeeId String   @db.Uuid
@@ -1339,6 +1341,7 @@ model Payroll {
 enum PayrollStatus {
   DRAFT
   VALIDATED
+  TO_PAY
   PAID
   CANCELLED
 
@@ -5854,3 +5857,53 @@ model Invoice {
   @@map("invoices")
 }
 
+
+
+model ComptaConnector {
+ id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+ companyId String @unique @db.Uuid
+ company Company @relation(fields:[companyId],references:[id],onDelete:Cascade)
+ ownerUserId String @db.Uuid
+ remoteCompanyId String @db.Uuid
+ remoteLinkId String @db.Uuid
+ remoteCompanyName String
+ secretEnc String @db.Text
+ enabled Boolean @default(true)
+ mappings Json @default("{}")
+ lastSyncAt DateTime? @db.Timestamptz
+ lastError String? @db.Text
+ createdAt DateTime @default(now()) @db.Timestamptz
+ deliveries ComptaDelivery[]
+ receipts ComptaReceipt[]
+ @@map("compta_connectors")
+}
+model ComptaDelivery {
+ id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+ connectorId String @db.Uuid
+ connector ComptaConnector @relation(fields:[connectorId],references:[id],onDelete:Cascade)
+ payrollId String @db.Uuid
+ payroll Payroll @relation(fields:[payrollId],references:[id],onDelete:Restrict)
+ externalId String
+ payload Json
+ payloadHash String
+ state String @default("PENDING")
+ remoteEventId String?
+ attempts Int @default(0)
+ detail String? @db.Text
+ nextAttemptAt DateTime @default(now()) @db.Timestamptz
+ leaseUntil DateTime? @db.Timestamptz
+ createdAt DateTime @default(now()) @db.Timestamptz
+ @@unique([connectorId,externalId])
+ @@index([connectorId,state,nextAttemptAt])
+ @@map("compta_deliveries")
+}
+model ComptaReceipt {
+ id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+ connectorId String @db.Uuid
+ connector ComptaConnector @relation(fields:[connectorId],references:[id],onDelete:Cascade)
+ externalId String
+ payloadHash String
+ createdAt DateTime @default(now()) @db.Timestamptz
+ @@unique([connectorId,externalId])
+ @@map("compta_receipts")
+}

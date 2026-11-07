@@ -162,7 +162,7 @@ export class PortfolioPayrollService {
   }
 
   // ── Gestion des bulletins déjà générés (liste de paie) ──────────────────
-  async updateStatus(userId: string, id: string, status: 'PAID' | 'VALIDATED' | 'CANCELLED') {
+  async updateStatus(userId: string, id: string, status: 'PAID' | 'VALIDATED' | 'TO_PAY' | 'CANCELLED') {
     const payroll = await this.prisma.payroll.findUnique({
       where: { id },
       select: { companyId: true },

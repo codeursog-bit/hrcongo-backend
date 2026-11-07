@@ -2327,7 +2327,7 @@ export class ReportsService {
         // ✅ Toutes les paies VALIDÉES de l'année choisie (plus seulement la
         // dernière tout court) — pour un vrai cumul annuel d'heures sup.
         payrolls: {
-          where: { year: targetYear, status: { in: ['VALIDATED', 'PAID'] } },
+          where: { year: targetYear, status: { in: ['VALIDATED', 'TO_PAY', 'PAID'] } },
         },
         leaves: {
           where: {

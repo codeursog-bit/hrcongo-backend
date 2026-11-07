@@ -138,7 +138,7 @@ export class AuditEngineService {
       for (const rule of PAYROLL_RULES) for (const h of rule(ctx)) put(h, r.month, r.year);
     }
 
-    const anyValidated = rows.some((r) => r.status === 'VALIDATED' || r.status === 'PAID');
+    const anyValidated = rows.some((r) => ['VALIDATED', 'TO_PAY', 'PAID'].includes(r.status));
     let rulesRun = PAYROLL_RULES.length;
     if (fullPeriod && anyValidated) {
       rulesRun += 1;

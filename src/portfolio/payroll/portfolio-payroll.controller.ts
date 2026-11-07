@@ -62,7 +62,7 @@ export class PortfolioPayrollController {
   updateStatus(
     @GetUser('id') userId: string,
     @Param('id') id: string,
-    @Body('status') status: 'PAID' | 'VALIDATED' | 'CANCELLED',
+    @Body('status') status: 'PAID' | 'VALIDATED' | 'TO_PAY' | 'CANCELLED',
   ) {
     return this.service.updateStatus(userId, id, status);
   }
