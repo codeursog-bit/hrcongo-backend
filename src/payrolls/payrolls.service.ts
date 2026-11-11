@@ -1606,13 +1606,7 @@ export class PayrollsService {
       this.deductionsService.getPendingCompanyDeductionsForEmployee(employeeId),
       // ✅ Charger l'impact congé — cohérence avec la génération batch
       this.leavesService
-        .getLeaveImpactForPayroll(employeeId, monthNum, year, prelimCalc.grossSalary)
-        .catch((err) => {
-          this.logger.error(
-            `❌ Impact congé non calculé pour l'employé ${employeeId} (${monthNum}/${year}) — aucune indemnité sur ce bulletin : ${err?.message ?? err}`,
-          );
-          return null;
-        }),
+        .getLeaveImpactForPayroll(employeeId, monthNum, year, prelimCalc.grossSalary),
       // ✅ CORRECTIF (bug trouvé) : snapshot solde congés AU MOMENT de la
       // génération — lisait seulement le cycle le PLUS RÉCENT
       // (findFirst orderBy desc), donc sous-évalué pour un employé avec
@@ -2500,6 +2494,20 @@ export class PayrollsService {
       type: 'COMPANY_DEDUCTION',
     }));
     const deductionsForCalc = [...adjustedDeductions, ...companyDeductionEntries];
+    const workCalc = this.calculator.calculate(
+      effectiveBaseSalary, eff10, eff25, eff50, eff100,
+      calculatedBonuses, deductionsForCalc, settings, effectiveDays,
+      settings.workDaysPerMonth, { ...employee, _payrollYear: payroll.year },
+      company, companyTaxes,
+    );
+    // Explicit manual leave bonuses already carry the indemnity in gross pay.
+    const hasManualLeaveBonus = calculatedBonuses.some((b: any) =>
+      /cong[eé]/i.test(b.bonusType ?? ''),
+    );
+    const leaveImpact = hasManualLeaveBonus ? null :
+      await this.leavesService.getLeaveImpactForPayroll(
+        payroll.employeeId, payroll.month, payroll.year, workCalc.grossSalary,
+      );
     const calc = this.calculator.calculate(
       effectiveBaseSalary,
       eff10,
@@ -2514,6 +2522,7 @@ export class PayrollsService {
       { ...employee, _payrollYear: payroll.year }, // ✅ barème fiscal selon l'année du bulletin
       company,
       companyTaxes,
+      { leaveIndemnity: leaveImpact?.leaveIndemnity ?? 0, isPaidLeave: leaveImpact?.isPaid ?? false },
     );
 
     return this.prisma.$transaction(
@@ -2600,7 +2609,17 @@ export class PayrollsService {
           advances,
           settings,
           calculatedBonuses,
-          undefined,
+          leaveImpact ? {
+            leaveIndemnity: leaveImpact.leaveIndemnity,
+            leaveIndemnityBase: leaveImpact.leaveIndemnityBase,
+            leaveIndemnitySeniority: leaveImpact.leaveIndemnitySeniority,
+            absenceDeduction: leaveImpact.absenceDeduction,
+            isPaidLeave: leaveImpact.isPaid,
+            leaveDays: leaveImpact.leaveDays,
+            leaveLabel: 'Indemnité de congé',
+            indemnifiedDays: leaveImpact.indemnifiedDays,
+            indemnifiedSeniorityDays: leaveImpact.indemnifiedSeniorityDays,
+          } : undefined,
           leaveSnapshot,
           companyDeductionsToApply,
         );
@@ -2693,11 +2712,18 @@ export class PayrollsService {
         // explicite `overrides.isLeaveDeparture` plutôt que deviner depuis
         // le texte d'une prime — repli sur l'ancienne détection tant que
         // l'appelant ne fournit pas encore ce champ.
-        const hasCongesPaies =
+        const hasCongesPaies = (leaveImpact?.leaveIndemnity ?? 0) > 0 || (
           overrides?.isLeaveDeparture ??
           calculatedBonuses.some((b: any) =>
             /cong[eé]/i.test(b.bonusType ?? ''),
-          );
+          )
+        );
+        if (leaveImpact?.leaveId && leaveImpact.leaveIndemnity > 0) {
+          await tx.leave.update({ where: { id: leaveImpact.leaveId }, data: { paidIndemnityAmount: leaveImpact.leaveIndemnity } });
+          if (leaveImpact.shouldClearOpeningCumulative) {
+            await tx.employee.update({ where: { id: payroll.employeeId }, data: { openingCumulativeGross: null, openingCumulativeMonths: null } });
+          }
+        }
         await this.ytdCheckpointService.reconcile(
           tx,
           payroll.employeeId,
@@ -3115,13 +3141,7 @@ export class PayrollsService {
       this.deductionsService.getPendingCompanyDeductionsForEmployee(employeeId),
       // ✅ Charger l'impact congé — cohérence avec la génération batch
       this.leavesService
-        .getLeaveImpactForPayroll(employeeId, monthNum, year, prelimCalcForLeave.grossSalary)
-        .catch((err) => {
-          this.logger.error(
-            `❌ Impact congé non calculé (simulation) pour l'employé ${employeeId} (${monthNum}/${year}) : ${err?.message ?? err}`,
-          );
-          return null;
-        }),
+        .getLeaveImpactForPayroll(employeeId, monthNum, year, prelimCalcForLeave.grossSalary),
       // ✅ CORRECTIF (bug trouvé) : cette simulation ne renvoyait jamais
       // droitsConge/priseConge/soldeConge — la bannière congé de la paie
       // manuelle (front) lisait sim.ytd.soldeConge, qui restait toujours

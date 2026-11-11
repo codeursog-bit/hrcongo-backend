@@ -1531,7 +1531,7 @@ export class ExportService {
           `PAIE|${piece}|${date}|641300|TUS (7,5%) - ${name}|${tusTotal}|0`,
         );
         lines.push(
-          `PAIE|${piece}|${date}|447200|TUS-DGI à reverser - ${name}|0|${tusDgi}`,
+          `PAIE|${piece}|${date}|447200|TUS FISC à reverser - ${name}|0|${tusDgi}`,
         );
         lines.push(
           `PAIE|${piece}|${date}|431300|TUS-CNSS à reverser - ${name}|0|${tusCnss}`,
@@ -1726,7 +1726,7 @@ export class ExportService {
       'Matricule',
       'Nom & Prénom',
       'Salaire Brut',
-      'TUS DGI (4.13%)',
+      'TUS FISC (4.13%)',
       'TUS CNSS (3.38%)',
       'ITS',
     ]);

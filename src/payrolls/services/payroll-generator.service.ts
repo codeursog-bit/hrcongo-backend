@@ -688,18 +688,6 @@ export class PayrollGeneratorService {
         const emp = employees.find((e) => e.id === summary.employeeId);
         if (!emp) continue;
 
-        if (summary.daysToPay <= 0) {
-          results.skipped++;
-          results.details.push({
-            employeeId: emp.id,
-            employeeName: `${emp.firstName} ${emp.lastName}`,
-            status: 'SKIPPED',
-            reason: 'Aucun jour travaillé',
-          });
-          onProgress?.(results.details[results.details.length - 1]);
-          continue;
-        }
-
         const loans = loansByEmployee[emp.id] || [];
         const advances = advancesByEmployee[emp.id] || [];
         const companyDeductions = companyDeductionsByEmployee[emp.id] || [];
@@ -752,8 +740,20 @@ export class PayrollGeneratorService {
             monthNum,
             year,
             prelimCalcForLeave.grossSalary,
-          )
-          .catch(() => null);
+          );
+        // Scheduled leave indemnity remains due even without worked days.
+        if (summary.daysToPay <= 0 && !(leaveImpact && leaveImpact.leaveIndemnity > 0)) {
+          results.skipped++;
+          results.details.push({
+            employeeId: emp.id,
+            employeeName: `${emp.firstName} ${emp.lastName}`,
+            status: 'SKIPPED',
+            reason: 'Aucun jour travaillé',
+          });
+          onProgress?.(results.details[results.details.length - 1]);
+          continue;
+        }
+
         const leaveDays = leaveImpact?.leaveDays ?? 0;
 
         // 🆕 Données congé pour le calcul et le bulletin

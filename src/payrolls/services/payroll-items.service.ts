@@ -640,7 +640,7 @@ export class PayrollItemsService {
       items.push({
         payrollId,
         code: 'TUS_DGI',
-        label: 'TUS DGI',
+        label: 'TUS FISC',
         type: 'EMPLOYER_COST',
         base: calc.grossSalary,
         rate: 0.02025,

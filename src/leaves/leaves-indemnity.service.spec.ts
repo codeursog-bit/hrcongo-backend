@@ -370,3 +370,66 @@ describe('LeavesIndemnityService.calculateLeaveIndemnity — méthode 1/12e', ()
     expect(result.indemnity).toBe(Math.round((expectedAvg / 26) * 26));
   });
 });
+
+describe('Scheduled indemnity in month before departure', () => {
+  it.each([[10, 2026, 11, 2026], [12, 2026, 1, 2027]])(
+    'pays in %i/%i for departure in %i/%i',
+    async (month, year, departureMonth, departureYear) => {
+      const leave = {
+        id: 'annual', employeeId: 'employee', companyId: 'company',
+        type: 'ANNUAL', status: 'APPROVED',
+        startDate: new Date(departureYear, departureMonth - 1, 5),
+        endDate: new Date(departureYear, departureMonth - 1, 30),
+        plannedPayrollMonth: null, plannedPayrollYear: null,
+        carriedFromLeaveId: null, daysCount: 26, payrollIndemnityDays: 26,
+      };
+      const prisma: any = {
+        leave: {
+          findMany: jest.fn().mockResolvedValue([]),
+          findFirst: jest.fn(async ({ where }) => {
+            const anchored = where.OR[0];
+            const legacy = where.OR[1];
+            const matches = (leave.plannedPayrollMonth === anchored.plannedPayrollMonth &&
+              leave.plannedPayrollYear === anchored.plannedPayrollYear) ||
+              (leave.plannedPayrollMonth === null && leave.plannedPayrollYear === null &&
+               leave.carriedFromLeaveId === null &&
+               leave.startDate >= legacy.startDate.gte && leave.startDate < legacy.startDate.lt);
+            return matches ? leave : null;
+          }),
+        },
+        employee: { findUnique: jest.fn().mockResolvedValue({ baseSalary: 260000, companyId: 'company' }) },
+        payroll: { findFirst: jest.fn().mockResolvedValue(null) },
+      };
+      const service = new LeavesIndemnityService(prisma);
+      jest.spyOn(service, 'calculateLeaveIndemnity').mockResolvedValue({
+        indemnity: 260000, basedOnAverage: 260000, monthsUsed: 12,
+        cyclesCount: 1, method: 'AVERAGE_12M', usedOpeningCumulative: false,
+      });
+      const result = await service.getLeaveImpactForPayroll('employee', month, year, 260000);
+      expect(result?.leaveIndemnity).toBe(260000);
+      expect(result?.leaveId).toBe('annual');
+      // Le marqueur de versement ne doit pas emp?cher une r?g?n?ration du m?me mois.
+      Object.assign(leave, { plannedPayrollMonth: month, plannedPayrollYear: year, paidIndemnityAmount: 260000 });
+      expect((await service.getLeaveImpactForPayroll('employee', month, year, 260000))?.leaveIndemnity).toBe(260000);
+      // Un repos de rattrapage sans ancre ne doit jamais ?tre pay? ? nouveau.
+      Object.assign(leave, { plannedPayrollMonth: null, plannedPayrollYear: null, carriedFromLeaveId: 'source' });
+      expect(await service.getLeaveImpactForPayroll('employee', month, year, 260000)).toBeNull();
+    },
+  );
+});
+
+
+describe('Payroll generation order', () => {
+  it('keeps October indemnity unchanged when November already exists', async () => {
+    const payrolls: FakePayroll[] = Array.from({ length: 9 }, (_, i) => ({
+      year: 2026, month: i + 1, grossSalary: 260000 + i * 1000, status: 'DRAFT',
+    }));
+    const prisma = buildMockPrisma({ hireDate: new Date(2026, 0, 1), payrolls });
+    const service = new LeavesIndemnityService(prisma as any);
+    const before = await service.calculateLeaveIndemnity('emp', 26, 'company', 10, 2026, 270000);
+    payrolls.push({ year: 2026, month: 11, grossSalary: 9000000, status: 'DRAFT' });
+    const after = await service.calculateLeaveIndemnity('emp', 26, 'company', 10, 2026, 270000);
+    expect(before.indemnity).toBeGreaterThan(0);
+    expect(after.indemnity).toBe(before.indemnity);
+  });
+});

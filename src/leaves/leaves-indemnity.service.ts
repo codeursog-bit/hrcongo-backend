@@ -697,8 +697,19 @@ export class LeavesIndemnityService {
         employeeId,
         status: 'APPROVED',
         type: 'ANNUAL',
-        plannedPayrollMonth: month,
-        plannedPayrollYear: year,
+        OR: [
+          { plannedPayrollMonth: month, plannedPayrollYear: year },
+          // Legacy approvals: pay in M-1, excluding unpaid carryover rest.
+          {
+            plannedPayrollMonth: null,
+            plannedPayrollYear: null,
+            carriedFromLeaveId: null,
+            startDate: {
+              gte: new Date(year, month, 1),
+              lt: new Date(year, month + 1, 1),
+            },
+          },
+        ],
       },
     });
 
