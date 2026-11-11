@@ -1,6 +1,6 @@
+// 📁 EMPLACEMENT (projet backend) : src/attendance/attendance.service.ts
 import { buildShiftUpdate } from './work-shift-validation';
 // ============================================================================
-// 📁 src/attendance/attendance.service.ts
 // ✅ v5.1 — Orchestrateur principal — cohérent avec tous les services v5
 //
 // CHANGEMENTS v5.1 :
@@ -11,7 +11,7 @@ import { buildShiftUpdate } from './work-shift-validation';
 //   - Tous les délégués pointent vers les services v5.1
 // ============================================================================
 
-import { atCongoTime, congoDayOfWeek } from '../common/utils/congo-time';
+import { atCongoTime, congoDateString, congoDayOfWeek } from '../common/utils/congo-time';
 import { resolveUserEmployeeId } from '../common/utils/user-employee.util';
 import { Injectable, ForbiddenException, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
@@ -19,6 +19,7 @@ import { CreateAttendanceDto } from './dto/create-attendance.dto';
 import {
   AttendanceUtilsService,
   DEFAULT_WORK_DAYS,
+  SHIFT_LATE_TOLERANCE_MINUTES,
 } from './services/attendance-utils.service';
 import { AttendanceCalculationService } from './services/attendance-calculation.service';
 import {
@@ -551,6 +552,9 @@ export class AttendanceService {
       checkOut?: string;
       notes: string;
     },
+    // 🆕 opts : pointeuse externe (method DEVICE + nom) et traçabilité (ip / navigateur).
+    //    Absent = comportement historique (MANUAL, sans source).
+    opts?: { method?: 'MANUAL' | 'DEVICE'; source?: string; ip?: string; userAgent?: string },
   ) {
     const user = await this.getVerifiedUser(userId);
     await this.assertCanAccessEmployee(
@@ -561,6 +565,20 @@ export class AttendanceService {
       user.canRecordAttendanceForAll,
     );
 
+    // ✅ Présent / Retard / Télétravail = HEURES OBLIGATOIRES (jamais « présent sans heure »).
+    //    Aujourd'hui : l'entrée suffit. Jour passé : entrée ET sortie.
+    if (['PRESENT', 'LATE', 'REMOTE'].includes(body.status)) {
+      if (!body.checkIn) {
+        throw new BadRequestException("L'heure d'entrée est obligatoire pour un jour présent");
+      }
+      if (!body.checkOut && String(body.date).slice(0, 10) < congoDateString()) {
+        throw new BadRequestException("L'heure de sortie est obligatoire pour un jour passé");
+      }
+    }
+    if (body.checkIn && body.checkOut && new Date(body.checkOut) <= new Date(body.checkIn)) {
+      throw new BadRequestException("L'heure de sortie doit être après l'heure d'entrée");
+    }
+
     const attendanceData: any = {
       employeeId: body.employeeId,
       companyId: user.companyId,
@@ -569,8 +587,14 @@ export class AttendanceService {
       notes: body.notes,
       checkIn: body.checkIn ? new Date(body.checkIn) : null,
       checkOut: body.checkOut ? new Date(body.checkOut) : null,
-      checkInMethod: body.checkIn ? 'MANUAL' : null,
-      checkOutMethod: body.checkOut ? 'MANUAL' : null,
+      checkInMethod: body.checkIn ? (opts?.method ?? 'MANUAL') : null,
+      checkOutMethod: body.checkOut ? (opts?.method ?? 'MANUAL') : null,
+      ...(opts?.source
+        ? {
+            checkInSource: body.checkIn ? opts.source : null,
+            checkOutSource: body.checkOut ? opts.source : null,
+          }
+        : {}),
     };
 
     if (
@@ -592,6 +616,7 @@ export class AttendanceService {
           officialEndHour: true,
           overtimeEnabled: true,
           workDays: true,
+          lateToleranceMinutes: true,
         } as any,
       });
 
@@ -679,7 +704,21 @@ export class AttendanceService {
         overtime100: ot.overtime100,
         isNightShift: ot.isNightShift,
       });
+
+      // PRESENT ⇄ LATE : décidé par l'heure d'entrée (mêmes seuils que le pointage normal)
+      const lateTolerance = shift
+        ? SHIFT_LATE_TOLERANCE_MINUTES
+        : Number((ps as any)?.lateToleranceMinutes ?? 60);
+      attendanceData.status = this.utils.isLateCheckIn(checkInDate, startH, lateTolerance, startMin)
+        ? 'LATE'
+        : 'PRESENT';
     }
+
+    // 🆕 État AVANT, pour tracer le vrai « avant → après »
+    const before = await this.prisma.attendance.findUnique({
+      where: { employeeId_date: { employeeId: body.employeeId, date: body.date } },
+      select: { status: true, checkIn: true, checkOut: true },
+    });
 
     const attendance = await this.prisma.attendance.upsert({
       where: {
@@ -689,15 +728,26 @@ export class AttendanceService {
       create: attendanceData,
     });
 
+    // 🆕 Trace : qui (modifiedBy + rôle), quoi (action + avant → après), quand (modifiedAt), pourquoi (reason)
+    const iso = (d?: Date | null) => (d ? d.toISOString() : '');
     await this.prisma.attendanceLog.create({
       data: {
         attendanceId: attendance.id,
         modifiedBy: userId,
         field: 'status,checkIn,checkOut',
-        oldValue: 'ABSENT_UNPAID',
-        newValue: body.status,
+        oldValue: [before?.status ?? '', iso(before?.checkIn), iso(before?.checkOut)].join(','),
+        newValue: [attendance.status, iso(attendance.checkIn), iso(attendance.checkOut)].join(','),
         reason: body.notes,
-      },
+        action:
+          opts?.method === 'DEVICE'
+            ? 'DEVICE_SYNC'
+            : before?.checkIn || before?.checkOut
+              ? 'CORRECTION'
+              : 'MANUAL_CREATE',
+        actorRole: user.role,
+        ipAddress: opts?.ip,
+        userAgent: opts?.userAgent,
+      } as any,
     });
 
     return { success: true, attendance };
@@ -706,17 +756,27 @@ export class AttendanceService {
   // ============================================================================
   // ✅ LOGS D'AUDIT
   // ============================================================================
-  async getLogs(userId: string, month: number, year: number, overrideCompanyId?: string) {
+  async getLogs(
+    userId: string,
+    month: number,
+    year: number,
+    overrideCompanyId?: string,
+    attendanceId?: string, // 🆕 historique d'UN pointage (sans filtre de mois)
+  ) {
     const user = await this.getVerifiedUser(userId, overrideCompanyId);
 
     const startDate = `${year}-${String(month).padStart(2, '0')}-01`;
     const lastDay = new Date(year, month, 0).getDate();
     const endDate = `${year}-${String(month).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
 
+    // 🔒 Un employé sans permission « secrétaire » n'a pas à lire les corrections des autres.
+    if (user.role === 'EMPLOYEE' && !user.canRecordAttendanceForAll) return { logs: [] };
+
     const whereClause: any = {
+      ...(attendanceId ? { attendanceId } : {}),
       attendance: {
         companyId: user.companyId,
-        date: { gte: startDate, lte: endDate },
+        ...(attendanceId ? {} : { date: { gte: startDate, lte: endDate } }),
       },
     };
 
@@ -747,12 +807,16 @@ export class AttendanceService {
         },
       },
       orderBy: { modifiedAt: 'desc' },
-      take: 100,
+      take: attendanceId ? 50 : 100,
     });
 
     return {
       logs: logs.map((log) => ({
         id: log.id,
+        attendanceId: log.attendanceId,
+        date: log.attendance.date,
+        action: (log as any).action ?? null,
+        actorRole: (log as any).actorRole ?? null,
         field: log.field,
         oldValue: log.oldValue,
         newValue: log.newValue,

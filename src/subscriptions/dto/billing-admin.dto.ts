@@ -47,6 +47,14 @@ export class CreateCustomQuoteDto {
   @IsOptional() @IsBoolean() isRecurring?: boolean;
   @IsOptional() @IsISO8601() validUntil?: string;
   @IsOptional() @IsString() @MaxLength(500) note?: string;
+
+  // Devis « portefeuille » : le paiement active TOUTES les entreprises liées au compte multi-entreprises
+  @IsOptional() @IsBoolean() coversPortfolio?: boolean;
+
+  // Obligatoire si coversPortfolio = true : l'utilisateur multi-entreprises dont le portefeuille est couvert
+  @ValidateIf((o) => o.coversPortfolio === true)
+  @IsUUID()
+  portfolioOwnerId?: string;
 }
 
 export class SetPaymentProviderDto {

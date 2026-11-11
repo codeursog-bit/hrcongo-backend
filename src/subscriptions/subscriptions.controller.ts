@@ -166,10 +166,23 @@ export class SubscriptionsController {
   async getActiveQuote(@Request() req) {
     if (!req.user.companyId) return { quote: null };
     const q = await this.customQuotesService.findActiveForCompany(req.user.companyId);
+
+    // Devis « portefeuille » : on montre au client quelles entreprises seront activées
+    let coveredCompanies: string[] = [];
+    if (q?.coversPortfolio) {
+      try {
+        coveredCompanies = (await this.customQuotesService.resolveCoveredCompanies(q)).map((c) => c.name);
+      } catch {
+        coveredCompanies = []; // devis devenu invalide : le paiement sera refusé avec un message clair
+      }
+    }
+
     return {
       quote: q && {
         id: q.id, plan: q.plan, amount: q.amount, months: q.months,
         isRecurring: q.isRecurring, validUntil: q.validUntil,
+        coversPortfolio: !!q.coversPortfolio,
+        coveredCompanies,
       },
     };
   }

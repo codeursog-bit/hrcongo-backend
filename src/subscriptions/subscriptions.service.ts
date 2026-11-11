@@ -909,6 +909,8 @@ export class SubscriptionsService {
     let discountCodeId: string | null = null;
     let customQuoteId: string | null = null;
     let months: number | undefined;
+    // Devis « portefeuille » : entreprises activées par CE paiement (figées maintenant)
+    let coveredCompanies: { id: string; name: string }[] = [];
 
     if (dto.useQuote) {
       // ── Tarif négocié : le devis impose plan, montant et durée ─────────────
@@ -926,6 +928,16 @@ export class SubscriptionsService {
       months = quote.months;
       billingPeriod = quote.months >= 12 ? 'yearly' : 'monthly';
       customQuoteId = quote.id;
+
+      // Compte multi-entreprises : on fige la liste des entreprises couvertes à
+      // la création du paiement (une entreprise rattachée ensuite ne sera pas
+      // activée par ce paiement, une entreprise détachée non plus — pas de surprise).
+      if (quote.coversPortfolio) {
+        coveredCompanies = await this.customQuotesService.resolveCoveredCompanies(quote);
+        if (coveredCompanies.length === 0) {
+          throw new BadRequestException('Aucune entreprise active à couvrir pour ce devis');
+        }
+      }
     } else {
       // ── Tarif catalogue (prix lus en BDD) + code de réduction éventuel ─────
       const listPrice = await this.pricingService.getPrice(plan, billingPeriod);
@@ -948,7 +960,8 @@ export class SubscriptionsService {
     this.logger.log(
       `💳 Intent company=${companyId} plan=${plan} amount=${amount} XAF` +
         (discountCodeId ? ` (remise ${discountAmount})` : '') +
-        (customQuoteId ? ' (devis)' : ''),
+        (customQuoteId ? ' (devis)' : '') +
+        (coveredCompanies.length > 1 ? ` (portefeuille: ${coveredCompanies.length} entreprises)` : ''),
     );
 
     const intent = await this.yabetooPayService.createPaymentIntent({
@@ -978,11 +991,16 @@ export class SubscriptionsService {
         amount,
         currency: 'XAF',
         status: 'PENDING',
-        description: `Abonnement ${planConfig.name} - ${periodLabel}`,
+        description:
+          `Abonnement ${planConfig.name} - ${periodLabel}` +
+          (coveredCompanies.length > 1 ? ` — ${coveredCompanies.length} entreprises` : ''),
         originalAmount,
         discountAmount: discountCodeId ? discountAmount : null,
         discountCodeId,
         customQuoteId,
+        ...(coveredCompanies.length > 0
+          ? { coveredCompanyIds: coveredCompanies.map((c) => c.id) }
+          : {}),
         metadata: {
           plan,
           billingPeriod,
@@ -990,7 +1008,7 @@ export class SubscriptionsService {
           intentId: intent.id,
           userId,
         },
-      },
+      } as any,
     });
     this.logger.log(`💾 Payment record created: ${payment.id}`);
 
@@ -1005,6 +1023,7 @@ export class SubscriptionsService {
       discountAmount,
       isQuote: !!customQuoteId,
       months: months ?? null,
+      coveredCompanies: coveredCompanies.map((c) => c.name),
     };
   }
 
@@ -1090,10 +1109,12 @@ export class SubscriptionsService {
       },
     });
 
-    await this.activateUpgrade(payment.companyId, plan, billingPeriod, {
+    // Active l'entreprise qui paie — et, pour un devis « portefeuille », TOUTES
+    // les entreprises couvertes par ce paiement (idempotent : webhook + polling).
+    await this.activateForPayment(payment.id, plan, billingPeriod, {
       months: months ?? undefined,
-      // Devis : prix mensuel équivalent = montant payé / durée
-      pricePerMonth: Math.round(payment.amount / (months ?? (billingPeriod === 'yearly' ? 12 : 1))),
+      // Devis : prix mensuel équivalent (total, avant répartition) = montant payé / durée
+      totalPricePerMonth: payment.amount / (months ?? (billingPeriod === 'yearly' ? 12 : 1)),
     });
 
     // ─── Consommation du code de réduction / du devis ─────────────────────
@@ -1121,6 +1142,38 @@ export class SubscriptionsService {
     void this.invoicesService.issueForPayment(payment.id).catch((err) =>
       this.logger.error('[Invoice] Erreur émission facture:', err),
     );
+  }
+
+  // ==========================================================================
+  // 🛠️ SUPER ADMIN — VALIDER À LA MAIN UN PAIEMENT DONT L'ARGENT EST REÇU
+  // ==========================================================================
+  // Webhook perdu, virement hors plateforme, litige résolu… : même chaîne que
+  // le flux normal (statut → activation de toutes les entreprises couvertes →
+  // remise/devis → commission affilié → facture). Idempotent : une entreprise
+  // déjà activée par ce paiement n'est jamais prolongée deux fois.
+  // Le contrôle d'accès, le motif et l'audit sont gérés par AdminPaymentsService.
+  // ==========================================================================
+
+  async adminForceSucceed(paymentId: string): Promise<{ success: true }> {
+    const payment = await this.prisma.payment.findUnique({ where: { id: paymentId } });
+    if (!payment) throw new NotFoundException('Paiement introuvable');
+    if (payment.status === 'SUCCEEDED') throw new BadRequestException('Ce paiement est déjà validé');
+    if (payment.status === 'REFUNDED') throw new BadRequestException('Ce paiement a été remboursé');
+
+    const meta: any = payment.metadata ?? {};
+    if (!meta.plan || !meta.billingPeriod) {
+      throw new BadRequestException(
+        'Ce paiement ne contient pas le plan à activer (métadonnées manquantes) : utilisez « Activer l’abonnement » sur l’entreprise.',
+      );
+    }
+
+    // Un paiement précédemment en échec repart d'une page blanche
+    if (payment.failedAt) {
+      await this.prisma.payment.update({ where: { id: paymentId }, data: { failedAt: null } });
+    }
+
+    await this.handlePaymentSuccess({ ...payment, failedAt: null }, {});
+    return { success: true };
   }
 
   // ==========================================================================
@@ -1796,6 +1849,100 @@ export class SubscriptionsService {
   //     immédiatement (maintenant), comme un nouvel abonnement classique.
   // ==========================================================================
 
+  // ==========================================================================
+  // 🏢 ACTIVER L'ABONNEMENT DE TOUTES LES ENTREPRISES COUVERTES PAR UN PAIEMENT
+  // ==========================================================================
+  //
+  // - Paiement classique : cible = [payment.companyId] (comportement inchangé).
+  // - Devis portefeuille : cible = payment.coveredCompanyIds (figé au checkout).
+  //
+  // Idempotence : verrou de ligne sur le paiement + liste activatedCompanyIds.
+  // Le webhook et le polling peuvent arriver en même temps, ou rejouer : une
+  // entreprise déjà activée par CE paiement n'est jamais prolongée deux fois.
+  //
+  // Chaque entreprise garde son propre ancrage de dates (activateUpgrade) : si
+  // l'une est encore en cours de période, la nouvelle période démarre à sa fin.
+  // Le montant payé est réparti sur les entreprises (pricePerMonth) pour que le
+  // MRR du super admin reste exact (somme = montant payé, pas N fois le montant).
+  // ==========================================================================
+
+  private async activateForPayment(
+    paymentId: string,
+    plan: 'BASIC' | 'PRO' | 'ENTERPRISE',
+    billingPeriod: 'monthly' | 'yearly',
+    opts: { months?: number; totalPricePerMonth: number },
+  ) {
+    const outcome = await this.prisma.$transaction(
+      async (tx) => {
+        await tx.$queryRaw`SELECT id FROM payments WHERE id = ${paymentId}::uuid FOR UPDATE`;
+
+        const fresh: any = await (tx as any).payment.findUnique({
+          where: { id: paymentId },
+          select: { companyId: true, coveredCompanyIds: true, activatedCompanyIds: true },
+        });
+        if (!fresh) throw new NotFoundException('Paiement introuvable');
+
+        const targets: string[] = fresh.coveredCompanyIds?.length
+          ? fresh.coveredCompanyIds
+          : [fresh.companyId];
+        const alreadyDone = new Set<string>(fresh.activatedCompanyIds ?? []);
+        const todo = targets.filter((id) => !alreadyDone.has(id));
+        const pricePerMonth = Math.round(opts.totalPricePerMonth / targets.length);
+
+        const activated: string[] = [];
+        const failed: { companyId: string; error: unknown }[] = [];
+
+        for (const companyId of todo) {
+          try {
+            const sub = await this.prisma.subscription.findUnique({
+              where: { companyId },
+              select: { id: true },
+            });
+            // Entreprise rattachée au portefeuille sans abonnement : on le crée, puis on l'active
+            if (!sub) await this.createTrialSubscription(companyId);
+
+            await this.activateUpgrade(companyId, plan, billingPeriod, {
+              months: opts.months,
+              pricePerMonth,
+            });
+            activated.push(companyId);
+          } catch (error) {
+            failed.push({ companyId, error });
+          }
+        }
+
+        if (activated.length > 0) {
+          await (tx as any).payment.update({
+            where: { id: paymentId },
+            data: { activatedCompanyIds: [...alreadyDone, ...activated] },
+          });
+        }
+
+        return { targets, todo, activated, failed };
+      },
+      { timeout: 30_000, maxWait: 10_000 },
+    );
+
+    // Rien n'a pu être activé : on remonte l'erreur (comportement historique
+    // d'un paiement mono-entreprise dont l'activation échoue).
+    if (outcome.todo.length > 0 && outcome.activated.length === 0 && outcome.failed.length > 0) {
+      throw outcome.failed[0].error;
+    }
+
+    if (outcome.failed.length > 0) {
+      this.logger.error(
+        `⚠️ [Portefeuille] Paiement ${paymentId} : ${outcome.failed.length}/${outcome.targets.length} entreprise(s) NON activée(s) → activation manuelle requise : ` +
+          outcome.failed.map((f) => `${f.companyId} (${(f.error as any)?.message ?? f.error})`).join(', '),
+      );
+    }
+    if (outcome.targets.length > 1) {
+      this.logger.log(
+        `🏢 [Portefeuille] Paiement ${paymentId} → ${outcome.activated.length} entreprise(s) activée(s) sur ${outcome.targets.length}`,
+      );
+    }
+    return outcome;
+  }
+
   async activateUpgrade(
     companyId: string,
     plan: 'BASIC' | 'PRO' | 'ENTERPRISE',
@@ -2224,10 +2371,16 @@ export class SubscriptionsService {
   // ==========================================================================
 
   async getPaymentHistory(companyId: string) {
-    return this.prisma.payment.findMany({
-      where: { companyId },
+    // Inclut les paiements groupés (compte multi-entreprises) faits depuis une autre
+    // entreprise du portefeuille mais qui couvrent celle-ci.
+    const payments = await this.prisma.payment.findMany({
+      where: { OR: [{ companyId }, { coveredCompanyIds: { has: companyId } }] } as any,
       orderBy: { createdAt: 'desc' },
     });
+    return payments.map((p: any) => ({
+      ...p,
+      coveredByGroupPayment: p.companyId !== companyId,
+    }));
   }
 
   // ==========================================================================

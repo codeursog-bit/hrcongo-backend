@@ -1,5 +1,5 @@
+// 📁 EMPLACEMENT (projet backend) : src/app.module.ts
 // ============================================================================
-// 📁 src/app.module.ts — VERSION MISE À JOUR
 // Ajout : CnssDeclarationModule, ContractRuptureModule, UnpaidSalaryModule
 // ContractsModule (déjà existant, vérifier s'il est bien importé)
 // ============================================================================
@@ -64,6 +64,7 @@ import { AffiliateModule } from './affiliate/affiliate.module';
 import { BulletinTemplateModule } from './bulletin-template/bulletin-template.module';
 import { AbsenceRequestsModule } from './absence-requests/absence-requests.module';
 import { CheckinDevicesModule } from './checkin-devices/checkin-devices.module';
+import { DeviceSyncModule } from './device-sync/device-sync.module';
 import { DisplayScreensModule } from './display-screens/display-screens.module';
 import { ApprovalsModule } from './approvals/approvals.module';
 
@@ -176,6 +177,7 @@ import { FinanceModule } from './finance/finance.module';
     ContactModule,
     AbsenceTrackingModule,
     CheckinDevicesModule,
+    DeviceSyncModule,
     DisplayScreensModule, // 🆕 pointage par scan QR dynamique + code secret
     ApprovalsModule,
     ChatModule,

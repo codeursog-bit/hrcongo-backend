@@ -31,10 +31,28 @@ import { CompanyInsightsService } from './services/company-insights.service';
 import { CompanyInsightsController } from './services/company-insights.controller';
 import { RouteStatsCollector } from './server-monitor/route-stats.collector';
 import { RequestMetricsMiddleware } from './server-monitor/request-metrics.middleware';
+// 🆕 Actions de support super admin (bulletins, utilisateurs) + journal d'audit
+import { AdminActionsController } from './actions/admin-actions.controller';
+import { AdminActionsService } from './actions/admin-actions.service';
+import { PayrollsModule } from '../payrolls/payrolls.module';
+// 🆕 Gestion d'entreprise : vue détail, tendances, bilans, contrôles de cohérence
+import { CompanyManagementController } from './management/company-management.controller';
+import { CompanyManagementService } from './management/company-management.service';
+import { FiscalModule } from '../payroll/fiscal/fiscal.module';
+// 🆕 Gestion des comptes : liste filtrée, statistiques, fiche détaillée
+import { AccountsController } from './accounts/accounts.controller';
+import { AccountsService } from './accounts/accounts.service';
+// 🆕 Paiements & abonnements : MRR, à traiter, liste, fiche, actions tracées
+import { AdminPaymentsController } from './payments/admin-payments.controller';
+import { AdminPaymentsService } from './payments/admin-payments.service';
+import { SubscriptionsModule } from '../subscriptions/subscriptions.module';
+// 🆕 Gestion des cabinets : wallet, forfait, essai, PME clientes, compteurs en direct
+import { AdminCabinetsController } from './cabinets/admin-cabinets.controller';
+import { AdminCabinetsService } from './cabinets/admin-cabinets.service';
 
 @Module({
-  imports: [PrismaModule, CleanupModule, PlatformSettingsModule, NotificationsModule, SystemLogsModule],
-  controllers: [AdminController, PortfolioAdminController, ServerMonitorController, CompanyInsightsController],
+  imports: [PrismaModule, CleanupModule, PlatformSettingsModule, NotificationsModule, SystemLogsModule, PayrollsModule, FiscalModule, SubscriptionsModule],
+  controllers: [AdminController, PortfolioAdminController, ServerMonitorController, CompanyInsightsController, AdminActionsController, CompanyManagementController, AccountsController, AdminPaymentsController, AdminCabinetsController],
   providers: [
     // Services
     DashboardService,
@@ -53,6 +71,11 @@ import { RequestMetricsMiddleware } from './server-monitor/request-metrics.middl
     AdminSignalsService,
     CompanyInsightsService,
     RouteStatsCollector,
+    AdminActionsService,
+    CompanyManagementService,
+    AccountsService,
+    AdminPaymentsService,
+    AdminCabinetsService,
     // Guards
     UltraAdminGuard,
   ],

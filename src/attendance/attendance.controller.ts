@@ -1,6 +1,6 @@
+// 📁 EMPLACEMENT (projet backend) : src/attendance/attendance.controller.ts
 import { validateSimulationInput } from '../payrolls/payroll-simulation-validation';
 // ============================================================================
-// 📁 src/attendance/attendance.controller.ts — COMPLET
 // ============================================================================
 // ✅ Garde tout le code existant intact
 // 🆕 AJOUTE :
@@ -249,13 +249,20 @@ export class AttendanceController {
   async getAttendanceLogs(
     @Query('month') month: string,
     @Query('year') year: string,
+    @Query('attendanceId') attendanceId: string | undefined,
     @Request() req,
   ) {
     try {
       const m = month === undefined ? new Date().getMonth() + 1 : Number(month);
       const y = year === undefined ? new Date().getFullYear() : Number(year);
       validateSimulationInput(m, y);
-      return await this.attendanceService.getLogs(req.user.userId, m, y);
+      return await this.attendanceService.getLogs(
+        req.user.userId,
+        m,
+        y,
+        undefined,
+        attendanceId || undefined,
+      );
     } catch (error: any) {
       if (error instanceof HttpException) throw error;
       throw new HttpException(
@@ -270,7 +277,10 @@ export class AttendanceController {
   @Roles('ADMIN', 'HR_MANAGER', 'SUPER_ADMIN', 'MANAGER', 'EMPLOYEE')
   async createManualAttendance(@Body() body: any, @Request() req) {
     try {
-      return await this.attendanceService.createManual(req.user.userId, body);
+      return await this.attendanceService.createManual(req.user.userId, body, {
+        ip: req.ip,
+        userAgent: req.headers?.['user-agent'],
+      });
     } catch (error: any) {
       if (error instanceof HttpException) throw error;
       throw new HttpException(

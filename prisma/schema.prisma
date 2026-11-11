@@ -397,6 +397,7 @@ leaveAppliesToContractors Boolean @default(false)
 
   checkinCredentials      CheckinCredential[]
   kioskDevices            KioskDevice[]
+  syncConnectors          SyncConnector[]
   kioskDeviceCompanyLinks KioskDeviceCompany[]
   displayScreens          DisplayScreen[]
   employeeSecrets         EmployeeSecret[]
@@ -736,6 +737,7 @@ model Employee {
   // 🆕 NOUVELLE RELATION
   checkinCredentials   CheckinCredential[]
   secret               EmployeeSecret?
+  deviceEmployeeMaps   DeviceEmployeeMap[] 
   bonuses              EmployeeBonus[]
   contracts            EmployeeContract[]
   pseSalaries          PSESalarie[] // ← AJOUTER
@@ -2783,6 +2785,7 @@ enum PunchMethod {
   QR_SCAN
   SECRET_CODE
   MANUAL
+  DEVICE
 
   @@map("punch_method")
 }
@@ -2838,6 +2841,9 @@ model AttendanceLog {
   oldValue String? @db.Text
   newValue String? @db.Text
   reason   String  @db.Text
+
+  action    String? @db.VarChar(30)
+  actorRole String? @db.VarChar(30)
 
   ipAddress String? @db.Inet
   userAgent String? @db.Text
@@ -4695,6 +4701,9 @@ model Payment {
   paymentMethod        String? @db.VarChar(50)
   paymentMethodDetails Json?
 
+  coveredCompanyIds   String[] @default([]) @db.Uuid
+ activatedCompanyIds String[] @default([]) @db.Uuid
+
   // Métadonnées
   description String? @db.VarChar(500)
   metadata    Json?
@@ -4718,6 +4727,7 @@ model Payment {
   @@index([yabetooIntentId])
   @@index([discountCodeId])
   @@index([customQuoteId])
+  @@index([coveredCompanyIds], type: Gin)
   @@index([createdAt])
   @@map("payments")
 }
@@ -5807,6 +5817,9 @@ model CustomQuote {
   usedAt      DateTime?         @db.Timestamptz
   note        String?           @db.VarChar(500)
 
+  coversPortfolio  Boolean @default(false)
+ portfolioOwnerId String? @db.Uuid
+
   createdByUserId String?  @db.Uuid
   createdAt       DateTime @default(now()) @db.Timestamptz
   updatedAt       DateTime @updatedAt @db.Timestamptz
@@ -5814,6 +5827,7 @@ model CustomQuote {
   payments Payment[]
 
   @@index([companyId, status])
+  @@index([portfolioOwnerId])
   @@map("custom_quotes")
 }
 
@@ -5906,4 +5920,162 @@ model ComptaReceipt {
  createdAt DateTime @default(now()) @db.Timestamptz
  @@unique([connectorId,externalId])
  @@map("compta_receipts")
+}
+
+
+
+// ============================================================================
+// 🆕 SYNCHRONISATION DES POINTEUSES EXTERNES (pointeuse propre à l'entreprise)
+// Flux à sens unique : pointeuse du client → agent local → Konza.
+// Konza n'écrit jamais dans la pointeuse. Aucune table existante n'est modifiée
+// (hors relations inverses Company / Employee et l'enum PunchMethod).
+// ============================================================================
+
+enum SyncConnectorKind {
+  ZKTECO_NETWORK // pointeuse ZKTeco (et compatibles) lue sur le réseau local
+  FILE_IMPORT // fichier d'export (CSV/Excel) déposé dans un dossier surveillé
+  HTTP_API // pointeuse / logiciel avec une API HTTP
+  CUSTOM // autre : adaptateur écrit sur mesure
+
+  @@map("sync_connector_kind")
+}
+
+enum SyncJobStatus {
+  PENDING // demandée, l'agent ne l'a pas encore prise
+  RUNNING // l'agent lit la pointeuse / envoie les pointages
+  SUCCESS
+  FAILED
+  CANCELLED
+
+  @@map("sync_job_status")
+}
+
+enum SyncJobTrigger {
+  MANUAL // bouton « Synchroniser »
+  SCHEDULED // synchronisation nocturne automatique
+
+  @@map("sync_job_trigger")
+}
+
+enum DevicePunchStatus {
+  PENDING // reçu, pas encore traité (ex. journée en cours avec 1 seul passage)
+  USED // pris en compte dans une présence
+  UNMAPPED // numéro de la pointeuse non associé à un employé Konza
+  INCOMPLETE // un seul passage sur une journée terminée : à corriger par l'admin
+  CONFLICT // la présence existe déjà (saisie manuelle, congé…) : non écrasée
+  IGNORED // doublon rapproché (double badgeage) ou écarté
+
+  @@map("device_punch_status")
+}
+
+model SyncConnector {
+  id        String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId String  @db.Uuid
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  name String            @db.VarChar(100)
+  kind SyncConnectorKind
+  // Paramètres NON secrets lus par l'agent (ip, port, colonnes du fichier…)
+  config Json?
+
+  // Clé de l'agent : seul son hash SHA-256 est stocké (affichée une seule fois).
+  agentKeyHash String @unique @db.VarChar(64)
+  agentKeyHint String @db.VarChar(8)
+
+  isActive        Boolean   @default(true)
+  autoSyncEnabled Boolean   @default(true)
+  lastSeenAt      DateTime? @db.Timestamptz
+  lastAgentVersion String?  @db.VarChar(30)
+  lastSyncAt      DateTime? @db.Timestamptz
+  lastPunchAt     DateTime? @db.Timestamptz // curseur : plus récent pointage reçu
+
+  // Utilisateur (ADMIN/RH) au nom duquel les présences sont écrites
+  actingUserId String @db.Uuid
+
+  createdAt DateTime @default(now()) @db.Timestamptz
+
+  jobs     SyncJob[]
+  punches  DevicePunch[]
+  mappings DeviceEmployeeMap[]
+
+  @@index([companyId])
+  @@map("sync_connectors")
+}
+
+model SyncJob {
+  id          String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  connectorId String        @db.Uuid
+  connector   SyncConnector @relation(fields: [connectorId], references: [id], onDelete: Cascade)
+  companyId   String        @db.Uuid
+
+  status  SyncJobStatus  @default(PENDING)
+  trigger SyncJobTrigger @default(MANUAL)
+
+  // Période demandée (YYYY-MM-DD, jours Congo). Null = depuis le curseur.
+  rangeFrom String? @db.VarChar(10)
+  rangeTo   String? @db.VarChar(10)
+
+  requestedById String?   @db.Uuid
+  requestedAt   DateTime  @default(now()) @db.Timestamptz
+  startedAt     DateTime? @db.Timestamptz
+  lastProgressAt DateTime? @db.Timestamptz
+  finishedAt    DateTime? @db.Timestamptz
+
+  // { received, inserted, duplicates, daysWritten, incomplete, conflicts, unmapped, ignored }
+  stats Json?
+  error String? @db.Text
+
+  punches DevicePunch[]
+
+  @@index([connectorId, requestedAt])
+  @@index([companyId, status])
+  @@map("sync_jobs")
+}
+
+model DevicePunch {
+  id          String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  connectorId String        @db.Uuid
+  connector   SyncConnector @relation(fields: [connectorId], references: [id], onDelete: Cascade)
+  companyId   String        @db.Uuid
+  jobId       String?       @db.Uuid
+  job         SyncJob?      @relation(fields: [jobId], references: [id], onDelete: SetNull)
+
+  deviceUserId String   @db.VarChar(100) // numéro / PIN de l'employé SUR la pointeuse
+  punchedAt    DateTime @db.Timestamptz
+  rawState     Int?     @db.SmallInt // code entrée/sortie de la pointeuse, si fourni
+  rawPayload   Json?
+
+  employeeId String? @db.Uuid // résolu via DeviceEmployeeMap
+  date       String? @db.VarChar(10) // jour Congo (YYYY-MM-DD)
+
+  status      DevicePunchStatus @default(PENDING)
+  statusNote  String?           @db.VarChar(200)
+  processedAt DateTime?         @db.Timestamptz
+  receivedAt  DateTime          @default(now()) @db.Timestamptz
+
+  // Idempotence : renvoyer deux fois le même pointage ne crée rien
+  @@unique([connectorId, deviceUserId, punchedAt])
+  @@index([companyId, status])
+  @@index([companyId, employeeId, date])
+  @@map("device_punches")
+}
+
+model DeviceEmployeeMap {
+  id          String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  connectorId String        @db.Uuid
+  connector   SyncConnector @relation(fields: [connectorId], references: [id], onDelete: Cascade)
+  companyId   String        @db.Uuid
+
+  deviceUserId   String  @db.VarChar(100)
+  deviceUserName String? @db.VarChar(150) // nom enregistré sur la pointeuse (aide à l'association)
+
+  employeeId String?   @db.Uuid
+  employee   Employee? @relation(fields: [employeeId], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now()) @db.Timestamptz
+  updatedAt DateTime @updatedAt @db.Timestamptz
+
+  @@unique([connectorId, deviceUserId])
+  @@index([companyId, employeeId])
+  @@map("device_employee_maps")
 }

@@ -77,6 +77,18 @@ export class InvoicesService {
       });
     }
 
+    // Paiement groupé (compte multi-entreprises) : la facture liste toutes les entreprises couvertes
+    const coveredIds: string[] = Array.isArray(payment.coveredCompanyIds) ? payment.coveredCompanyIds : [];
+    if (coveredIds.length > 1) {
+      const covered = await this.prisma.company.findMany({
+        where: { id: { in: coveredIds } },
+        select: { legalName: true, tradeName: true },
+        orderBy: { legalName: 'asc' },
+      });
+      const names = covered.map((c) => c.tradeName || c.legalName);
+      lines[0].description += `\nEntreprises couvertes (${names.length}) : ${names.join(', ')}`;
+    }
+
     const total = payment.amount;
     const vatAmount = INVOICE_VAT_RATE > 0 ? Math.round(total - total / (1 + INVOICE_VAT_RATE / 100)) : 0;
     const c = payment.company;

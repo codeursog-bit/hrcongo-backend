@@ -1,9 +1,9 @@
+// 📁 EMPLACEMENT (projet backend) : src/attendance/services/attendance-check.service.ts
 // ============================================================================
-// 📁 src/attendance/services/attendance-check.service.ts
 // ✅ v5.1 — Fix TS : AttendanceStatus cast + logique v5 complète
 // ============================================================================
 
-import { atCongoTime, congoDayOfWeek } from '../../common/utils/congo-time';
+import { atCongoTime, congoDateString, congoDayOfWeek } from '../../common/utils/congo-time';
 import { ForbiddenException, Injectable } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AppGateway } from '../../app.gateway';
@@ -12,6 +12,7 @@ import { CreateAttendanceDto } from '../dto/create-attendance.dto';
 import { SubscriptionGuard } from '../../subscriptions/guards/subscription.guard';
 import { CompanySiteService } from '../../companies/company-site.service';
 import { AttendanceBreakService } from './attendance-break.service';
+import { computeDayTotals, DayTotals } from './attendance-day-totals';
 import { resolveUserEmployeeId } from '../../common/utils/user-employee.util';
 import {
   CompanyNotFoundException,
@@ -828,6 +829,18 @@ export class AttendanceCheckService {
     if (effIn && effOut && effOut.getTime() <= effIn.getTime()) {
       throw new Error("L'heure de sortie doit être après l'heure d'entrée");
     }
+
+    // ✅ Présent / Retard / Télétravail = HEURES OBLIGATOIRES (jamais « présent sans heure »).
+    //    Aujourd'hui : l'entrée suffit (la personne peut encore être au travail).
+    //    Jour passé  : entrée ET sortie.
+    const requestedStatus = String(updates.status || current.status);
+    const isPresenceStatus = ['PRESENT', 'LATE', 'REMOTE'].includes(requestedStatus);
+    if (isPresenceStatus) {
+      if (!effIn) throw new Error("L'heure d'entrée est obligatoire pour un jour présent");
+      if (!effOut && String(current.date).slice(0, 10) < congoDateString()) {
+        throw new Error("L'heure de sortie est obligatoire pour un jour passé");
+      }
+    }
     // ── 🆕 Pause : insertion / modification / suppression ──────────────────
     // Le temps réellement travaillé = (sortie − entrée) − pause.
     const existingPause: any = (current as any).pause ?? null;
@@ -904,12 +917,42 @@ export class AttendanceCheckService {
           )
         : undefined;
 
+    // ── 🆕 Recalcul des heures / heures sup à partir des heures corrigées ───
+    // Avant : seule la durée était recalculée ; les heures sup restaient celles de
+    // l'ancien pointage. Si les heures sup sont déjà en validation/approuvées/refusées,
+    // on ne les touche pas (la durée est quand même mise à jour) : l'appelant en est informé.
+    const otLocked = ['PENDING_APPROVAL', 'APPROVED', 'REJECTED'].includes(
+      String((current as any).overtimeStatus ?? ''),
+    );
+    let recomputed: DayTotals | null = null;
+    if (
+      isPresenceStatus &&
+      effIn &&
+      effOut &&
+      (checkInDate || checkOutDate || updates.status || breakChange)
+    ) {
+      recomputed = await computeDayTotals(this.prisma, this.utils, {
+        companyId: current.companyId,
+        employeeId: current.employeeId,
+        date: String(current.date).slice(0, 10),
+        checkIn: effIn,
+        checkOut: effOut,
+        breakMinutes: newBreakMinutes,
+      });
+    }
+    // PRESENT ⇄ LATE décidé par l'heure d'entrée (mêmes seuils que le pointage normal)
+    const statusToWrite = (
+      recomputed && (requestedStatus === 'PRESENT' || requestedStatus === 'LATE')
+        ? recomputed.isLate ? 'LATE' : 'PRESENT'
+        : requestedStatus
+    ) as AttendanceStatus;
+
     const changes: AuditChange[] = [];
-    if (updates.status && updates.status !== current.status) {
+    if (statusToWrite !== current.status) {
       changes.push({
         field: 'status',
         oldValue: current.status,
-        newValue: updates.status,
+        newValue: statusToWrite,
       });
     }
     if (checkInDate && checkInDate.getTime() !== current.checkIn?.getTime()) {
@@ -927,6 +970,14 @@ export class AttendanceCheckService {
         field: 'checkOut',
         oldValue: current.checkOut?.toISOString(),
         newValue: checkOutDate.toISOString(),
+      });
+    }
+
+    if (recomputed && Number(current.totalHours ?? NaN) !== recomputed.totalHours) {
+      changes.push({
+        field: 'totalHours',
+        oldValue: current.totalHours != null ? String(current.totalHours) : undefined,
+        newValue: String(recomputed.totalHours),
       });
     }
 
@@ -951,23 +1002,38 @@ export class AttendanceCheckService {
         oldValue: changes.map((c) => c.oldValue || '').join(','),
         newValue: changes.map((c) => c.newValue).join(','),
         reason: updates.reason,
+        // 🆕 Trace : QUOI (création / correction) et QUI (rôle au moment de l'action)
+        action: current.checkIn || current.checkOut ? 'CORRECTION' : 'MANUAL_CREATE',
+        actorRole: user.role,
         ipAddress: req?.ip,
         userAgent: req?.headers?.['user-agent'],
-      },
+      } as any,
     });
 
     const attendanceUpdate = this.prisma.attendance.update({
       where: { id: attendanceId },
       data: {
-        status: (updates.status || current.status) as AttendanceStatus,
+        status: statusToWrite,
         checkIn: updates.checkIn || current.checkIn,
         checkOut: updates.checkOut || current.checkOut,
         totalHours:
-          updates.totalHours ?? recomputedTotalHours ?? current.totalHours,
+          recomputed?.totalHours ??
+          updates.totalHours ??
+          recomputedTotalHours ??
+          current.totalHours,
         ...(breakChange ? { breakMinutes: newBreakMinutes } : {}),
-        ...(adjustedNormalHours !== undefined
-          ? { normalHours: adjustedNormalHours }
-          : {}),
+        ...(recomputed && !otLocked
+          ? {
+              normalHours: recomputed.normalHours,
+              overtime10: recomputed.overtime10,
+              overtime25: recomputed.overtime25,
+              overtime50: recomputed.overtime50,
+              overtime100: recomputed.overtime100,
+              isNightShift: recomputed.isNightShift,
+            }
+          : adjustedNormalHours !== undefined
+            ? { normalHours: adjustedNormalHours }
+            : {}),
         notes: `${current.notes || ''}\n[Modifié ${new Date().toLocaleString('fr-FR')} par ${user.firstName} ${user.lastName} — ${updates.reason}]`,
       },
     });
@@ -1054,7 +1120,13 @@ export class AttendanceCheckService {
       message: `${user.firstName} ${user.lastName} — ${updates.reason}`,
     });
 
-    return { success: true, attendance: updated, changes };
+    return {
+      success: true,
+      attendance: updated,
+      changes,
+      // null = pas de recalcul demandé ; false = heures sup verrouillées (déjà en validation)
+      overtimeRecalculated: recomputed ? !otLocked : null,
+    };
   }
 
   // ============================================================================
