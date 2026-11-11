@@ -467,3 +467,25 @@ describe('Automatic payment from recent drafts', () => {
     expect(result).toMatchObject({ leaveId: 'november-leave', leaveIndemnity: 55000, indemnifiedDays: 26 });
   });
 });
+
+
+describe('October reference period independent of the hire anniversary', () => {
+  const grosses = [346362,346362,346362,346362,346362,349661,329869,329869,329869,349661];
+  it('counts all ten January-October payrolls for a June hire, excluding November', async () => {
+    const payrolls: FakePayroll[] = grosses.map((grossSalary, i) => ({ year: 2026, month: i+1, grossSalary, status: i === 8 ? 'PAID' : 'DRAFT' }));
+    payrolls.push({ year: 2026, month: 11, grossSalary: 349661, status: 'PAID' });
+    const service = new LeavesIndemnityService(buildMockPrisma({ hireDate: new Date(2020,5,25), appliesSeniorityBonus: true, conventionKey: 'COMMERCE', payrolls }));
+    const preview = await service.calculateLeaveIndemnity('emp', 28.9, 'company', 10, 2026);
+    expect(preview.monthsUsed).toBe(10);
+    expect(preview.indemnity).toBe(316857);
+    const regenerated = await service.calculateLeaveIndemnity('emp', 28.9, 'company', 10, 2026, 349661);
+    expect(regenerated.monthsUsed).toBe(10);
+    expect(regenerated.indemnity).toBe(preview.indemnity);
+  });
+  it('does not reuse months before an actual return from leave', async () => {
+    const service = new LeavesIndemnityService(buildMockPrisma({ hireDate: new Date(2020,5,25), lastAnnualLeaveEndDate: new Date(2026,5,15), payrolls: grosses.map((grossSalary, i) => ({ year: 2026, month: i+1, grossSalary, status: 'DRAFT' })) }));
+    const result = await service.calculateLeaveIndemnity('emp', 26, 'company', 10, 2026);
+    expect(result.monthsUsed).toBe(4);
+    expect(result.indemnity).toBe(naiveIndemnity(grosses.slice(6),26));
+  });
+});

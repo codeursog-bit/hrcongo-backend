@@ -51,22 +51,20 @@ export class LeavesIndemnityService {
   ): Array<{ from: Date; to: Date }> {
     const anchor = new Date(anchorYear, anchorMonth - 1, 1);
     const windows: Array<{ from: Date; to: Date }> = [];
-    let cursor = new Date(sinceDate);
+    let endMonth = anchor;
 
-    for (let i = 0; i <= anchorYear - sinceDate.getFullYear() + 1; i++) {
-      const from = new Date(cursor);
-      const to = new Date(
-        cursor.getFullYear() + 1,
-        cursor.getMonth(),
-        cursor.getDate() - 1,
-      );
-      if (from > anchor) break; // ce cycle n'a pas encore commencé au mois de la paie
-      windows.push({ from, to });
-      cursor = new Date(
-        cursor.getFullYear() + 1,
-        cursor.getMonth(),
-        cursor.getDate(),
-      );
+    // Le dernier bloc de référence se termine au mois de paiement.
+    // L'anniversaire d'embauche ne doit pas effacer les bulletins de janvier
+    // à mai d'un salarié embauché en juin, payé pour son congé en octobre.
+    // Un vrai retour de congé reste une borne basse : aucun mois du cycle
+    // précédent n'est repris. Les blocs suivants ne se chevauchent jamais.
+    while (endMonth >= sinceDate) {
+      const candidateStart = new Date(endMonth.getFullYear(), endMonth.getMonth() - 11, 1);
+      const from = candidateStart < sinceDate ? new Date(sinceDate) : candidateStart;
+      const to = new Date(endMonth.getFullYear(), endMonth.getMonth() + 1, 0);
+      windows.unshift({ from, to });
+      if (from <= sinceDate) break;
+      endMonth = new Date(from.getFullYear(), from.getMonth() - 1, 1);
     }
 
     return windows;
@@ -305,8 +303,8 @@ export class LeavesIndemnityService {
       // mais évite un crash si sinceDate est incohérente) : un seul cycle
       // de 12 mois se terminant au mois de la paie.
       cycles.push({
-        from: new Date(refYear - 1, refMonth - 1, 1),
-        to: new Date(refYear, refMonth - 1, 0),
+        from: new Date(refYear, refMonth - 12, 1),
+        to: new Date(refYear, refMonth, 0),
       });
     }
 
