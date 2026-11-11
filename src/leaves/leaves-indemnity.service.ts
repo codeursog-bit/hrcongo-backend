@@ -8,7 +8,7 @@
 //    l'original, seulement déplacée dans son propre service.
 // ============================================================================
 
-import { Injectable, Logger } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import * as WorkingDays from '../common/working-days.util';
 import { getSeniorityDaysForConvention } from './config/leave-seniority-conventions';
@@ -53,7 +53,7 @@ export class LeavesIndemnityService {
     const windows: Array<{ from: Date; to: Date }> = [];
     let cursor = new Date(sinceDate);
 
-    for (let i = 0; i < 10; i++) {
+    for (let i = 0; i <= anchorYear - sinceDate.getFullYear() + 1; i++) {
       const from = new Date(cursor);
       const to = new Date(
         cursor.getFullYear() + 1,
@@ -298,7 +298,7 @@ export class LeavesIndemnityService {
         ? sinceDateRaw
         : new Date(sinceDateRaw.getFullYear(), sinceDateRaw.getMonth() + 1, 1);
 
-    const cycles = this.getAllDueCyclesRolling(sinceDate, refYear, refMonth);
+    let cycles = this.getAllDueCyclesRolling(sinceDate, refYear, refMonth);
 
     if (cycles.length === 0) {
       // Repli de sécurité (ne devrait plus arriver avec le modèle glissant,
@@ -309,6 +309,24 @@ export class LeavesIndemnityService {
         to: new Date(refYear, refMonth - 1, 0),
       });
     }
+
+    // Le nombre de jours demandé détermine le nombre de cycles à régler.
+    // Un droit d'un seul cycle doit utiliser le cycle le plus récent, jamais
+    // consommer ses jours sur une ancienne année vide (avant l'arrivée dans RH).
+    // Pour plusieurs cycles dus, conserver leurs fenêtres distinctes et leur ordre.
+    let daysToAllocate = daysCount;
+    let firstCycle = cycles.length - 1;
+    for (; firstCycle >= 0; firstCycle--) {
+      const yearsAtStart = hireDate
+        ? Math.max(0, (cycles[firstCycle].from.getTime() - hireDate.getTime()) / (1000 * 60 * 60 * 24 * 365.25))
+        : 0;
+      const bonusDays = appliesSeniorityBonus
+        ? getSeniorityDaysForConvention(conventionKey, yearsAtStart)
+        : 0;
+      daysToAllocate -= CONGO_LEAVE.ANNUAL_DAYS + bonusDays;
+      if (daysToAllocate <= 0) break;
+    }
+    cycles = cycles.slice(Math.max(0, firstCycle));
 
     this.logger.log(
       `📅 ${cycles.length} cycle(s) détecté(s) depuis ${sinceDate.toISOString().slice(0, 10)} (glissant)`,
@@ -324,7 +342,14 @@ export class LeavesIndemnityService {
     // ressurgir sur un cas limite, alors qu'il est censé n'avoir servi
     // qu'au tout début.
     const totalRealPayrollsEver = await this.prisma.payroll.count({
-      where: { employeeId, status: { in: ['VALIDATED', 'TO_PAY', 'PAID'] } },
+      where: {
+        employeeId,
+        status: { in: ['DRAFT', 'VALIDATED', 'TO_PAY', 'PAID'] },
+        OR: [
+          { year: { lt: refYear } },
+          { year: refYear, month: { lte: refMonth } },
+        ],
+      },
     });
     const openingStillEligible = totalRealPayrollsEver < 12;
 
@@ -440,7 +465,7 @@ export class LeavesIndemnityService {
       let injectedGross: number | null = null;
       let currentMonthEstimatedHere = false;
       if (anchorInWindow) {
-        if (typeof currentMonthWorkGross === 'number' && currentMonthWorkGross > 0) {
+        if (typeof currentMonthWorkGross === 'number' && Number.isFinite(currentMonthWorkGross) && currentMonthWorkGross >= 0) {
           injectedGross = currentMonthWorkGross; // vrai brut propre, calculé par la paie
         } else if (typeof anchorRowGross === 'number' && anchorRowGross > 0) {
           injectedGross = anchorRowGross; // bulletin du mois déjà en base, indemnité retirée
@@ -587,7 +612,7 @@ export class LeavesIndemnityService {
       const monthsKnown = historyCount + openingMonthsUsed; // pour affichage/logs uniquement — jamais utilisé comme diviseur
 
       avgBrut = (realTotal + openingGrossUsed) / 12;
-      totalMonthsUsed += historyCount; // compteur affiché = mois réels + mois courant injecté
+      totalMonthsUsed += monthsKnown;
       if (openingMonthsUsed > 0) {
         usedOpeningCumulative = true;
       }
@@ -852,6 +877,11 @@ export class LeavesIndemnityService {
         this.logger.warn(
           `⚠️ Congé ${payrollAnchoredLeave.id} (employé ${employeeId}) ancré sur ${month}/${year} mais indemnité = ${leaveIndemnity} F (jours indemnisés: ${totalDays}) — vérifier payrollIndemnityDays et l'historique de paie.`,
         );
+        if (currentMonthWorkGross !== undefined) {
+          throw new BadRequestException(
+            `Indemnité de congé impossible à calculer pour ${month}/${year} : aucun brut disponible dans la période de référence. Vérifiez les bulletins et le cumul initial de l'employé.`,
+          );
+        }
       }
     } else if (isMaintained) {
       leaveIndemnity = absenceDeduction;

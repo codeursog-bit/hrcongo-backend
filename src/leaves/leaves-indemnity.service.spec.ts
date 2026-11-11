@@ -40,9 +40,9 @@ import { getSeniorityDaysForConvention } from './config/leave-seniority-conventi
 // service sur `payroll.findMany` (filtre par plage année/mois).
 function matchesWhere(record: any, where: any): boolean {
   if (!where) return true;
-  if (Array.isArray(where.AND)) return where.AND.every((w: any) => matchesWhere(record, w));
-  if (Array.isArray(where.OR)) return where.OR.some((w: any) => matchesWhere(record, w));
   return Object.entries(where).every(([field, cond]: [string, any]) => {
+    if (field === 'AND') return cond.every((w: any) => matchesWhere(record, w));
+    if (field === 'OR') return cond.some((w: any) => matchesWhere(record, w));
     const val = record[field];
     if (cond && typeof cond === 'object' && !Array.isArray(cond)) {
       if ('gt' in cond) return val > cond.gt;
@@ -97,16 +97,16 @@ function buildMockPrisma(config: ScenarioConfig) {
     payroll: {
       count: jest.fn(
         async ({ where }: any) =>
-          config.payrolls.filter((p) => matchesWhere(p, where)).length,
+          config.payrolls.filter((p) => matchesWhere({ employeeId: where.employeeId, ...p }, where)).length,
       ),
       findMany: jest.fn(async ({ where }: any) => {
         const filtered = config.payrolls
-          .filter((p) => matchesWhere(p, where))
+          .filter((p) => matchesWhere({ employeeId: where.employeeId, ...p }, where))
           .sort((a, b) => (a.year - b.year) || (a.month - b.month));
         return filtered.map((p) => ({ grossSalary: p.grossSalary, month: p.month, year: p.year }));
       }),
       findFirst: jest.fn(async ({ where }: any) => {
-        const filtered = config.payrolls.filter((p) => matchesWhere(p, where));
+        const filtered = config.payrolls.filter((p) => matchesWhere({ employeeId: where.employeeId, ...p }, where));
         return filtered[0] ?? null;
       }),
     },
@@ -431,5 +431,39 @@ describe('Payroll generation order', () => {
     const after = await service.calculateLeaveIndemnity('emp', 26, 'company', 10, 2026, 270000);
     expect(before.indemnity).toBeGreaterThan(0);
     expect(after.indemnity).toBe(before.indemnity);
+  });
+});
+
+
+describe('Recent draft payrolls for employees hired before Konza RH', () => {
+  it('accumulates recent drafts instead of stopping on the empty hire-year cycle', async () => {
+    const payrolls: FakePayroll[] = [{ year: 2026, month: 9, grossSalary: 300000, status: 'DRAFT' }];
+    const service = new LeavesIndemnityService(buildMockPrisma({ hireDate: new Date(2020, 0, 1), payrolls }));
+    const first = await service.calculateLeaveIndemnity('emp', 26, 'company', 10, 2026);
+    expect(first.monthsUsed).toBe(1);
+    expect(first.indemnity).toBe(25000);
+    payrolls.push({ year: 2026, month: 10, grossSalary: 360000, status: 'DRAFT' });
+    const second = await service.calculateLeaveIndemnity('emp', 26, 'company', 10, 2026);
+    expect(second.monthsUsed).toBe(2);
+    expect(second.indemnity).toBe(55000);
+    const generated = await service.calculateLeaveIndemnity('emp', 26, 'company', 10, 2026, 360000);
+    expect(generated.indemnity).toBe(second.indemnity);
+    expect(generated.monthsUsed).toBe(2);
+  });
+});
+
+
+describe('Automatic payment from recent drafts', () => {
+  it('includes the October indemnity for a November departure despite an old hire date', async () => {
+    const prisma = buildMockPrisma({ hireDate: new Date(2000, 0, 1), payrolls: [
+      { year: 2026, month: 9, grossSalary: 300000, status: 'DRAFT' },
+    ] });
+    prisma.leave.findMany = jest.fn().mockResolvedValue([]);
+    prisma.leave.findFirst = jest.fn(async ({ where }) => where.plannedPayrollMonth || where.OR ? {
+      id: 'november-leave', type: 'ANNUAL', companyId: 'company', payrollIndemnityDays: 26, daysCount: 26,
+    } : null);
+    const service = new LeavesIndemnityService(prisma);
+    const result = await service.getLeaveImpactForPayroll('emp', 10, 2026, 360000);
+    expect(result).toMatchObject({ leaveId: 'november-leave', leaveIndemnity: 55000, indemnifiedDays: 26 });
   });
 });

@@ -45,6 +45,7 @@ import {
   splitLeaveDays,
   applyConsumedToRemainder,
   leaveEligibleEmployeeFilter,
+  fullCycleIndemnityDays,
 } from './leaves-common.util';
 import { CONGO_LEAVE } from './leaves.constants';
 import { LeavesBalanceService } from './leaves-balance.service';
@@ -3509,8 +3510,10 @@ export class LeavesService {
         { plannedPayrollMonth: month, plannedPayrollYear: year },
         {
           plannedPayrollMonth: null,
+          plannedPayrollYear: null,
+          carriedFromLeaveId: null,
           type: 'ANNUAL',
-          startDate: { gte: startOfMonth, lte: endOfMonth },
+          startDate: { gte: new Date(year, month, 1), lt: new Date(year, month + 1, 1) },
         },
       ],
     };
@@ -3542,10 +3545,12 @@ export class LeavesService {
         let indemnity = 0;
         let monthsKnown: number | null = null;
         let currentMonthEstimated = false;
+        let calculationError = false;
         try {
-          const totalDays = leave.payrollIndemnityDays
-            ? Number(leave.payrollIndemnityDays)
-            : Number(leave.daysCount);
+          const storedDays = Number(leave.payrollIndemnityDays ?? 0);
+          const totalDays = storedDays > 0 ? storedDays
+            : leave.payrollIndemnityDays == null ? Number(leave.daysCount)
+            : fullCycleIndemnityDays(0, leave.payrollSeniorityDays);
           // ✅ Aperçu : le brut propre du mois de paie n'est pas encore connu —
           // estimé (jamais vide) et signalé comme tel. Le vrai montant est
           // recalculé par la génération de la paie avec le vrai brut du mois.
@@ -3561,14 +3566,16 @@ export class LeavesService {
           indemnity = result.indemnity;
           monthsKnown = result.monthsUsed;
           currentMonthEstimated = !!result.currentMonthEstimated;
-        } catch {
-          /* employé sans historique de paie suffisant — 0 par défaut */
+        } catch (error) {
+          calculationError = true;
+          this.logger.error(`Calcul indemnité impossible pour le congé ${leave.id}`, error);
         }
         return {
           ...leave,
           indemnityAmount: indemnity,
           monthsKnown,
           currentMonthEstimated,
+          calculationError,
           isTheoretical: false,
         };
       }),
@@ -3598,6 +3605,7 @@ export class LeavesService {
           let indemnity = 0;
           let monthsKnown: number | null = null;
           let currentMonthEstimated = false;
+          let calculationError = false;
           try {
             const result = await this.calculateLeaveIndemnity(
               r.employeeId,
@@ -3611,8 +3619,9 @@ export class LeavesService {
             indemnity = result.indemnity;
             monthsKnown = result.monthsUsed;
             currentMonthEstimated = !!result.currentMonthEstimated;
-          } catch {
-            /* employé sans historique de paie suffisant — 0 par défaut */
+          } catch (error) {
+            calculationError = true;
+            this.logger.error(`Calcul indemnité impossible pour l'employé ${r.employeeId}`, error);
           }
           return {
             id: r.id,
@@ -3628,6 +3637,7 @@ export class LeavesService {
             indemnityAmount: indemnity,
             monthsKnown,
             currentMonthEstimated,
+            calculationError,
           };
         }),
     );
