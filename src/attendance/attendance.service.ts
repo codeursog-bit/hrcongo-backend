@@ -250,6 +250,10 @@ export class AttendanceService {
     return this.check.checkOut(dto, userId, opts);
   }
 
+  async correctAttendanceDay(userId: string, body: any, req?: any) {
+    return this.check.correctAttendanceDay(userId, body, req);
+  }
+
   async correctAttendance(
     attendanceId: string,
     userId: string,

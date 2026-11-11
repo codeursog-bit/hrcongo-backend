@@ -34,6 +34,7 @@ import { AttendanceSummaryService } from './attendance-summary.service';
 import { AttendanceCronService } from './cron/attendance-cron.service'; // 🆕
 import { CreateAttendanceDto } from './dto/create-attendance.dto';
 import { CorrectAttendanceDto } from './dto/correct-attendance.dto';
+import { CorrectAttendanceDayDto } from './dto/correct-attendance-day.dto';
 import { AuthGuard } from '@nestjs/passport';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { RolesGuard } from '../auth/guards/roles.guard';
@@ -396,6 +397,18 @@ export class AttendanceController {
         error.message || 'Erreur',
         error.status || HttpStatus.INTERNAL_SERVER_ERROR,
       );
+    }
+  }
+
+  @Put('correct-day')
+  @UseGuards(RolesGuard)
+  @Roles('ADMIN', 'HR_MANAGER', 'SUPER_ADMIN')
+  async correctAttendanceDay(@Body() body: CorrectAttendanceDayDto, @Request() req) {
+    try {
+      return await this.attendanceService.correctAttendanceDay(req.user.userId, body, req);
+    } catch (error: any) {
+      if (error instanceof HttpException) throw error;
+      throw new HttpException(error.message || 'Erreur lors de la modification', HttpStatus.BAD_REQUEST);
     }
   }
 

@@ -4,7 +4,7 @@
 // ============================================================================
 
 import { atCongoTime, congoDateString, congoDayOfWeek } from '../../common/utils/congo-time';
-import { ForbiddenException, Injectable } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AppGateway } from '../../app.gateway';
 import { AttendanceStatus, NotificationType } from '@prisma/client';
@@ -771,6 +771,36 @@ export class AttendanceCheckService {
   // ============================================================================
   // ✅ CORRECTION — Inchangé
   // ============================================================================
+  async correctAttendanceDay(userId: string, body: {
+    employeeId: string; date: string; checkIn?: string; checkOut?: string;
+    reason: string; breakStart?: string; breakEnd?: string;
+  }, req?: any) {
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (!user?.companyId || !['ADMIN', 'HR_MANAGER', 'SUPER_ADMIN'].includes(user.role)) {
+      throw new ForbiddenException('Accès refusé');
+    }
+    const employee = await this.prisma.employee.findFirst({
+      where: { id: body.employeeId, companyId: user.companyId },
+    });
+    if (!employee) throw new ForbiddenException('Employé inaccessible');
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(body.date) || !body.checkIn ||
+        Number.isNaN(new Date(body.checkIn).getTime()) ||
+        congoDateString(new Date(body.checkIn)) !== body.date || body.date > congoDateString()) {
+      throw new BadRequestException('Renseignez une entrée valide pour la journée sélectionnée');
+    }
+    if (!body.reason || body.reason.trim().length < 3) {
+      throw new BadRequestException('Motif obligatoire (3 caractères minimum)');
+    }
+    return this.prisma.$transaction(async (tx) => {
+      const attendance = await tx.attendance.upsert({
+        where: { employeeId_date: { employeeId: body.employeeId, date: body.date } },
+        create: { companyId: user.companyId!, employeeId: body.employeeId, date: body.date, status: 'ABSENT_UNPAID' },
+        update: {},
+      });
+      return this.correctAttendance(attendance.id, userId, { ...body, status: 'PRESENT' }, req, tx);
+    }, { timeout: 15000 });
+  }
+
   async correctAttendance(
     attendanceId: string,
     userId: string,
@@ -785,8 +815,9 @@ export class AttendanceCheckService {
       reason: string;
     },
     req?: any,
+    db: any = this.prisma,
   ) {
-    const user = await this.prisma.user.findUnique({
+    const user = await db.user.findUnique({
       where: { id: userId },
       select: {
         firstName: true,
@@ -805,7 +836,7 @@ export class AttendanceCheckService {
       throw new Error('Accès refusé : droits insuffisants');
     }
 
-    const current = await this.prisma.attendance.findUnique({
+    const current = await db.attendance.findUnique({
       where: { id: attendanceId },
       include: {
         pause: true, // 🆕 pause de la journée
@@ -931,7 +962,7 @@ export class AttendanceCheckService {
       effOut &&
       (checkInDate || checkOutDate || updates.status || breakChange)
     ) {
-      recomputed = await computeDayTotals(this.prisma, this.utils, {
+      recomputed = await computeDayTotals(db, this.utils, {
         companyId: current.companyId,
         employeeId: current.employeeId,
         date: String(current.date).slice(0, 10),
@@ -994,7 +1025,7 @@ export class AttendanceCheckService {
       });
     }
 
-    await this.prisma.attendanceLog.create({
+    await db.attendanceLog.create({
       data: {
         attendanceId,
         modifiedBy: userId,
@@ -1010,10 +1041,12 @@ export class AttendanceCheckService {
       } as any,
     });
 
-    const attendanceUpdate = this.prisma.attendance.update({
+    const attendanceUpdate = db.attendance.update({
       where: { id: attendanceId },
       data: {
         status: statusToWrite,
+        ...(updates.checkIn && !current.checkIn ? { checkInMethod: 'MANUAL' } : {}),
+        ...(updates.checkOut && !current.checkOut ? { checkOutMethod: 'MANUAL' } : {}),
         checkIn: updates.checkIn || current.checkIn,
         checkOut: updates.checkOut || current.checkOut,
         totalHours:
@@ -1042,7 +1075,7 @@ export class AttendanceCheckService {
     let updated: any;
     if (breakChange?.action === 'upsert') {
       const bc = breakChange;
-      const pauseWrite = (this.prisma as any).attendanceBreak.upsert({
+      const pauseWrite = (db as any).attendanceBreak.upsert({
         where: { attendanceId },
         create: {
           attendanceId,
@@ -1071,17 +1104,17 @@ export class AttendanceCheckService {
           editedAt: new Date(),
         },
       });
-      [, updated] = await this.prisma.$transaction([pauseWrite, attendanceUpdate]);
+      [, updated] = await (db.$transaction ? db.$transaction([pauseWrite, attendanceUpdate]) : Promise.all([pauseWrite, attendanceUpdate]));
     } else if (breakChange?.action === 'delete') {
-      const pauseDelete = (this.prisma as any).attendanceBreak.delete({
+      const pauseDelete = (db as any).attendanceBreak.delete({
         where: { attendanceId },
       });
-      [, updated] = await this.prisma.$transaction([pauseDelete, attendanceUpdate]);
+      [, updated] = await (db.$transaction ? db.$transaction([pauseDelete, attendanceUpdate]) : Promise.all([pauseDelete, attendanceUpdate]));
     } else {
       updated = await attendanceUpdate;
     }
 
-    const admins = await this.prisma.user.findMany({
+    const admins = await db.user.findMany({
       where: {
         companyId: user.companyId,
         role: { in: ['ADMIN', 'HR_MANAGER', 'SUPER_ADMIN'] },
@@ -1092,7 +1125,7 @@ export class AttendanceCheckService {
     });
 
     if (admins.length > 0) {
-      await this.prisma.notification.createMany({
+      await db.notification.createMany({
         data: admins.map((a) => ({
           userId: a.id,
           type: 'ATTENDANCE_CORRECTION',
