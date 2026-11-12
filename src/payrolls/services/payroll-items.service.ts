@@ -24,6 +24,7 @@
 
 import { Injectable } from '@nestjs/common';
 import { LEGAL_WORK_HOURS_PER_MONTH } from '../constants/payroll.constants';
+import { payrollItemRank } from './payroll-item-order';
 
 @Injectable()
 export class PayrollItemsService {
@@ -720,6 +721,10 @@ export class PayrollItemsService {
         });
       }
     }
+
+    // Ancienneté en première prime, congés en dernières lignes de gain.
+    items.sort((a, b) => payrollItemRank(a) - payrollItemRank(b) || a.order - b.order);
+    items.forEach((item, index) => { item.order = index + 1; });
 
     // ─── Persistance ─────────────────────────────────────────────────────────
     if (items.length > 0) {

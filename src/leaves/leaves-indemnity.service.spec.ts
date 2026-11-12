@@ -381,7 +381,7 @@ describe('Scheduled indemnity in month before departure', () => {
         startDate: new Date(departureYear, departureMonth - 1, 5),
         endDate: new Date(departureYear, departureMonth - 1, 30),
         plannedPayrollMonth: null, plannedPayrollYear: null,
-        carriedFromLeaveId: null, daysCount: 26, payrollIndemnityDays: 26,
+        carriedFromLeaveId: null, daysCount: 26, payrollIndemnityDays: 26, payrollSeniorityDays: 0,
       };
       const prisma: any = {
         leave: {
@@ -487,5 +487,29 @@ describe('October reference period independent of the hire anniversary', () => {
     const result = await service.calculateLeaveIndemnity('emp', 26, 'company', 10, 2026);
     expect(result.monthsUsed).toBe(4);
     expect(result.indemnity).toBe(naiveIndemnity(grosses.slice(6),26));
+  });
+});
+
+
+describe('Seniority leave entitlement snapshots', () => {
+  it('reconstructs five Commerce days on the exact fifth anniversary and splits the full right', async () => {
+    const prisma=buildMockPrisma({hireDate:new Date(2020,5,25),appliesSeniorityBonus:true,conventionKey:'COMMERCE',payrolls:[]});
+    const service=new LeavesIndemnityService(prisma);
+    const entitlement=await service.resolveAnnualIndemnityDays({payrollIndemnityDays:28.9,debitedCycleStartDate:new Date(2025,5,25)},'emp','company');
+    expect(entitlement).toEqual({totalDays:31,seniorityDays:5});
+    prisma.leave.findMany=jest.fn().mockResolvedValue([]);
+    prisma.leave.findFirst=jest.fn().mockResolvedValue({id:'annual',companyId:'company',type:'ANNUAL',daysCount:29,payrollIndemnityDays:28.9,payrollSeniorityDays:null,debitedCycleStartDate:new Date(2025,5,25)});
+    jest.spyOn(service,'calculateLeaveIndemnity').mockResolvedValue({indemnity:339881,basedOnAverage:285062,monthsUsed:10,cyclesCount:1,method:'AVERAGE_12M',usedOpeningCumulative:false});
+    const impact=await service.getLeaveImpactForPayroll('emp',10,2026,349661);
+    expect(impact?.indemnifiedDays).toBe(31);
+    expect(impact?.indemnifiedSeniorityDays).toBe(5);
+    expect((impact?.leaveIndemnityBase??0)+(impact?.leaveIndemnitySeniority??0)).toBe(339881);
+    expect(impact?.leaveIndemnitySeniority).toBeGreaterThan(0);
+  });
+  it('respects an explicit zero seniority snapshot', async () => {
+    const prisma=buildMockPrisma({hireDate:new Date(2000,0,1),payrolls:[]});
+    const service=new LeavesIndemnityService(prisma);
+    expect(await service.resolveAnnualIndemnityDays({payrollIndemnityDays:26,payrollSeniorityDays:0},'emp','company')).toEqual({totalDays:26,seniorityDays:0});
+    expect(prisma.employee.findUnique).not.toHaveBeenCalled();
   });
 });

@@ -45,7 +45,6 @@ import {
   splitLeaveDays,
   applyConsumedToRemainder,
   leaveEligibleEmployeeFilter,
-  fullCycleIndemnityDays,
 } from './leaves-common.util';
 import { CONGO_LEAVE } from './leaves.constants';
 import { LeavesBalanceService } from './leaves-balance.service';
@@ -1632,6 +1631,13 @@ export class LeavesService {
       dto.employeeId,
       projection.debitReferenceDate,
     );
+    const annualEntitlement = dto.type === 'ANNUAL'
+      ? await this.indemnityService.resolveAnnualIndemnityDays({
+          payrollIndemnityDays: balance.annualEntitled,
+          debitedCycleStartDate: balance.cycleStartDate,
+          startDate: start,
+        }, dto.employeeId, user.companyId)
+      : null;
 
     // ✅ Jours RESTANTS à prendre après ce congé annuel (pris en partie, par
     // besoin de l'entreprise) : base (26j) consommée en premier, puis
@@ -1644,7 +1650,7 @@ export class LeavesService {
     if (dto.type === 'ANNUAL') {
       const split = splitLeaveDays({
         baseEntitled: CONGO_LEAVE.ANNUAL_DAYS,
-        seniorityEntitled: Number(balance.seniorityDays ?? 0),
+        seniorityEntitled: annualEntitlement?.seniorityDays ?? Number(balance.seniorityDays ?? 0),
         takenBefore: Number(balance.annualTaken ?? 0),
         requestedDays: workingDays,
       });
@@ -1689,6 +1695,7 @@ export class LeavesService {
     let plannedPayrollMonth: number | null = null;
     let plannedPayrollYear: number | null = null;
     let payrollIndemnityDays: number | null = null;
+    let payrollSeniorityDays: number | null = null;
     if (dto.type === 'ANNUAL') {
       const payMonth = start.getMonth() === 0 ? 12 : start.getMonth();
       const payYear =
@@ -1698,7 +1705,8 @@ export class LeavesService {
       // Droit TOTAL du cycle (26j + ancienneté), pas seulement les jours de
       // ce congé précis — couvre aussi tout congé anticipé déjà pris plus
       // tôt dans le même cycle, jamais indemnisé à sa propre date.
-      payrollIndemnityDays = Number(balance.annualEntitled);
+      payrollIndemnityDays = annualEntitlement!.totalDays;
+      payrollSeniorityDays = annualEntitlement!.seniorityDays;
     }
 
     const leave = await this.prisma.leave.create({
@@ -1718,6 +1726,7 @@ export class LeavesService {
         plannedPayrollMonth,
         plannedPayrollYear,
         payrollIndemnityDays,
+        payrollSeniorityDays,
         // ✅ CORRECTIF (demande explicite) : cette route (planification
         // directe RH, déjà APPROVED à la création) n'avait jamais ces 2
         // champs — la lettre ne pouvait donc jamais afficher ni le motif de
@@ -2930,6 +2939,7 @@ export class LeavesService {
     let plannedPayrollYear = leave.plannedPayrollYear;
     let payrollIndemnityDays: Prisma.Decimal | number | null =
       leave.payrollIndemnityDays;
+    let payrollSeniorityDays = leave.payrollSeniorityDays;
 
     // ✅ RÈGLE (demande explicite) : l'indemnité ne se paie qu'UNE fois par
     // cycle. Le mois de paie n'est donc PAS déplacé avec les dates quand :
@@ -2967,13 +2977,18 @@ export class LeavesService {
               },
             })
           : null;
-        payrollIndemnityDays = balanceRow
-          ? balanceRow.annualEntitled
-          : leave.payrollIndemnityDays;
+        const entitlement = await this.indemnityService.resolveAnnualIndemnityDays({
+          payrollIndemnityDays: balanceRow?.annualEntitled ?? leave.payrollIndemnityDays,
+          debitedCycleStartDate: leave.debitedCycleStartDate,
+          startDate: newStart,
+        }, leave.employeeId, leave.companyId);
+        payrollIndemnityDays = entitlement.totalDays;
+        payrollSeniorityDays = new Prisma.Decimal(entitlement.seniorityDays);
       } else {
         plannedPayrollMonth = null;
         plannedPayrollYear = null;
         payrollIndemnityDays = null;
+        payrollSeniorityDays = null;
       }
     }
 
@@ -3003,6 +3018,7 @@ export class LeavesService {
         plannedPayrollMonth,
         plannedPayrollYear,
         payrollIndemnityDays,
+        payrollSeniorityDays,
         ...(remainderUpdate ?? {}),
       },
     });
@@ -3547,10 +3563,7 @@ export class LeavesService {
         let currentMonthEstimated = false;
         let calculationError = false;
         try {
-          const storedDays = Number(leave.payrollIndemnityDays ?? 0);
-          const totalDays = storedDays > 0 ? storedDays
-            : leave.payrollIndemnityDays == null ? Number(leave.daysCount)
-            : fullCycleIndemnityDays(0, leave.payrollSeniorityDays);
+          const { totalDays } = await this.indemnityService.resolveAnnualIndemnityDays(leave, leave.employeeId, companyId);
           // ✅ Aperçu : le brut propre du mois de paie n'est pas encore connu —
           // estimé (jamais vide) et signalé comme tel. Le vrai montant est
           // recalculé par la génération de la paie avec le vrai brut du mois.

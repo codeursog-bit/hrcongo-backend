@@ -29,6 +29,34 @@ export class LeavesIndemnityService {
 
   constructor(private prisma: PrismaService) {}
 
+  async resolveAnnualIndemnityDays(leave: {
+    payrollIndemnityDays?: unknown; payrollSeniorityDays?: unknown;
+    debitedCycleStartDate?: Date | null; startDate?: Date;
+  }, employeeId: string, companyId: string) {
+    let seniorityDays = Number(leave.payrollSeniorityDays ?? 0);
+    if (leave.payrollSeniorityDays == null) {
+      const [employee, company] = await Promise.all([
+        this.prisma.employee.findUnique({ where: { id: employeeId }, select: { hireDate: true } }),
+        this.prisma.company.findUnique({ where: { id: companyId }, select: { appliesSeniorityLeaveBonus: true, leaveConventionKey: true } }),
+      ]);
+      if (employee?.hireDate && company?.appliesSeniorityLeaveBonus !== false) {
+        const hire = new Date(employee.hireDate);
+        const reference = new Date(leave.debitedCycleStartDate ?? leave.startDate ?? hire);
+        // Années révolues : diviser les millisecondes par 365,25 sous-compte
+        // certaines dates anniversaires exactes (5 ans devenaient 4,999 ans).
+        let years = reference.getFullYear() - hire.getFullYear();
+        if (reference.getMonth() < hire.getMonth() ||
+            (reference.getMonth() === hire.getMonth() && reference.getDate() < hire.getDate())) years--;
+        seniorityDays = getSeniorityDaysForConvention(company?.leaveConventionKey ?? 'GENERALE', Math.max(0, years));
+      }
+    }
+    seniorityDays = Math.max(0, seniorityDays || 0);
+    return {
+      totalDays: fullCycleIndemnityDays(leave.payrollIndemnityDays, seniorityDays),
+      seniorityDays,
+    };
+  }
+
   // ============================================================================
   // 📅 CYCLES DE RÉFÉRENCE — glissants depuis le dernier retour de congé
   // ============================================================================
@@ -824,16 +852,8 @@ export class LeavesIndemnityService {
       // `x ? Number(x) : daysCount` ne se déclenchait JAMAIS pour 0.00 et
       // renvoyait 0 jour → indemnité 0 F → ligne absente du bulletin. On teste
       // la VALEUR : 0 ou négatif = droit plein du cycle (26j + ancienneté).
-      const storedDays = Number(payrollAnchoredLeave.payrollIndemnityDays ?? 0);
-      const totalDays =
-        storedDays > 0
-          ? storedDays
-          : payrollAnchoredLeave.payrollIndemnityDays == null
-            ? Number(payrollAnchoredLeave.daysCount)
-            : fullCycleIndemnityDays(
-                0,
-                payrollAnchoredLeave.payrollSeniorityDays,
-              );
+      const entitlement = await this.resolveAnnualIndemnityDays(payrollAnchoredLeave, employeeId, companyId);
+      const totalDays = entitlement.totalDays;
       indemnifiedDays = totalDays; // ✅ pour le libellé du bulletin — pas
       // le même nombre que "leaveDays" ci-dessous, qui ne compte que les
       // jours d'absence PHYSIQUE de CE mois (ex: un congé anticipé
@@ -853,7 +873,7 @@ export class LeavesIndemnityService {
       // distinctes sur le bulletin, qui se suivent.
       const seniorityDays = Math.min(
         totalDays,
-        Number(payrollAnchoredLeave.payrollSeniorityDays ?? 0),
+        entitlement.seniorityDays,
       );
       indemnifiedSeniorityDays = seniorityDays; // ✅ pour la quantité de la ligne "Congé supplémentaire"
       const baseDays = Math.max(0, totalDays - seniorityDays);

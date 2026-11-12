@@ -1835,7 +1835,7 @@ export class PayrollsService {
       await this.prisma.leave
         .update({
           where: { id: (leaveImpact as any).leaveId },
-          data: { paidIndemnityAmount: leaveIndemnity },
+          data: { paidIndemnityAmount: leaveIndemnity, payrollIndemnityDays: leaveImpact?.indemnifiedDays, payrollSeniorityDays: leaveImpact?.indemnifiedSeniorityDays },
         })
         .catch((err: any) =>
           this.logger.warn(
@@ -2176,6 +2176,27 @@ export class PayrollsService {
     };
   }
 
+  private async assertScheduledLeaveIncluded(payroll: {
+    id: string; employeeId: string; month: number; year: number; grossSalary: unknown;
+  }) {
+    const gains = await this.prisma.payrollItem.findMany({
+      where: { payrollId: payroll.id, type: 'GAIN' },
+      select: { code: true, label: true, amount: true },
+    });
+    const includesLeave = gains.some(item => Number(item.amount) > 0 && (
+      ['INDEM_CONGE', 'CONGE_SUPP'].includes(item.code ?? '') || /cong[eé]/i.test(item.label ?? '')
+    ));
+    if (includesLeave) return;
+    const impact = await this.leavesService.getLeaveImpactForPayroll(
+      payroll.employeeId, payroll.month, payroll.year, Number(payroll.grossSalary),
+    );
+    if (impact?.leaveId && impact.leaveIndemnity > 0) {
+      throw new BadRequestException(
+        `Une indemnité de congé est prévue pour ${payroll.month}/${payroll.year} mais manque sur ce bulletin. Recalculez le brouillon avant de le valider ou de le payer.`,
+      );
+    }
+  }
+
   async update(
     id: string,
     updatePayrollDto: UpdatePayrollDto,
@@ -2235,6 +2256,13 @@ export class PayrollsService {
         cumulBrutOverride: (updatePayrollDto as any).cumulBrutOverride,
       };
       return this.recalculatePayroll(id, userId!, overrides);
+    }
+
+    // Un brouillon créé avant la planification doit être recalculé : relancer
+    // la génération en masse ignore les bulletins qui existent déjà.
+    if (updatePayrollDto.status && updatePayrollDto.status !== payroll.status &&
+        ['VALIDATED', 'TO_PAY', 'PAID'].includes(updatePayrollDto.status)) {
+      await this.assertScheduledLeaveIncluded(payroll);
     }
 
     // 🛡️ Barrière d'audit : contrôle avant de passer un bulletin en VALIDATED.
@@ -2719,7 +2747,7 @@ export class PayrollsService {
           )
         );
         if (leaveImpact?.leaveId && leaveImpact.leaveIndemnity > 0) {
-          await tx.leave.update({ where: { id: leaveImpact.leaveId }, data: { paidIndemnityAmount: leaveImpact.leaveIndemnity } });
+          await tx.leave.update({ where: { id: leaveImpact.leaveId }, data: { paidIndemnityAmount: leaveImpact.leaveIndemnity, payrollIndemnityDays: leaveImpact.indemnifiedDays, payrollSeniorityDays: leaveImpact.indemnifiedSeniorityDays } });
           if (leaveImpact.shouldClearOpeningCumulative) {
             await tx.employee.update({ where: { id: payroll.employeeId }, data: { openingCumulativeGross: null, openingCumulativeMonths: null } });
           }

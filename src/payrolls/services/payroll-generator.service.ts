@@ -970,7 +970,7 @@ export class PayrollGeneratorService {
           await this.prisma.leave
             .update({
               where: { id: data.leaveId },
-              data: { paidIndemnityAmount: data.leaveIndemnity },
+              data: { paidIndemnityAmount: data.leaveIndemnity, payrollIndemnityDays: data.indemnifiedDays, payrollSeniorityDays: data.indemnifiedSeniorityDays },
             })
             .catch((err: any) =>
               this.logger.warn(

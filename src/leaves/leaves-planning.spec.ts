@@ -6,6 +6,7 @@ describe('Payable leave planning', () => {
     const service: any = Object.create(LeavesService.prototype);
     const leave = { id: 'leave', employeeId: 'emp', type: 'ANNUAL', daysCount: 26, payrollIndemnityDays: { toString: () => '0' }, payrollSeniorityDays: 3, employee: {} };
     Object.assign(service, {
+      indemnityService: { resolveAnnualIndemnityDays: jest.fn().mockResolvedValue({ totalDays: 29, seniorityDays: 3 }) },
       logger: { error: jest.fn() },
       getUserWithCompany: jest.fn().mockResolvedValue({ role: 'ADMIN', companyId: 'company' }),
       prisma: { leave: { findMany: jest.fn().mockResolvedValue([leave]) } },
