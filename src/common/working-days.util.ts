@@ -11,7 +11,13 @@ import { PrismaService } from '../prisma/prisma.service';
 import { BadRequestException } from '@nestjs/common';
 
 function formatDate(d: Date): string {
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  return `${String(d.getFullYear()).padStart(4, '0')}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+function assertValidDate(date: Date): void {
+  if (!(date instanceof Date) || !Number.isFinite(date.getTime()) || date.getFullYear() < 1000 || date.getFullYear() > 9999) {
+    throw new BadRequestException('Date invalide : renseignez une date complète avec une année sur quatre chiffres.');
+  }
 }
 
 /** Compte les jours ouvrables (jours travaillés de l'entreprise, hors fériés) entre deux dates incluses. */
@@ -24,6 +30,9 @@ export async function calculateWorkingDays(
   // lus dans la configuration de l'entreprise.
   workDays?: number[],
 ): Promise<number> {
+  assertValidDate(start);
+  assertValidDate(end);
+  if (end < start) throw new BadRequestException('La date de fin doit suivre la date de début.');
   if (!workDays) workDays = await getCompanyWorkDays(prisma, companyId);
   const years = [start.getFullYear()];
   if (end.getFullYear() !== start.getFullYear()) years.push(end.getFullYear());
@@ -61,6 +70,8 @@ export async function calculateReturnDate(
   returnOnNextWorkingDay = true,
   workDays?: number[],            // jours travaillés de l'entreprise (0=dim … 6=sam)
 ) {
+  assertValidDate(startDate);
+  if (!Number.isFinite(workingDaysNeeded)) throw new BadRequestException('Nombre de jours invalide.');
   if (!workDays) workDays = await getCompanyWorkDays(prisma, companyId);
   if (workingDaysNeeded <= 0) {
     throw new BadRequestException(
@@ -264,6 +275,7 @@ export async function firstWorkingDayOnOrAfter(
   date: Date,
   workDays?: number[],
 ): Promise<Date> {
+  assertValidDate(date);
   if (!workDays) workDays = await getCompanyWorkDays(prisma, companyId);
   const years = [date.getFullYear(), date.getFullYear() + 1];
   const holidays = await prisma.publicHoliday.findMany({
