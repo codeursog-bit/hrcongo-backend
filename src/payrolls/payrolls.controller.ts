@@ -5,6 +5,7 @@ import { validateSimulationItems } from './payroll-simulation-validation';
 // ============================================================================
 
 import {
+  BadRequestException,
   Controller,
   Get,
   Post,
@@ -160,6 +161,81 @@ export class PayrollsController {
       });
     } finally {
       clearInterval(heartbeat);
+      res.end();
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // POST /payrolls/batch-status-stream
+  // Valider / passer à payer / annuler PLUSIEURS bulletins en une seule
+  // requête (flux NDJSON, un événement par bulletin). Avant : le navigateur
+  // envoyait un PATCH par bulletin, l'un après l'autre (500 allers-retours,
+  // aucun suivi). Ici le serveur traite un bulletin à la fois avec la même
+  // logique que PATCH /payrolls/:id, et le front voit la progression.
+  // ─────────────────────────────────────────────────────────────────────────
+  @Post('batch-status-stream')
+  @UseGuards(RolesGuard)
+  @Roles(...PAYROLL_ROLES)
+  async batchStatusStream(
+    @Body() body: { payrollIds: string[]; status: 'VALIDATED' | 'TO_PAY' | 'CANCELLED' },
+    @Request() req: any,
+    @Res() res: Response,
+  ) {
+    const status = body?.status;
+    if (!['VALIDATED', 'TO_PAY', 'CANCELLED'].includes(status as string)) {
+      throw new BadRequestException('Statut invalide.');
+    }
+    const ids = Array.isArray(body?.payrollIds)
+      ? [...new Set(body.payrollIds.filter((x) => typeof x === 'string' && x.length > 0))]
+      : [];
+    if (ids.length === 0) throw new BadRequestException('Aucun bulletin sélectionné.');
+    if (ids.length > 2000) throw new BadRequestException('Maximum 2000 bulletins par lot.');
+
+    res.set({
+      'Content-Type': 'application/x-ndjson; charset=utf-8',
+      'Cache-Control': 'no-cache, no-transform',
+      Connection: 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    });
+    // @ts-ignore — dispo sur la réponse HTTP Node sous-jacente
+    res.flushHeaders?.();
+
+    const writeLine = (obj: any) => {
+      if (res.writableEnded || res.destroyed) return;
+      res.write(JSON.stringify(obj) + '\n');
+    };
+
+    let success = 0;
+    let failed = 0;
+    try {
+      for (const id of ids) {
+        // Client parti : on s'arrête proprement (chaque bulletin déjà traité
+        // reste valide, un nouveau lancement reprend les autres).
+        if (res.destroyed || res.writableEnded) break;
+        try {
+          await this.payrollsService.applyBatchStatusChange(id, status, req.user.userId);
+          success++;
+          writeLine({ type: 'detail', id, ok: true });
+        } catch (error: any) {
+          failed++;
+          const resp = typeof error?.getResponse === 'function' ? error.getResponse() : null;
+          const data = resp && typeof resp === 'object' ? resp : null;
+          const rawMessage = (data as any)?.message ?? error?.message ?? 'Erreur';
+          writeLine({
+            type: 'detail',
+            id,
+            ok: false,
+            message: Array.isArray(rawMessage) ? rawMessage.join(', ') : String(rawMessage),
+            // Même forme que l'erreur d'un PATCH classique, pour la fenêtre « refus du contrôle de paie »
+            code: (data as any)?.error,
+            data,
+          });
+        }
+      }
+      writeLine({ type: 'summary', total: ids.length, success, failed });
+    } catch (error: any) {
+      writeLine({ type: 'error', message: error?.message || 'Erreur inconnue' });
+    } finally {
       res.end();
     }
   }

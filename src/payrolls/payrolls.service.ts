@@ -2349,6 +2349,28 @@ export class PayrollsService {
     });
   }
 
+  /**
+   * Changement de statut d'UN bulletin dans un traitement en masse.
+   * Reprend exactement la logique de l'ancienne boucle du front :
+   *  - ANNULER un bulletin PAYÉ → suppression (remove)
+   *  - sinon → update() classique : mêmes garde-fous (barrière d'audit,
+   *    verrou « À payer », Compta, accès entreprise…) que PATCH /payrolls/:id.
+   */
+  async applyBatchStatusChange(
+    id: string,
+    status: 'VALIDATED' | 'TO_PAY' | 'CANCELLED',
+    userId: string,
+  ) {
+    if (status === 'CANCELLED') {
+      const cur = await this.prisma.payroll.findUnique({
+        where: { id },
+        select: { status: true },
+      });
+      if (cur?.status === 'PAID') return this.remove(id, userId);
+    }
+    return this.update(id, { status } as any, userId);
+  }
+
   async remove(id: string, userId: string) {
     const payroll = await this.prisma.payroll.findUnique({ where: { id } });
     if (!payroll) throw new PayrollNotFoundException(id);
