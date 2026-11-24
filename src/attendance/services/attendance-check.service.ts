@@ -1,0 +1,1275 @@
+// 📁 EMPLACEMENT (projet backend) : src/attendance/services/attendance-check.service.ts
+// ============================================================================
+// ✅ v5.1 — Fix TS : AttendanceStatus cast + logique v5 complète
+// ============================================================================
+
+import { atCongoTime, congoDateString, congoDayOfWeek } from '../../common/utils/congo-time';
+import { BadRequestException, ForbiddenException, Injectable } from '@nestjs/common';
+import { PrismaService } from '../../prisma/prisma.service';
+import { AppGateway } from '../../app.gateway';
+import { AttendanceStatus, NotificationType } from '@prisma/client';
+import { CreateAttendanceDto } from '../dto/create-attendance.dto';
+import { SubscriptionGuard } from '../../subscriptions/guards/subscription.guard';
+import { CompanySiteService } from '../../companies/company-site.service';
+import { AttendanceBreakService } from './attendance-break.service';
+import { computeDayTotals, DayTotals } from './attendance-day-totals';
+import { resolveUserEmployeeId } from '../../common/utils/user-employee.util';
+import {
+  CompanyNotFoundException,
+  EmployeeNotFoundException,
+  AttendanceAlreadyExistsException,
+  AttendanceCheckOutMissingException,
+  AttendanceAlreadyCheckedOutException,
+  OutOfGeofenceException,
+  GpsAccuracyTooLowException,
+  LocationRequiredException,
+} from '../../exceptions/business.exceptions';
+import {
+  AttendanceUtilsService,
+  DayStatusEnum,
+  NotificationPayload,
+  AuditChange,
+  DEFAULT_START_HOUR,
+  DEFAULT_TOLERANCE_MINUTES,
+  DEFAULT_WORK_HOURS_PER_DAY,
+  DEFAULT_WORK_DAYS,
+  SHIFT_LATE_TOLERANCE_MINUTES,
+} from './attendance-utils.service';
+
+// ─── Messages ────────────────────────────────────────────────────────────────
+
+const EARLY_MESSAGES: Array<{
+  title: string;
+  body: (n: string, h: string) => string;
+}> = [
+  {
+    title: '☀️ Quelle motivation !',
+    body: (n, h) =>
+      `Bonjour ${n} ! Présence enregistrée 🚀 Votre compteur démarrera à ${h}, l'heure de votre shift.`,
+  },
+  {
+    title: '🌅 Vous êtes déjà là !',
+    body: (n, h) =>
+      `Bonjour ${n} ! Merci pour votre engagement ! Compteur démarre à ${h} selon votre planning.`,
+  },
+  {
+    title: '💪 Arrivée anticipée notée !',
+    body: (n, h) =>
+      `Bonjour ${n} ! Temps effectif comptabilisé dès ${h}. Belle journée !`,
+  },
+  {
+    title: '⭐ Lève-tôt du jour !',
+    body: (n, h) =>
+      `Bonjour ${n} ! Le compteur démarre à ${h} selon votre shift. Belle journée 😊`,
+  },
+];
+
+const LATE_MESSAGES: Array<{ title: string; body: (n: string) => string }> = [
+  {
+    title: '⏰ Vous arrivez un peu tard',
+    body: (n) =>
+      `Bonjour ${n} ! Présence enregistrée malgré le retard. Ça arrive à tout le monde 😊 Bonne journée !`,
+  },
+  {
+    title: '🚦 Petit retard, mais présent',
+    body: (n) =>
+      `Bonjour ${n} ! Pointage enregistré. Votre manager est informé. Bonne journée !`,
+  },
+  {
+    title: '📋 Arrivée tardive enregistrée',
+    body: (n) =>
+      `Bonjour ${n} ! On vous a bien noté. Prévenez votre responsable en cas d'imprévu. Allez, bonne journée ! 💪`,
+  },
+  {
+    title: '🏙️ Les bouchons, ça arrive !',
+    body: (n) =>
+      `Bonjour ${n} ! Présence enregistrée avec retard. Votre ponctualité habituelle parle pour vous. Bonne journée !`,
+  },
+];
+
+function randomItem<T>(arr: T[]): T {
+  return arr[Math.floor(Math.random() * arr.length)];
+}
+
+// ─── Helper : charger le shift d'un employé pour une date ────────────────────
+async function loadShift(
+  prisma: PrismaService,
+  employeeId: string,
+  date: string,
+  now: Date,
+) {
+  return prisma.employeeShiftAssignment.findFirst({
+    where: {
+      employeeId,
+      OR: [
+        { specificDate: date },
+        {
+          dayOfWeek: congoDayOfWeek(now),
+          specificDate: null,
+          OR: [{ validFrom: null }, { validFrom: { lte: new Date(date) } }],
+          AND: [
+            {
+              OR: [
+                { validUntil: null },
+                { validUntil: { gte: new Date(date) } },
+              ],
+            },
+          ],
+        },
+      ],
+    },
+    include: { shift: true },
+    orderBy: { specificDate: 'desc' },
+  });
+}
+
+/**
+ * Options RÉSERVÉES au code serveur (jamais construites depuis un body HTTP) :
+ *  - actingCompanyId : pointage fait « pour » une entreprise sans compte agissant
+ *    (écran QR / code secret) — remplace la résolution via userId.
+ *  - skipGeofence    : le scan d'un écran fixe est la preuve de présence, le GPS
+ *    (instable) n'est plus exigé.
+ */
+export type PunchMethodValue = 'GPS' | 'KIOSK' | 'QR_SCAN' | 'SECRET_CODE' | 'MANUAL';
+
+export interface AttendanceActingOptions {
+  actingCompanyId?: string;
+  skipGeofence?: boolean;
+  /** Méthode de pointage tracée pour l'admin. Absente = déduite (GPS si l'employé pointe pour lui-même, sinon MANUAL). */
+  method?: PunchMethodValue;
+  /** Nom de l'écran / tablette utilisé (affiché à l'admin). */
+  source?: string;
+  /** IP publique du client, lue par le contrôleur (jamais depuis le body). */
+  clientIp?: string;
+}
+
+@Injectable()
+export class AttendanceCheckService {
+  constructor(
+    private prisma: PrismaService,
+    private gateway: AppGateway,
+    private utils: AttendanceUtilsService,
+    private subscriptionGuard: SubscriptionGuard,
+    private companySiteService: CompanySiteService,
+    private breaks: AttendanceBreakService, // 🆕 pause
+  ) {}
+
+  /** Méthode par défaut quand l'appelant n'en précise pas : soi-même → GPS, pour un autre → MANUAL. */
+  private async defaultPunchMethod(employeeId: string, userId: string): Promise<PunchMethodValue> {
+    if (!userId) return 'MANUAL';
+    return (await resolveUserEmployeeId(this.prisma, userId)) === employeeId ? 'GPS' : 'MANUAL';
+  }
+
+  /**
+   * 🔒 Qui a le droit de pointer POUR cet employé ?
+   * Avant : n'importe quel utilisateur connecté pouvait pointer pour n'importe quel employeeId (UUID),
+   * y compris d'une autre entreprise. Désormais :
+   *  - borne / QR / code secret (actingCompanyId, code serveur) : l'employé doit être de l'entreprise annoncée ;
+   *  - pour SOI-MÊME (fiche liée au compte, même dans une autre entreprise du portefeuille) : OK ;
+   *  - pour un AUTRE : même entreprise active ET (ADMIN/RH/SUPER_ADMIN, ou permission « secrétaire »,
+   *    ou MANAGER pour son département).
+   */
+  private async assertCanPunchFor(
+    employeeId: string,
+    userId: string,
+    opts?: AttendanceActingOptions,
+  ): Promise<void> {
+    const employee = await this.prisma.employee.findUnique({
+      where: { id: employeeId },
+      select: { companyId: true, departmentId: true },
+    });
+    if (!employee) throw new EmployeeNotFoundException(employeeId);
+
+    if (opts?.actingCompanyId) {
+      if (employee.companyId !== opts.actingCompanyId) {
+        throw new ForbiddenException("Cet employé n'appartient pas à cette entreprise.");
+      }
+      return;
+    }
+    if (!userId) throw new ForbiddenException('Action non autorisée.');
+
+    // 1) Pour soi-même
+    if ((await resolveUserEmployeeId(this.prisma, userId)) === employeeId) return;
+
+    // 2) Pour un autre
+    const actor = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { id: true, role: true, companyId: true, canRecordAttendanceForAll: true },
+    });
+    if (!actor?.companyId || employee.companyId !== actor.companyId) {
+      throw new ForbiddenException("Cet employé n'appartient pas à votre entreprise.");
+    }
+    if (['ADMIN', 'HR_MANAGER', 'SUPER_ADMIN'].includes(actor.role as string)) return;
+    if (actor.canRecordAttendanceForAll) return;
+    if (actor.role === 'MANAGER') {
+      const dept = await this.prisma.department.findFirst({
+        where: { managerId: actor.id, companyId: actor.companyId },
+        select: { id: true },
+      });
+      if (dept && employee.departmentId === dept.id) return;
+      throw new ForbiddenException("Vous n'avez accès qu'aux pointages de votre département.");
+    }
+    throw new ForbiddenException('Vous ne pouvez pointer que pour vous-même.');
+  }
+
+  // ============================================================================
+  // ✅ CHECK-IN
+  // ============================================================================
+  async checkIn(
+    dto: CreateAttendanceDto,
+    userId: string,
+    opts?: AttendanceActingOptions,
+  ) {
+    const user: { companyId: string | null; role: any } | null =
+      opts?.actingCompanyId
+        ? { companyId: opts.actingCompanyId, role: 'EMPLOYEE' }
+        : await this.prisma.user.findUnique({
+            where: { id: userId },
+            select: { companyId: true, role: true },
+          });
+    if (!user?.companyId) throw new CompanyNotFoundException();
+
+    // 🔒 L'appelant a-t-il le droit de pointer pour CET employé ?
+    await this.assertCanPunchFor(dto.employeeId, userId, opts);
+
+    // 🚧 Abonnement/essai expiré (ou quota FREE dépassé) → on bloque le
+    // pointage avant toute autre vérification, avec un message adapté à
+    // l'auteur de l'action (RH/admin vs employé — voir assertActionAllowed).
+    await this.subscriptionGuard.assertActionAllowed(user.companyId, user.role);
+
+    const { employeeId, notes, latitude, longitude, accuracy } = dto;
+    const confirmRestDay = (dto as any).confirmRestDay ?? false;
+    const confirmWorkDuringLeave =
+      (dto as any).confirmWorkDuringLeave ?? false;
+
+    if (latitude && longitude) {
+      await this.subscriptionGuard.checkFeatureAccess(
+        user.companyId,
+        'hasAttendanceGPS',
+      );
+    }
+
+    const today = this.utils.getTodayString();
+    const now = new Date();
+
+    // ── Vérifications préliminaires ────────────────────────────────────────
+    const [existing, employee] = await Promise.all([
+      this.prisma.attendance.findFirst({ where: { employeeId, date: today } }),
+      this.prisma.employee.findUnique({ where: { id: employeeId } }),
+    ]);
+
+    if (!employee) throw new EmployeeNotFoundException(employeeId);
+    if (existing?.checkIn)
+      throw new AttendanceAlreadyExistsException(
+        `${employee.firstName} ${employee.lastName}`,
+        today,
+      );
+
+    // ✅ CORRECTIF : un congé approuvé ne bloque plus le pointage — il
+    // demande confirmation, comme pour un jour férié/repos (même pattern
+    // plus bas dans cette méthode). Ça permet le cas "l'employé travaille
+    // pendant son congé" : bulletin normal ce jour-là, sans indemnité
+    // (déjà réglée en décembre) — voir getLeaveImpactForPayroll(). Avant ce
+    // correctif, le pointage était bloqué net, donc ce cas ne pouvait
+    // jamais se produire en pratique.
+    const onLeave = await this.prisma.leave.findFirst({
+      where: {
+        employeeId,
+        status: 'APPROVED',
+        startDate: { lte: new Date(today) },
+        endDate: { gte: new Date(today) },
+      },
+    });
+    if (onLeave && !confirmWorkDuringLeave) {
+      return {
+        requiresConfirmation: true,
+        reason: 'Congé en cours',
+        message:
+          `Vous êtes en congé jusqu'au ${new Date(onLeave.endDate).toLocaleDateString('fr-FR')}. ` +
+          `Si vous travaillez quand même aujourd'hui, confirmez pour pointer normalement.`,
+        isOnLeave: true,
+      };
+    }
+
+    // ── Settings entreprise ────────────────────────────────────────────────
+    const settings = await this.prisma.payrollSettings.findFirst({
+      where: { companyId: user.companyId },
+      orderBy: { effectiveDate: 'desc' },
+      select: {
+        workDays: true,
+        officialStartHour: true,
+        officialStartMinute: true,
+        lateToleranceMinutes: true,
+      },
+    });
+
+    const workDays = (settings?.workDays ?? DEFAULT_WORK_DAYS) as number[];
+    const officialStartHour = settings?.officialStartHour ?? DEFAULT_START_HOUR;
+    // 🆕 minute de début officielle (8h30)
+    const officialStartMinute = Number(settings?.officialStartMinute ?? 0);
+    const lateToleranceMinutes =
+      settings?.lateToleranceMinutes ?? DEFAULT_TOLERANCE_MINUTES;
+
+    // ── Shift individuel ───────────────────────────────────────────────────
+    const sa = await loadShift(this.prisma, employeeId, today, now);
+    const shift = sa?.shift ?? null;
+
+    // ── Jour férié ─────────────────────────────────────────────────────────
+    const holidayRecord = await this.prisma.publicHoliday.findFirst({
+      where: { companyId: user.companyId, date: today },
+    });
+    const isHoliday = !!holidayRecord;
+
+    // ── Confirmation repos/férié ───────────────────────────────────────────
+    // Shift planifié → pas de blocage (travail prévu)
+    // Pas de shift ET (hors workDays OU férié) → confirmation requise
+    const isOutsideWorkDays = !workDays.includes(congoDayOfWeek(now));
+    const needsConfirmation = !shift && (isOutsideWorkDays || isHoliday);
+
+    if (needsConfirmation && !confirmRestDay) {
+      const reason = isHoliday
+        ? `Jour férié : ${holidayRecord.name}`
+        : 'Jour de repos (hors planning entreprise)';
+      return {
+        requiresConfirmation: true,
+        reason,
+        message:
+          `C'est un ${isHoliday ? 'jour férié' : 'jour de repos'}. ` +
+          `Si vous travaillez aujourd'hui, vos heures seront comptées en heures supplémentaires ` +
+          `(+${isHoliday ? '50%/100%' : '50%'}). Confirmez-vous votre présence ?`,
+        isHoliday,
+        isRestDay: true,
+      };
+    }
+
+    // ── Heure de début effective ───────────────────────────────────────────
+    const startHour = shift?.startHour ?? officialStartHour;
+    // 🆕 sans shift : minute officielle de l'entreprise (avant : toujours 0)
+    const startMinute = shift ? (shift.startMinute ?? 0) : officialStartMinute;
+
+    // ── GPS multi-sites ────────────────────────────────────────────────────
+    // ✅ Le backend est désormais la SEULE autorité : si la géolocalisation
+    // est activée pour l'entreprise (hasAttendanceGPS), une position est
+    // exigée et réellement vérifiée. Fini le "Forcer" côté client qui
+    // laissait passer n'importe quoi (notamment les PC, dont la précision
+    // GPS/Wi-Fi est presque toujours mauvaise) — ici on rejette pour de bon.
+    const geofencingConfigured = await this.companySiteService.isGeofencingConfigured(
+      user.companyId,
+    );
+
+    let statusNote = notes;
+    let matchedSiteId: string | null = null;
+    let matchedSiteName: string | null = null;
+    let matchedDistance: number | null = null;
+    let zoneNote: string | null = null; // trace « GPS avec marge » / « IP de confiance »
+    let zoneTrace: any = null; // 🆕 trace structurée (distance, marge, wifi) pour l'écran admin
+
+    if (geofencingConfigured && !opts?.skipGeofence) {
+      // Un site (ou la position principale) est configuré → la position est
+      // OBLIGATOIRE et VÉRIFIÉE ici, côté serveur, quoi qu'ait décidé le
+      // frontend. Plus de bypass "Forcer" possible.
+      if (latitude == null || longitude == null) {
+        throw new LocationRequiredException();
+      }
+
+      const siteCheck = await this.companySiteService.checkPositionInAnySite(
+        user.companyId,
+        latitude,
+        longitude,
+        (la1, lo1, la2, lo2) =>
+          this.utils.getDistanceFromLatLonInMeters(la1, lo1, la2, lo2),
+        {
+          accuracy,
+          clientIp: opts?.clientIp,
+          // personne réellement connectée (sert à l'apprentissage de l'IP du site) ;
+          // pas d'apprentissage en mode borne (actingCompanyId)
+          userId: opts?.actingCompanyId ? null : userId,
+        },
+      );
+
+      if (!siteCheck.matched) {
+        // 🆕 GPS trop flou → message dédié (au lieu d'un trompeur « vous êtes à 800 m »)
+        if (siteCheck.lowAccuracy) {
+          throw new GpsAccuracyTooLowException(siteCheck.accuracy ?? 0);
+        }
+        throw new OutOfGeofenceException(
+          siteCheck.distance ?? 0,
+          siteCheck.siteName,
+          siteCheck.accuracy,
+        );
+      }
+
+      matchedSiteId = siteCheck.siteId;
+      matchedSiteName = siteCheck.siteName;
+      matchedDistance = siteCheck.distance;
+      zoneNote = siteCheck.detail;
+      zoneTrace = siteCheck.trace;
+    }
+    // Si rien n'est configuré pour l'entreprise, le pointage reste possible
+    // sans position (comportement legacy) — rien à vérifier ici.
+
+    // ── Retard ─────────────────────────────────────────────────────────────
+    const tolerance = shift
+      ? SHIFT_LATE_TOLERANCE_MINUTES
+      : lateToleranceMinutes;
+    const isLate = this.utils.isLateCheckIn(
+      now,
+      startHour,
+      tolerance,
+      startMinute,
+    );
+
+    // ── Arrivée anticipée ──────────────────────────────────────────────────
+    const shiftStartThreshold = atCongoTime(now, startHour, startMinute);
+    const isEarly = now < shiftStartThreshold && !shift?.crossesMidnight;
+
+    // ── ✅ Fix TS : cast explicite en AttendanceStatus ─────────────────────
+    const attendanceStatus: AttendanceStatus = isLate
+      ? DayStatusEnum.LATE
+      : DayStatusEnum.PRESENT;
+
+    const punchMethod = opts?.method ?? (await this.defaultPunchMethod(employeeId, userId));
+
+    const attData = {
+      checkIn: now,
+      checkInMethod: punchMethod,
+      checkInSource: opts?.source?.slice(0, 100) ?? zoneNote?.slice(0, 100) ?? null,
+      checkInGeo: zoneTrace ?? undefined, // 🆕
+      checkInLat: latitude ?? null,
+      checkInLon: longitude ?? null,
+      checkInSiteId: matchedSiteId,
+      checkInSiteName: matchedSiteName,
+      checkInDistance: matchedDistance,
+      status: attendanceStatus,
+      notes: statusNote ?? null,
+    } as any;
+
+    // ── Créer ou mettre à jour ─────────────────────────────────────────────
+    const attendance = existing
+      ? await this.prisma.attendance.update({
+          where: { id: existing.id },
+          data: attData,
+        })
+      : await this.prisma.attendance.create({
+          data: {
+            employeeId,
+            companyId: user.companyId,
+            date: today,
+            ...attData,
+          },
+        });
+
+    // ── Notification admin ─────────────────────────────────────────────────
+    // ✅ FIX FUITE MULTI-TENANT : companyId ajouté — sans lui, le gateway
+    // n'a aucun moyen de cibler uniquement les admins de CETTE entreprise.
+    this.gateway.sendAdminNotification({
+      companyId: user.companyId,
+      type: isLate ? 'ALERT' : 'CHECK_IN',
+      employeeId,
+      title: isLate ? '⏰ Retard' : '✅ Pointage',
+      message:
+        `${employee.firstName} ${employee.lastName} — ${now.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })}` +
+        (matchedSiteName ? ` (${matchedSiteName})` : ''),
+      avatar: employee.photoUrl ?? undefined,
+    });
+
+    // ── Réponse enrichie ───────────────────────────────────────────────────
+    if (isEarly) {
+      const msg = randomItem(EARLY_MESSAGES);
+      return {
+        ...attendance,
+        earlyArrival: true,
+        earlyArrivalTitle: msg.title,
+        earlyArrivalMessage: msg.body(
+          employee.firstName,
+          `${startHour}h${String(startMinute).padStart(2, '0')}`,
+        ),
+        shiftStartHour: startHour,
+        shiftStartMinute: startMinute,
+      };
+    }
+
+    if (isLate) {
+      const msg = randomItem(LATE_MESSAGES);
+      return {
+        ...attendance,
+        slightLate: true,
+        slightLateTitle: msg.title,
+        slightLateMessage: msg.body(employee.firstName),
+      };
+    }
+
+    if (confirmRestDay && needsConfirmation) {
+      return {
+        ...attendance,
+        restDayConfirmed: true,
+        message: `Présence enregistrée. Vos heures seront comptées en heures supplémentaires (${isHoliday ? 'jour férié : +50%/+100%' : 'jour de repos : +50%'}).`,
+      };
+    }
+
+    return attendance;
+  }
+
+  // ============================================================================
+  // ✅ CHECK-OUT
+  // ============================================================================
+  async checkOut(
+    dto: CreateAttendanceDto,
+    userId: string,
+    opts?: AttendanceActingOptions,
+  ) {
+    const { employeeId, latitude, longitude, accuracy } = dto;
+    const today = this.utils.getTodayString();
+    const now = new Date();
+
+    // 🔒 L'appelant a-t-il le droit de pointer pour CET employé ?
+    await this.assertCanPunchFor(employeeId, userId, opts);
+
+    const record = await this.prisma.attendance.findFirst({
+      where: { employeeId, date: today },
+    });
+    if (!record) throw new AttendanceCheckOutMissingException();
+    if (record.checkOut) throw new AttendanceAlreadyCheckedOutException();
+    if (!record.checkIn) throw new Error("Heure d'entrée manquante");
+
+    const user: { companyId: string | null; role: any } | null =
+      opts?.actingCompanyId
+        ? { companyId: opts.actingCompanyId, role: 'EMPLOYEE' }
+        : await this.prisma.user.findUnique({
+            where: { id: userId },
+            select: { companyId: true, role: true },
+          });
+    if (!user?.companyId) throw new CompanyNotFoundException();
+
+    // ℹ️ Volontairement PAS de blocage abonnement ici : si l'accès a été
+    // coupé pendant qu'un employé était déjà en poste (check-in fait avant
+    // l'échéance), il doit pouvoir pointer sa sortie normalement — sinon on
+    // fabrique un pointage "oublié" et un calcul d'heures faux. Le blocage
+    // se fait à l'entrée (checkIn), pas à la sortie.
+
+    const employee = await this.prisma.employee.findUnique({
+      where: { id: employeeId },
+      select: { firstName: true, lastName: true, photoUrl: true },
+    });
+    if (!employee) throw new EmployeeNotFoundException(employeeId);
+
+    // ── GPS multi-sites (même règle qu'au checkIn) ───────────────────────────
+    let checkOutSiteId: string | null = null;
+    let checkOutSiteName: string | null = null;
+    let checkOutDistance: number | null = null;
+    let checkOutZoneNote: string | null = null; // trace « GPS avec marge » / « IP de confiance »
+    let checkOutZoneTrace: any = null; // 🆕 trace structurée pour l'écran admin
+
+    const geofencingConfiguredOut =
+      await this.companySiteService.isGeofencingConfigured(user.companyId);
+
+    if (geofencingConfiguredOut && !opts?.skipGeofence) {
+      if (latitude == null || longitude == null) {
+        throw new LocationRequiredException();
+      }
+      const siteCheckOut = await this.companySiteService.checkPositionInAnySite(
+        user.companyId,
+        latitude,
+        longitude,
+        (la1, lo1, la2, lo2) =>
+          this.utils.getDistanceFromLatLonInMeters(la1, lo1, la2, lo2),
+        {
+          accuracy,
+          clientIp: opts?.clientIp,
+          // personne réellement connectée (sert à l'apprentissage de l'IP du site) ;
+          // pas d'apprentissage en mode borne (actingCompanyId)
+          userId: opts?.actingCompanyId ? null : userId,
+        },
+      );
+      if (!siteCheckOut.matched) {
+        if (siteCheckOut.lowAccuracy) {
+          throw new GpsAccuracyTooLowException(siteCheckOut.accuracy ?? 0);
+        }
+        throw new OutOfGeofenceException(
+          siteCheckOut.distance ?? 0,
+          siteCheckOut.siteName,
+          siteCheckOut.accuracy,
+        );
+      }
+      checkOutSiteId = siteCheckOut.siteId;
+      checkOutSiteName = siteCheckOut.siteName;
+      checkOutDistance = siteCheckOut.distance;
+      checkOutZoneNote = siteCheckOut.detail;
+      checkOutZoneTrace = siteCheckOut.trace;
+    }
+
+    // ── Settings ───────────────────────────────────────────────────────────
+    const ps = await this.prisma.payrollSettings.findFirst({
+      where: { companyId: user.companyId },
+      orderBy: { effectiveDate: 'desc' },
+      select: {
+        workHoursPerDay: true,
+        officialStartHour: true,
+        officialStartMinute: true,
+        officialEndHour: true,
+        overtimeEnabled: true,
+        workDays: true,
+      } as any,
+    });
+
+    const workHoursPerDay = Number(
+      ps?.workHoursPerDay ?? DEFAULT_WORK_HOURS_PER_DAY,
+    );
+    const officialStartHour = Number(
+      (ps as any)?.officialStartHour ?? DEFAULT_START_HOUR,
+    );
+    const officialStartMinute = Number((ps as any)?.officialStartMinute ?? 0);
+    const overtimeEnabled = (ps as any)?.overtimeEnabled ?? true;
+    const workDays = ((ps as any)?.workDays ?? DEFAULT_WORK_DAYS) as number[];
+    // 🆕 Fin de journée = officialEndHour (source de vérité) ; repli sur début + durée si absent
+    const officialEndHour = Number(
+      (ps as any)?.officialEndHour ?? officialStartHour + workHoursPerDay,
+    );
+
+    // ── Shift individuel ───────────────────────────────────────────────────
+    const sa = await loadShift(this.prisma, employeeId, today, now);
+    const shift = sa?.shift ?? null;
+
+    // ── Jour férié ─────────────────────────────────────────────────────────
+    const holiday = await this.prisma.publicHoliday.findFirst({
+      where: { companyId: user.companyId, date: today },
+    });
+    const isHoliday = !!holiday;
+
+    // ── Contexte HS ────────────────────────────────────────────────────────
+    const ctx = this.utils.buildOvertimeContext({
+      shift,
+      officialEndH: officialEndHour,
+      officialEndMin: 0,
+      workHoursPerDay,
+      workDays,
+      isHoliday,
+      attendanceDate: new Date(today),
+      overtimeEnabled,
+    });
+
+    // ── Bridage arrivée anticipée ──────────────────────────────────────────
+    const startH = shift?.startHour ?? officialStartHour;
+    const startMin = shift ? (shift.startMinute ?? 0) : officialStartMinute;
+    const realCheckIn = new Date(record.checkIn);
+    const shiftStartThreshold = atCongoTime(realCheckIn, startH, startMin);
+    const effectiveCheckIn =
+      realCheckIn < shiftStartThreshold && !shift?.crossesMidnight
+        ? shiftStartThreshold
+        : realCheckIn;
+
+    // ── Calcul HS ──────────────────────────────────────────────────────────
+    const ot = this.utils.calculateOvertimeV3(effectiveCheckIn, now, ctx);
+
+    // ── 🆕 Heures en plus INFORMATIVES (HS non payées = forfait) ───────────
+    // Ne touche ni normalHours ni la paie : sert uniquement à l'employé et à l'admin
+    // pour voir ce qui a été fait au-delà de l'horaire. Seuil 15 min pour éviter le bruit.
+    let extraHoursInfo: number | null = null;
+    if (!overtimeEnabled) {
+      let extra: number;
+      if (ctx.isRestDay || ctx.isHoliday) {
+        extra = (now.getTime() - effectiveCheckIn.getTime()) / 3_600_000; // tout le temps travaillé
+      } else {
+        let shiftEndInfo = atCongoTime(effectiveCheckIn, ctx.shiftEndHour, ctx.shiftEndMinute);
+        if (ctx.crossesMidnight && shiftEndInfo <= effectiveCheckIn) {
+          shiftEndInfo = new Date(shiftEndInfo.getTime() + 86_400_000);
+        }
+        const from = Math.max(shiftEndInfo.getTime(), effectiveCheckIn.getTime());
+        extra = (now.getTime() - from) / 3_600_000;
+      }
+      extraHoursInfo = extra >= 0.25 ? parseFloat(extra.toFixed(2)) : null;
+    }
+
+    // ── 🆕 Pause : le temps de pause n'est pas compté ──────────────────────
+    // Pause ouverte à la sortie = « reprise non pointée » : clôturée à la durée prévue.
+    const breakMinutes = await this.breaks.closeOpenBreakAtExit(record.id, now);
+    const breakHours = breakMinutes / 60;
+    if (breakHours > 0) {
+      ot.normalHours = parseFloat(Math.max(0, ot.normalHours - breakHours).toFixed(2));
+    }
+
+    const totalHours = parseFloat(
+      Math.max(
+        0,
+        (now.getTime() - effectiveCheckIn.getTime()) / 3_600_000 - breakHours,
+      ).toFixed(2),
+    );
+
+    // ── Avertissement limite 20h/semaine ───────────────────────────────────
+    const weeklyOT = await this.getWeeklyOvertimeHours(
+      employeeId,
+      user.companyId,
+      now,
+    );
+    const sessionOT =
+      ot.overtime10 + ot.overtime25 + ot.overtime50 + ot.overtime100;
+    const check = this.utils.validateWeeklyOvertimeLimit(weeklyOT + sessionOT);
+    if (!check.isValid) {
+      // ✅ FIX FUITE MULTI-TENANT
+      this.gateway.sendAdminNotification({
+        companyId: user.companyId,
+        type: 'ALERT',
+        employeeId,
+        title: '⚠️ Limite HS semaine',
+        message: check.message!,
+        avatar: employee.photoUrl ?? undefined,
+      });
+    }
+
+    // ── ✅ Fix TS : statut final casté en AttendanceStatus ─────────────────
+    const finalStatus: AttendanceStatus = [
+      DayStatusEnum.LATE,
+      DayStatusEnum.REMOTE,
+    ].includes(record.status as DayStatusEnum)
+      ? record.status
+      : DayStatusEnum.PRESENT;
+
+    // ── Sauvegarde ─────────────────────────────────────────────────────────
+    // Note : overtime10 stocke les heures de jour brutes
+    // La ventilation ot10/ot25 finale se fait dans attendance-summary
+    const updated = await this.prisma.attendance.update({
+      where: { id: record.id },
+      data: {
+        checkOut: now,
+        checkOutMethod: opts?.method ?? (await this.defaultPunchMethod(employeeId, userId)),
+        checkOutSource: opts?.source?.slice(0, 100) ?? checkOutZoneNote?.slice(0, 100) ?? null,
+        checkOutGeo: checkOutZoneTrace ?? undefined, // 🆕
+        checkOutLat: latitude ?? null,
+        checkOutLon: longitude ?? null,
+        checkOutSiteId,
+        checkOutSiteName,
+        checkOutDistance,
+        extraHoursInfo,
+        breakMinutes,
+        totalHours,
+        normalHours: ot.normalHours,
+        overtime10: ot.overtime10,
+        overtime25: ot.overtime25,
+        overtime50: ot.overtime50,
+        overtime100: ot.overtime100,
+        isNightShift: ot.isNightShift,
+        status: finalStatus,
+      } as any,
+    });
+
+    // ── Notification admin ─────────────────────────────────────────────────
+    // ✅ FIX FUITE MULTI-TENANT
+    this.gateway.sendAdminNotification({
+      companyId: user.companyId,
+      type: 'CHECK_OUT',
+      employeeId,
+      title: sessionOT > 0 ? '👋 Sortie + HS' : '👋 Sortie',
+      message:
+        `${employee.firstName} ${employee.lastName} — ${totalHours}h travaillées` +
+        (sessionOT > 0 ? ` (dont ${sessionOT.toFixed(1)}h sup)` : ''),
+      avatar: employee.photoUrl ?? undefined,
+    });
+
+    return updated;
+  }
+
+  // ============================================================================
+  // ✅ CORRECTION — Inchangé
+  // ============================================================================
+  async correctAttendanceDay(userId: string, body: {
+    employeeId: string; date: string; checkIn?: string; checkOut?: string;
+    reason: string; breakStart?: string; breakEnd?: string;
+  }, req?: any) {
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (!user?.companyId || !['ADMIN', 'HR_MANAGER', 'SUPER_ADMIN'].includes(user.role)) {
+      throw new ForbiddenException('Accès refusé');
+    }
+    const employee = await this.prisma.employee.findFirst({
+      where: { id: body.employeeId, companyId: user.companyId },
+    });
+    if (!employee) throw new ForbiddenException('Employé inaccessible');
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(body.date) || !body.checkIn ||
+        Number.isNaN(new Date(body.checkIn).getTime()) ||
+        congoDateString(new Date(body.checkIn)) !== body.date || body.date > congoDateString()) {
+      throw new BadRequestException('Renseignez une entrée valide pour la journée sélectionnée');
+    }
+    if (!body.reason || body.reason.trim().length < 3) {
+      throw new BadRequestException('Motif obligatoire (3 caractères minimum)');
+    }
+    return this.prisma.$transaction(async (tx) => {
+      const attendance = await tx.attendance.upsert({
+        where: { employeeId_date: { employeeId: body.employeeId, date: body.date } },
+        create: { companyId: user.companyId!, employeeId: body.employeeId, date: body.date, status: 'ABSENT_UNPAID' },
+        update: {},
+      });
+      return this.correctAttendance(attendance.id, userId, { ...body, status: 'PRESENT' }, req, tx);
+    }, { timeout: 15000 });
+  }
+
+  async correctAttendance(
+    attendanceId: string,
+    userId: string,
+    updates: {
+      status?: string;
+      checkIn?: Date | string;
+      checkOut?: Date | string;
+      totalHours?: number;
+      breakStart?: Date | string; // 🆕 pause
+      breakEnd?: Date | string; // 🆕 pause
+      removeBreak?: boolean; // 🆕 pause
+      reason: string;
+    },
+    req?: any,
+    db: any = this.prisma,
+  ) {
+    const user = await db.user.findUnique({
+      where: { id: userId },
+      select: {
+        firstName: true,
+        lastName: true,
+        companyId: true,
+        role: true,
+        canRecordAttendanceForAll: true, // 🆕 permission "secrétaire" pointage
+      },
+    });
+    const hasStandardRole = user
+      ? ['ADMIN', 'HR_MANAGER', 'SUPER_ADMIN', 'MANAGER'].includes(user.role)
+      : false;
+    // 🆕 EMPLOYEE avec la permission "secrétaire" a aussi le droit de corriger
+    const hasSecretaryPermission = !!user?.canRecordAttendanceForAll;
+    if (!user || !(hasStandardRole || hasSecretaryPermission)) {
+      throw new Error('Accès refusé : droits insuffisants');
+    }
+
+    const current = await db.attendance.findUnique({
+      where: { id: attendanceId },
+      include: {
+        pause: true, // 🆕 pause de la journée
+        employee: { select: { id: true, firstName: true, lastName: true } },
+      },
+    });
+    if (!current) throw new Error('Présence introuvable');
+    // ✅ Isolation multi-entreprise : on ne corrige que les pointages de SA société
+    if (current.companyId !== user.companyId) {
+      throw new Error('Accès refusé : ce pointage appartient à une autre entreprise');
+    }
+
+    const checkInDate = updates.checkIn ? new Date(updates.checkIn) : undefined;
+    const checkOutDate = updates.checkOut
+      ? new Date(updates.checkOut)
+      : undefined;
+
+    // ✅ Cohérence : la sortie doit être après l'entrée
+    const effIn = checkInDate ?? current.checkIn ?? undefined;
+    const effOut = checkOutDate ?? current.checkOut ?? undefined;
+    if (effIn && effOut && effOut.getTime() <= effIn.getTime()) {
+      throw new Error("L'heure de sortie doit être après l'heure d'entrée");
+    }
+
+    // ✅ Présent / Retard / Télétravail = HEURES OBLIGATOIRES (jamais « présent sans heure »).
+    //    Aujourd'hui : l'entrée suffit (la personne peut encore être au travail).
+    //    Jour passé  : entrée ET sortie.
+    const requestedStatus = String(updates.status || current.status);
+    const isPresenceStatus = ['PRESENT', 'LATE', 'REMOTE'].includes(requestedStatus);
+    if (isPresenceStatus) {
+      if (!effIn) throw new Error("L'heure d'entrée est obligatoire pour un jour présent");
+      if (!effOut && String(current.date).slice(0, 10) < congoDateString()) {
+        throw new Error("L'heure de sortie est obligatoire pour un jour passé");
+      }
+    }
+    // ── 🆕 Pause : insertion / modification / suppression ──────────────────
+    // Le temps réellement travaillé = (sortie − entrée) − pause.
+    const existingPause: any = (current as any).pause ?? null;
+    const oldBreakMinutes = Number((current as any).breakMinutes ?? 0);
+    const fmtPause = (a: Date, b: Date) => `${a.toISOString()}→${b.toISOString()}`;
+    let breakChange:
+      | { action: 'upsert'; start: Date; end: Date; minutes: number }
+      | { action: 'delete'; minutes: 0 }
+      | null = null;
+
+    const bStartIn = updates.breakStart ? new Date(updates.breakStart) : undefined;
+    const bEndIn = updates.breakEnd ? new Date(updates.breakEnd) : undefined;
+    if (updates.removeBreak) {
+      if (existingPause) breakChange = { action: 'delete', minutes: 0 };
+    } else if (bStartIn || bEndIn) {
+      const bs = bStartIn ?? (existingPause ? new Date(existingPause.startedAt) : undefined);
+      const be =
+        bEndIn ?? (existingPause?.endedAt ? new Date(existingPause.endedAt) : undefined);
+      if (!bs || !be || Number.isNaN(bs.getTime()) || Number.isNaN(be.getTime())) {
+        throw new Error('Renseignez le début ET la fin de la pause');
+      }
+      if (be.getTime() <= bs.getTime()) {
+        throw new Error('La fin de la pause doit être après son début');
+      }
+      if (!effIn) throw new Error("Impossible d'ajouter une pause sans heure d'entrée");
+      if (bs.getTime() < effIn.getTime()) {
+        throw new Error("La pause ne peut pas commencer avant l'heure d'entrée");
+      }
+      const upper = effOut ?? new Date();
+      if (be.getTime() > upper.getTime()) {
+        throw new Error(
+          effOut
+            ? "La pause doit se terminer avant l'heure de sortie"
+            : 'La pause ne peut pas se terminer dans le futur',
+        );
+      }
+      const sameAsExisting =
+        existingPause?.endedAt &&
+        new Date(existingPause.startedAt).getTime() === bs.getTime() &&
+        new Date(existingPause.endedAt).getTime() === be.getTime();
+      if (!sameAsExisting) {
+        breakChange = {
+          action: 'upsert',
+          start: bs,
+          end: be,
+          minutes: Math.round((be.getTime() - bs.getTime()) / 60_000),
+        };
+      }
+    }
+    const newBreakMinutes = breakChange ? breakChange.minutes : oldBreakMinutes;
+
+    // ✅ Durée recalculée quand les heures OU la pause changent (pause déduite),
+    // sauf si la durée est fournie explicitement.
+    let recomputedTotalHours: number | undefined;
+    if (
+      updates.totalHours == null &&
+      (checkInDate || checkOutDate || breakChange) &&
+      effIn &&
+      effOut
+    ) {
+      recomputedTotalHours = parseFloat(
+        Math.max(
+          0,
+          (effOut.getTime() - effIn.getTime()) / 3_600_000 - newBreakMinutes / 60,
+        ).toFixed(2),
+      );
+    }
+    // Heures normales : on retire/rend uniquement la variation de pause
+    const breakDeltaHours = (newBreakMinutes - oldBreakMinutes) / 60;
+    const adjustedNormalHours =
+      breakChange && current.normalHours != null && breakDeltaHours !== 0
+        ? parseFloat(
+            Math.max(0, Number(current.normalHours) - breakDeltaHours).toFixed(2),
+          )
+        : undefined;
+
+    // ── 🆕 Recalcul des heures / heures sup à partir des heures corrigées ───
+    // Avant : seule la durée était recalculée ; les heures sup restaient celles de
+    // l'ancien pointage. Si les heures sup sont déjà en validation/approuvées/refusées,
+    // on ne les touche pas (la durée est quand même mise à jour) : l'appelant en est informé.
+    const otLocked = ['PENDING_APPROVAL', 'APPROVED', 'REJECTED'].includes(
+      String((current as any).overtimeStatus ?? ''),
+    );
+    let recomputed: DayTotals | null = null;
+    if (
+      isPresenceStatus &&
+      effIn &&
+      effOut &&
+      (checkInDate || checkOutDate || updates.status || breakChange)
+    ) {
+      recomputed = await computeDayTotals(db, this.utils, {
+        companyId: current.companyId,
+        employeeId: current.employeeId,
+        date: String(current.date).slice(0, 10),
+        checkIn: effIn,
+        checkOut: effOut,
+        breakMinutes: newBreakMinutes,
+      });
+    }
+    // PRESENT ⇄ LATE décidé par l'heure d'entrée (mêmes seuils que le pointage normal)
+    const statusToWrite = (
+      recomputed && (requestedStatus === 'PRESENT' || requestedStatus === 'LATE')
+        ? recomputed.isLate ? 'LATE' : 'PRESENT'
+        : requestedStatus
+    ) as AttendanceStatus;
+
+    const changes: AuditChange[] = [];
+    if (statusToWrite !== current.status) {
+      changes.push({
+        field: 'status',
+        oldValue: current.status,
+        newValue: statusToWrite,
+      });
+    }
+    if (checkInDate && checkInDate.getTime() !== current.checkIn?.getTime()) {
+      changes.push({
+        field: 'checkIn',
+        oldValue: current.checkIn?.toISOString(),
+        newValue: checkInDate.toISOString(),
+      });
+    }
+    if (
+      checkOutDate &&
+      checkOutDate.getTime() !== current.checkOut?.getTime()
+    ) {
+      changes.push({
+        field: 'checkOut',
+        oldValue: current.checkOut?.toISOString(),
+        newValue: checkOutDate.toISOString(),
+      });
+    }
+
+    if (recomputed && Number(current.totalHours ?? NaN) !== recomputed.totalHours) {
+      changes.push({
+        field: 'totalHours',
+        oldValue: current.totalHours != null ? String(current.totalHours) : undefined,
+        newValue: String(recomputed.totalHours),
+      });
+    }
+
+    if (breakChange) {
+      changes.push({
+        field: 'pause',
+        oldValue: existingPause?.endedAt
+          ? fmtPause(new Date(existingPause.startedAt), new Date(existingPause.endedAt))
+          : 'aucune',
+        newValue:
+          breakChange.action === 'delete'
+            ? 'supprimée'
+            : fmtPause(breakChange.start, breakChange.end),
+      });
+    }
+
+    await db.attendanceLog.create({
+      data: {
+        attendanceId,
+        modifiedBy: userId,
+        field: changes.map((c) => c.field).join(','),
+        oldValue: changes.map((c) => c.oldValue || '').join(','),
+        newValue: changes.map((c) => c.newValue).join(','),
+        reason: updates.reason,
+        // 🆕 Trace : QUOI (création / correction) et QUI (rôle au moment de l'action)
+        action: current.checkIn || current.checkOut ? 'CORRECTION' : 'MANUAL_CREATE',
+        actorRole: user.role,
+        ipAddress: req?.ip,
+        userAgent: req?.headers?.['user-agent'],
+      } as any,
+    });
+
+    const attendanceUpdate = db.attendance.update({
+      where: { id: attendanceId },
+      data: {
+        status: statusToWrite,
+        ...(updates.checkIn && !current.checkIn ? { checkInMethod: 'MANUAL' } : {}),
+        ...(updates.checkOut && !current.checkOut ? { checkOutMethod: 'MANUAL' } : {}),
+        checkIn: updates.checkIn || current.checkIn,
+        checkOut: updates.checkOut || current.checkOut,
+        totalHours:
+          recomputed?.totalHours ??
+          updates.totalHours ??
+          recomputedTotalHours ??
+          current.totalHours,
+        ...(breakChange ? { breakMinutes: newBreakMinutes } : {}),
+        ...(recomputed && !otLocked
+          ? {
+              normalHours: recomputed.normalHours,
+              overtime10: recomputed.overtime10,
+              overtime25: recomputed.overtime25,
+              overtime50: recomputed.overtime50,
+              overtime100: recomputed.overtime100,
+              isNightShift: recomputed.isNightShift,
+            }
+          : adjustedNormalHours !== undefined
+            ? { normalHours: adjustedNormalHours }
+            : {}),
+        notes: `${current.notes || ''}\n[Modifié ${new Date().toLocaleString('fr-FR')} par ${user.firstName} ${user.lastName} — ${updates.reason}]`,
+      },
+    });
+
+    // 🆕 La pause et le pointage sont modifiés ensemble (tout ou rien)
+    let updated: any;
+    if (breakChange?.action === 'upsert') {
+      const bc = breakChange;
+      const pauseWrite = (db as any).attendanceBreak.upsert({
+        where: { attendanceId },
+        create: {
+          attendanceId,
+          companyId: current.companyId,
+          employeeId: current.employeeId,
+          startedAt: bc.start,
+          expectedEndAt: bc.end,
+          endedAt: bc.end,
+          minutes: bc.minutes,
+          lateMinutes: 0,
+          resumedAuto: false,
+          endMethod: 'MANUAL',
+          editedBy: userId,
+          editReason: updates.reason,
+          editedAt: new Date(),
+        },
+        update: {
+          startedAt: bc.start,
+          endedAt: bc.end,
+          minutes: bc.minutes,
+          lateMinutes: 0,
+          resumedAuto: false,
+          endMethod: 'MANUAL',
+          editedBy: userId,
+          editReason: updates.reason,
+          editedAt: new Date(),
+        },
+      });
+      [, updated] = await (db.$transaction ? db.$transaction([pauseWrite, attendanceUpdate]) : Promise.all([pauseWrite, attendanceUpdate]));
+    } else if (breakChange?.action === 'delete') {
+      const pauseDelete = (db as any).attendanceBreak.delete({
+        where: { attendanceId },
+      });
+      [, updated] = await (db.$transaction ? db.$transaction([pauseDelete, attendanceUpdate]) : Promise.all([pauseDelete, attendanceUpdate]));
+    } else {
+      updated = await attendanceUpdate;
+    }
+
+    const admins = await db.user.findMany({
+      where: {
+        companyId: user.companyId,
+        role: { in: ['ADMIN', 'HR_MANAGER', 'SUPER_ADMIN'] },
+        isActive: true,
+        id: { not: userId },
+      },
+      select: { id: true },
+    });
+
+    if (admins.length > 0) {
+      await db.notification.createMany({
+        data: admins.map((a) => ({
+          userId: a.id,
+          type: 'ATTENDANCE_CORRECTION',
+          title: '✏️ Correction de pointage',
+          message: `${user.firstName} ${user.lastName} a corrigé la présence de ${current.employee.firstName} ${current.employee.lastName} (${updates.reason})`,
+          link: '/presences',
+          metadata: {
+            attendanceId,
+            employeeId: current.employee.id,
+            date: current.date,
+            correctorName: `${user.firstName} ${user.lastName}`,
+            reason: updates.reason,
+            changedFields: changes.map((c) => c.field).join(', '),
+          },
+        })),
+      });
+    }
+
+    // ✅ FIX FUITE MULTI-TENANT
+    this.gateway.sendAdminNotification({
+      companyId: user.companyId,
+      type: 'ATTENDANCE_CORRECTION',
+      employeeId: current.employee.id,
+      title: '✏️ Correction',
+      message: `${user.firstName} ${user.lastName} — ${updates.reason}`,
+    });
+
+    return {
+      success: true,
+      attendance: updated,
+      changes,
+      // null = pas de recalcul demandé ; false = heures sup verrouillées (déjà en validation)
+      overtimeRecalculated: recomputed ? !otLocked : null,
+    };
+  }
+
+  // ============================================================================
+  // ✅ SUPPRESSION — réservée aux administrateurs
+  // ============================================================================
+  // Suppression définitive (pas de "corbeille") — mais on garde une trace
+  // indépendante dans AttendanceDeletionLog, qui n'est PAS liée par clé
+  // étrangère à l'Attendance supprimée (donc elle survit à la suppression,
+  // contrairement à AttendanceLog qui est en cascade et disparaîtrait avec
+  // la ligne). C'est volontaire : on privilégie une suppression simple et
+  // sûre pour tout le reste de l'app (stats, paie, exports...) plutôt qu'un
+  // "soft delete" qu'il aurait fallu filtrer manuellement dans une bonne
+  // dizaine de fichiers différents — au prix de ne pas pouvoir "annuler"
+  // une suppression.
+  async deleteAttendance(
+    attendanceId: string,
+    userId: string,
+    reason: string,
+    req?: any,
+  ): Promise<{ success: boolean }> {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { firstName: true, lastName: true, companyId: true, role: true },
+    });
+
+    // ✅ Réservé aux rôles avec autorité RH : admins + RH manager.
+    if (!user || !['ADMIN', 'HR_MANAGER', 'SUPER_ADMIN'].includes(user.role)) {
+      throw new Error(
+        'Accès refusé : la suppression est réservée aux administrateurs',
+      );
+    }
+
+    if (!reason || reason.trim().length < 3) {
+      throw new Error('Un motif de suppression est requis');
+    }
+
+    const attendance = await this.prisma.attendance.findUnique({
+      where: { id: attendanceId },
+      include: {
+        employee: { select: { firstName: true, lastName: true } },
+      },
+    });
+
+    // ✅ Vérification d'appartenance à l'entreprise — même message dans les
+    // deux cas pour ne pas révéler l'existence d'un pointage chez une autre
+    // entreprise.
+    if (!attendance || attendance.companyId !== user.companyId) {
+      throw new Error('Présence introuvable');
+    }
+
+    await this.prisma.attendanceDeletionLog.create({
+      data: {
+        companyId: user.companyId,
+        employeeId: attendance.employeeId,
+        attendanceDate: attendance.date,
+        checkIn: attendance.checkIn,
+        checkOut: attendance.checkOut,
+        deletedBy: userId,
+        reason: reason.trim(),
+        ipAddress: req?.ip,
+        userAgent: req?.headers?.['user-agent'],
+      },
+    });
+
+    await this.prisma.attendance.delete({ where: { id: attendanceId } });
+
+    // ✅ FIX FUITE MULTI-TENANT — c'était ce cas précisément que tu avais
+    // repéré : la suppression d'un pointage diffusait sans companyId.
+    this.gateway.sendAdminNotification({
+      companyId: user.companyId,
+      type: 'ATTENDANCE_CORRECTION',
+      employeeId: attendance.employeeId,
+      title: '🗑️ Pointage supprimé',
+      message: `${user.firstName} ${user.lastName} a supprimé le pointage du ${attendance.date} de ${attendance.employee.firstName} ${attendance.employee.lastName} (${reason})`,
+    });
+
+    return { success: true };
+  }
+
+  // ============================================================================
+  // Helpers
+  // ============================================================================
+  private async getWeeklyOvertimeHours(
+    employeeId: string,
+    companyId: string,
+    date: Date,
+  ): Promise<number> {
+    const monday = this.utils.getMondayOfWeek(this.utils.createLocalDate(this.utils.formatDate(date))); // 🕐 semaine du Congo
+    const sunday = new Date(monday);
+    sunday.setDate(monday.getDate() + 6);
+
+    const records = await this.prisma.attendance.findMany({
+      where: {
+        employeeId,
+        companyId,
+        date: {
+          gte: this.utils.formatDate(monday),
+          lte: this.utils.formatDate(sunday),
+        },
+      },
+    });
+
+    return records.reduce(
+      (sum, r) =>
+        sum +
+        Number((r as any).overtime10 || 0) +
+        Number((r as any).overtime25 || 0) +
+        Number((r as any).overtime50 || 0) +
+        Number((r as any).overtime100 || 0),
+      0,
+    );
+  }
+}

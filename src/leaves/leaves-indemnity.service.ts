@@ -1,0 +1,1206 @@
+// ============================================================================
+// 📁 src/leaves/leaves-indemnity.service.ts
+// ✅ Extrait de l'ancien leaves.service.ts monolithique (découpage Phase 7).
+// ✅ Tout ce qui concerne le CALCUL DE L'INDEMNITÉ DE CONGÉ et son export
+//    vers la paie : moyenne 12 mois (ou maintien du salaire courant, selon
+//    la méthode choisie par l'entreprise), impact mensuel pour la paie,
+//    provision comptable pour congés non pris. Logique inchangée depuis
+//    l'original, seulement déplacée dans son propre service.
+// ============================================================================
+
+import { BadRequestException, Injectable, Logger } from '@nestjs/common';
+import { PrismaService } from '../prisma/prisma.service';
+import { legalAtPeriod } from '../legal-parameters/legal-parameters.core';
+import * as WorkingDays from '../common/working-days.util';
+import { getSeniorityDaysForConvention } from './config/leave-seniority-conventions';
+import {
+  resolveCycleWindow,
+  fullCycleIndemnityDays,
+  leaveEligibleEmployeeFilter,
+} from './leaves-common.util';
+import {
+  CONGO_LEAVE,
+  LeaveImpactForPayroll,
+  LeaveProvisionResult,
+} from './leaves.constants';
+
+/** Une ligne de la fenêtre de calcul (un mois, ou un élément ajouté hors mois). */
+export interface IndemnityBreakdownItem {
+  year?: number;
+  month?: number;
+  label?: string;
+  gross: number;
+  /** REAL = bulletin réel · CURRENT = brut propre du mois de paie · ESTIMATED = estimé (bulletin pas encore généré)
+   *  INDEMNITY = indemnité de congé déjà versée qui remplace le mois de repos · INDEMNITY_EXTRA = indemnité précédente ajoutée
+   *  OPENING = cumul déclaré à l'embauche · MISSING = aucun bulletin ce mois-là · FUTURE = mois pas encore atteint */
+  kind: 'REAL' | 'CURRENT' | 'ESTIMATED' | 'INDEMNITY' | 'INDEMNITY_EXTRA' | 'OPENING' | 'MISSING' | 'FUTURE';
+}
+export interface IndemnityCycleBreakdown {
+  from: string; // YYYY-MM-DD
+  to: string;
+  isFirstCycle: boolean;
+  divisor: number;
+  sum: number;
+  averageMonthly: number;
+  days: number;
+  amount: number;
+  items: IndemnityBreakdownItem[];
+}
+
+@Injectable()
+export class LeavesIndemnityService {
+  private readonly logger = new Logger(LeavesIndemnityService.name);
+
+  constructor(private prisma: PrismaService) {}
+
+  async resolveAnnualIndemnityDays(leave: {
+    payrollIndemnityDays?: unknown; payrollSeniorityDays?: unknown;
+    debitedCycleStartDate?: Date | null; startDate?: Date;
+  }, employeeId: string, companyId: string) {
+    let seniorityDays = Number(leave.payrollSeniorityDays ?? 0);
+    if (leave.payrollSeniorityDays == null) {
+      const [employee, company] = await Promise.all([
+        this.prisma.employee.findUnique({ where: { id: employeeId }, select: { hireDate: true } }),
+        this.prisma.company.findUnique({ where: { id: companyId }, select: { appliesSeniorityLeaveBonus: true, leaveConventionKey: true } }),
+      ]);
+      if (employee?.hireDate && company?.appliesSeniorityLeaveBonus !== false) {
+        const hire = new Date(employee.hireDate);
+        const reference = new Date(leave.debitedCycleStartDate ?? leave.startDate ?? hire);
+        // Années révolues : diviser les millisecondes par 365,25 sous-compte
+        // certaines dates anniversaires exactes (5 ans devenaient 4,999 ans).
+        let years = reference.getFullYear() - hire.getFullYear();
+        if (reference.getMonth() < hire.getMonth() ||
+            (reference.getMonth() === hire.getMonth() && reference.getDate() < hire.getDate())) years--;
+        seniorityDays = getSeniorityDaysForConvention(company?.leaveConventionKey ?? 'GENERALE', Math.max(0, years));
+      }
+    }
+    seniorityDays = Math.max(0, seniorityDays || 0);
+    return {
+      totalDays: fullCycleIndemnityDays(leave.payrollIndemnityDays, seniorityDays),
+      seniorityDays,
+    };
+  }
+
+  // ============================================================================
+  // 📅 CYCLES DE RÉFÉRENCE — glissants depuis le dernier retour de congé
+  // ============================================================================
+  // ✅ CORRECTIF (demande explicite) : remplace l'ancien système à 3 choix
+  //    (JANUARY / JUNE / HIRE_DATE, calendaires fixes) par UNE seule règle
+  //    universelle : la période de référence redémarre TOUJOURS le
+  //    lendemain de la fin du dernier congé ANNUAL réellement pris (ou à la
+  //    date d'embauche si jamais pris), puis avance par blocs de 12 mois.
+  //    Un cycle calendaire fixe pouvait retomber sur un mois où l'employé
+  //    était justement en congé (donc sans bulletin) — la règle glissante
+  //    ne peut plus jamais recréer ce trou : on ne compte QUE des mois
+  //    effectivement travaillés depuis le retour.
+  //    Retourne tous les cycles de 12 mois "dus" (complétés ou en cours)
+  //    entre sinceDate et le mois de paie (anchor).
+  // ============================================================================
+  private getAllDueCyclesRolling(
+    sinceDate: Date,
+    anchorYear: number,
+    anchorMonth: number, // 1-12 — mois du bulletin où l'indemnité est payée
+  ): Array<{ from: Date; to: Date }> {
+    const anchor = new Date(anchorYear, anchorMonth - 1, 1);
+    const windows: Array<{ from: Date; to: Date }> = [];
+    let endMonth = anchor;
+
+    // Le dernier bloc de référence se termine au mois de paiement.
+    // L'anniversaire d'embauche ne doit pas effacer les bulletins de janvier
+    // à mai d'un salarié embauché en juin, payé pour son congé en octobre.
+    // Un vrai retour de congé reste une borne basse : aucun mois du cycle
+    // précédent n'est repris. Les blocs suivants ne se chevauchent jamais.
+    while (endMonth >= sinceDate) {
+      const candidateStart = new Date(endMonth.getFullYear(), endMonth.getMonth() - 11, 1);
+      const from = candidateStart < sinceDate ? new Date(sinceDate) : candidateStart;
+      const to = new Date(endMonth.getFullYear(), endMonth.getMonth() + 1, 0);
+      windows.unshift({ from, to });
+      if (from <= sinceDate) break;
+      endMonth = new Date(from.getFullYear(), from.getMonth() - 1, 1);
+    }
+
+    return windows;
+  }
+
+  /**
+   * Calcule l'indemnité de congé selon la méthode choisie par l'entreprise.
+   * - AVERAGE_12M (défaut) : 1/12e de la moyenne des 12 derniers bulletins (brut)
+   * - CURRENT_SALARY       : maintien du dernier salaire brut connu
+   */
+  async calculateLeaveIndemnity(
+    employeeId: string,
+    daysCount: number,
+    companyId?: string,
+    anchorMonth?: number,
+    anchorYear?: number,
+    // ✅ CORRECTIF ("le trou") : le mois où l'indemnité est payée est
+    // TOUJOURS le dernier mois du cycle de référence (12 mois glissants
+    // depuis le retour de congé) — mais son propre bulletin n'existe pas
+    // encore en base au moment de ce calcul (on est en train de le créer).
+    // Sans ce paramètre, la moyenne ne trouve que 11 bulletins réels au
+    // lieu de 12. On fait injecter par l'appelant le brut de TRAVAIL de ce
+    // mois précis (base + heures sup + primes — JAMAIS l'indemnité
+    // elle-même, ce qui recréerait une boucle) pour compléter le 12e mois.
+    currentMonthWorkGross?: number,
+    // ✅ Aperçu (page "planning à payer") : le bulletin du mois de paie
+    // n'existe pas encore et son brut propre n'est pas connu — on l'estime
+    // (dernier brut connu du cycle, sinon salaire de base) pour que le
+    // montant affiché ne soit jamais vide. Jamais utilisé pour un vrai
+    // bulletin (le générateur transmet toujours le vrai brut du mois).
+    opts?: { estimateCurrentMonth?: boolean },
+  ): Promise<{
+    indemnity: number;
+    basedOnAverage: number;
+    monthsUsed: number;
+    /** 🆕 Détail visible du calcul : un bloc par cycle (intervalle, mois pris en compte, diviseur). */
+    breakdown?: IndemnityCycleBreakdown[];
+    cyclesCount: number;
+    method: 'AVERAGE_12M' | 'CURRENT_SALARY';
+    usedOpeningCumulative: boolean;
+    currentMonthEstimated?: boolean;
+  }> {
+    const refYear = anchorYear ?? new Date().getFullYear();
+    const refMonth = anchorMonth ?? new Date().getMonth() + 1;
+    // Diviseurs 11/12 pilotés par le super administrateur (référentiel légal) ;
+    // valeur par défaut = 12, comme avant.
+    const leaveRules = legalAtPeriod(refYear, refMonth).leave;
+
+    let method: 'AVERAGE_12M' | 'CURRENT_SALARY' = 'AVERAGE_12M';
+    // ✅ CORRECTIF (demande explicite) : plus de choix de cycle par
+    // entreprise (JANUARY/JUNE/HIRE_DATE, calendaires fixes) — voir
+    // getAllDueCyclesRolling() plus bas, toujours glissant depuis le
+    // dernier retour de congé.
+    // ✅ CORRECTIF : servent à calculer, PAR CYCLE traité plus bas, le vrai
+    // plafond de jours (26 + bonus d'ancienneté DE CE CYCLE si l'entreprise
+    // gère la convention — jamais un 26 fixe qui avalait silencieusement les
+    // jours d'ancienneté, même pour un départ normal à un seul cycle).
+    let appliesSeniorityBonus = true;
+    let conventionKey = 'GENERALE';
+    // 🆕 Mode ANNIVERSARY : voir plus bas (sinceDate + substitution des
+    // mois de départ par paidIndemnityAmount).
+    let cycleMode: 'ROLLING' | 'ANNIVERSARY' = 'ROLLING';
+
+    if (companyId) {
+      const company = await this.prisma.company.findUnique({
+        where: { id: companyId },
+        select: {
+          leaveIndemnityMethod: true,
+          appliesSeniorityLeaveBonus: true,
+          leaveConventionKey: true,
+          leaveCycleMode: true,
+        } as any,
+      });
+      if ((company as any)?.leaveIndemnityMethod === 'CURRENT_SALARY')
+        method = 'CURRENT_SALARY';
+      appliesSeniorityBonus =
+        (company as any)?.appliesSeniorityLeaveBonus ?? true;
+      conventionKey = (company as any)?.leaveConventionKey ?? 'GENERALE';
+      cycleMode =
+        ((company as any)?.leaveCycleMode as 'ROLLING' | 'ANNIVERSARY') ??
+        'ROLLING';
+    }
+
+    const emp = await this.prisma.employee.findUnique({
+      where: { id: employeeId },
+      select: {
+        hireDate: true,
+        baseSalary: true,
+        openingCumulativeGross: true,
+        openingCumulativeMonths: true,
+      },
+    });
+    const hireDate = emp?.hireDate ? new Date(emp.hireDate) : null;
+    // ✅ Repli ultime (aucun historique Konza RH, aucun cumul d'onboarding
+    // renseigné) : salaire de base actuel. Sert aussi de repli pour
+    // CURRENT_SALARY, qui n'a pas besoin du mélange cumul+historique
+    // ci-dessous (une seule valeur suffit pour cette méthode).
+    const fallbackGross = Number(emp?.baseSalary ?? 0);
+    // Taux mensuel moyen du cumul d'onboarding (si renseigné) — pour
+    // proratiser au besoin (voir plafond 12 mois plus bas).
+    const openingMonthlyRate =
+      emp?.openingCumulativeGross && emp?.openingCumulativeMonths
+        ? Number(emp.openingCumulativeGross) / emp.openingCumulativeMonths
+        : 0;
+
+    if (method === 'CURRENT_SALARY') {
+      const last = await this.prisma.payroll.findFirst({
+        where: {
+          employeeId,
+          // ✅ DRAFT inclus : un bulletin généré mais pas encore validé reste
+          // le dernier brut connu (jamais CANCELLED).
+          status: { in: ['DRAFT', 'VALIDATED', 'TO_PAY', 'PAID'] },
+          OR: [
+            { year: { lt: refYear } },
+            { year: refYear, month: { lt: refMonth } },
+          ],
+        },
+        orderBy: [{ year: 'desc' }, { month: 'desc' }],
+        select: { grossSalary: true },
+      });
+      const base = last ? Number(last.grossSalary) : (openingMonthlyRate || fallbackGross);
+      const dailyRate = base / CONGO_LEAVE.WORK_DAYS_PER_MONTH;
+      const indemnity = Math.round(dailyRate * daysCount);
+      this.logger.log(
+        `💰 Indemnité [CURRENT_SALARY]: ${daysCount}j × ${Math.round(dailyRate)} F/j = ${indemnity} F`,
+      );
+      return {
+        indemnity,
+        basedOnAverage: base,
+        monthsUsed: last ? 1 : 0,
+        cyclesCount: 1,
+        method,
+        usedOpeningCumulative: false,
+        currentMonthEstimated: false,
+      };
+    }
+
+    const lastAnnualLeave = await this.prisma.leave.findFirst({
+      where: cycleMode === 'ANNIVERSARY'
+        ? {
+            employeeId,
+            type: 'ANNUAL',
+            status: 'APPROVED',
+            // 🆕 En ANNIVERSARY, le cycle ne redémarre jamais sur un simple
+            // retour de congé (la date réelle de retour n'a pas d'influence
+            // sur l'ancre) — seul un cycle dont l'indemnité a VRAIMENT été
+            // versée (paidIndemnityAmount renseigné, voir
+            // payroll-generator.service.ts/payrolls.service.ts) marque le
+            // début du décompte suivant. Sans ce filtre, on retomberait sur
+            // le même comportement que ROLLING par erreur.
+            paidIndemnityAmount: { not: null },
+            // ✅ Un congé qui n'est pas TERMINÉ avant le mois de paie (ex: le
+            // congé de novembre qu'on paie en octobre, ou un congé futur) n'est
+            // pas "le dernier congé pris" : il ne doit jamais redémarrer le
+            // cycle de référence à sa date de fin.
+            endDate: { lt: new Date(refYear, refMonth - 1, 1) },
+          }
+        : {
+            employeeId,
+            type: 'ANNUAL',
+            status: 'APPROVED',
+            // ✅ Même garde-fou (voir ci-dessus).
+            endDate: { lt: new Date(refYear, refMonth - 1, 1) },
+          },
+      orderBy: { endDate: 'desc' },
+      select: {
+        startDate: true,
+        endDate: true,
+        plannedPayrollMonth: true,
+        plannedPayrollYear: true,
+      },
+    });
+
+    // 🐛 CORRECTIF (trouvé en discussion produit) : en ANNIVERSARY, le
+    // cycle suivant doit démarrer au 1er jour du MOIS DE DÉPART du dernier
+    // congé payé (janvier, substitué) — PAS à sa date de retour (février).
+    // Sinon janvier tombe avant le début de la fenêtre du cycle suivant et
+    // la substitution paidIndemnityAmount ne le rattrape jamais : le cycle
+    // ne compte plus que 10-11 mois réels, ET perd l'alignement d'année qui
+    // fait fonctionner `cycleEndsOnAnchorMonth` (le "to" calculé retombe
+    // dans l'année suivante par rapport au bulletin en cours de génération,
+    // désactivant l'injection du mois courant). Utiliser `startDate` remet
+    // le cycle en phase : [Jan1, Dec31] au lieu de [Fev1, Jan31 suivant].
+    // ✅ RÈGLE (demande explicite) : en ANNIVERSARY, un congé REPOUSSÉ ne
+    // casse jamais le cycle — l'employé part chaque année à son mois
+    // d'anniversaire, et son indemnité reste payée au mois prévu. On ancre
+    // donc le cycle suivant sur le mois PLANIFIÉ (= mois qui suit le mois de
+    // paie de l'indemnité, ex. paie de décembre → cycle qui démarre en
+    // janvier), jamais sur la date réelle de départ, qui peut avoir été
+    // décalée (congé de janvier pris en février). Repli : date réelle.
+    const anniversaryAnchor =
+      cycleMode === 'ANNIVERSARY' &&
+      lastAnnualLeave?.plannedPayrollMonth &&
+      lastAnnualLeave?.plannedPayrollYear
+        ? new Date(
+            lastAnnualLeave.plannedPayrollYear,
+            lastAnnualLeave.plannedPayrollMonth, // mois de paie + 1 (0-indexé)
+            1,
+          )
+        : null;
+    const sinceDateRaw =
+      cycleMode === 'ANNIVERSARY' && anniversaryAnchor
+        ? anniversaryAnchor
+        : cycleMode === 'ANNIVERSARY' && lastAnnualLeave?.startDate
+        ? new Date(
+            lastAnnualLeave.startDate.getFullYear(),
+            lastAnnualLeave.startDate.getMonth(),
+            1,
+          )
+        : lastAnnualLeave?.endDate
+          ? new Date(lastAnnualLeave.endDate)
+          : (hireDate ?? new Date(refYear - 1, 0, 1));
+
+    // ✅ CORRECTIF (trouvé par le test automatisé) : les bulletins Konza RH
+    // sont mensuels, pas journaliers — une frontière de cycle au jour près
+    // (ex: reprise un 31, cycle suivant qui redémarre le 31 aussi un an
+    // plus tard) fait retomber DEUX frontières de cycles consécutifs dans
+    // le MÊME mois calendaire. Le filtre `history` (mois/année) ramassait
+    // alors le bulletin de ce mois-là pour LES DEUX cycles à la fois —
+    // un mois compté deux fois, gonflant la moyenne du cycle suivant.
+    // On aligne donc toujours le début de cycle sur le 1er du mois : si
+    // sinceDate n'est pas déjà un 1er, on arrondit au 1er du mois SUIVANT
+    // (le mois de la reprise, souvent partiel, reste hors des deux cycles
+    // plutôt que dans les deux à la fois — jamais de double comptage).
+    // ✅ RÈGLE (confirmée) : premier cycle = depuis le PREMIER bulletin, donc
+    // le mois d'embauche (bulletin partiel, ex: embauché le 10/10 → bulletin
+    // d'octobre) COMPTE comme 1er mois : cycle oct. → sept., pas nov. → oct.
+    // L'arrondi au mois SUIVANT ne vaut que pour un cycle qui redémarre après un
+    // retour de congé (voir ci-dessus : jamais de mois compté dans 2 cycles).
+    const cycleStartsAtHire = !lastAnnualLeave && !!hireDate;
+    const sinceDate = cycleStartsAtHire
+      ? new Date(sinceDateRaw.getFullYear(), sinceDateRaw.getMonth(), 1)
+      : sinceDateRaw.getDate() === 1
+        ? sinceDateRaw
+        : new Date(sinceDateRaw.getFullYear(), sinceDateRaw.getMonth() + 1, 1);
+
+    let cycles = this.getAllDueCyclesRolling(sinceDate, refYear, refMonth);
+
+    // 🆕 PREMIER cycle en mode ANNIVERSARY : la fenêtre est FIGÉE à partir de
+    // l'embauche (mois d'embauche + 11 mois). Planifier le congé plus tard
+    // (ex. en mars) ne la décale plus : on ne perd pas le mois d'embauche et
+    // on n'y mélange pas janvier/février de l'année suivante. Seuls les
+    // cycles COMPLETS à la fin du mois de paie comptent ; sinon on garde
+    // l'ancien comportement (ex. congé anticipé avant la fin du cycle).
+    if (cycleMode === 'ANNIVERSARY' && cycleStartsAtHire) {
+      const anchorEnd = new Date(refYear, refMonth, 0);
+      const frozen: Array<{ from: Date; to: Date }> = [];
+      for (let k = 0; ; k++) {
+        const from = new Date(sinceDate.getFullYear(), sinceDate.getMonth() + 12 * k, 1);
+        const to = new Date(from.getFullYear(), from.getMonth() + 12, 0);
+        if (to > anchorEnd) break;
+        frozen.push({ from, to });
+      }
+      if (frozen.length > 0) cycles = frozen;
+    }
+
+    if (cycles.length === 0) {
+      // Repli de sécurité (ne devrait plus arriver avec le modèle glissant,
+      // mais évite un crash si sinceDate est incohérente) : un seul cycle
+      // de 12 mois se terminant au mois de la paie.
+      cycles.push({
+        from: new Date(refYear, refMonth - 12, 1),
+        to: new Date(refYear, refMonth, 0),
+      });
+    }
+
+    // Le nombre de jours demandé détermine le nombre de cycles à régler.
+    // Un droit d'un seul cycle doit utiliser le cycle le plus récent, jamais
+    // consommer ses jours sur une ancienne année vide (avant l'arrivée dans RH).
+    // Pour plusieurs cycles dus, conserver leurs fenêtres distinctes et leur ordre.
+    let daysToAllocate = daysCount;
+    let firstCycle = cycles.length - 1;
+    for (; firstCycle >= 0; firstCycle--) {
+      const yearsAtStart = hireDate
+        ? Math.max(0, (cycles[firstCycle].from.getTime() - hireDate.getTime()) / (1000 * 60 * 60 * 24 * 365.25))
+        : 0;
+      const bonusDays = appliesSeniorityBonus
+        ? getSeniorityDaysForConvention(conventionKey, yearsAtStart)
+        : 0;
+      daysToAllocate -= CONGO_LEAVE.ANNUAL_DAYS + bonusDays;
+      if (daysToAllocate <= 0) break;
+    }
+    cycles = cycles.slice(Math.max(0, firstCycle));
+
+    this.logger.log(
+      `📅 ${cycles.length} cycle(s) détecté(s) depuis ${sinceDate.toISOString().slice(0, 10)} (glissant)`,
+    );
+
+    // ✅ Garde-fou : une fois que l'employé a 12 vrais bulletins ou plus
+    // QUELQUE PART dans son historique Konza RH (peu importe le cycle
+    // interrogé), le cumul d'onboarding ne doit plus JAMAIS resservir —
+    // même si un cycle précis (ex: après un changement de cycle de
+    // référence JANUARY/JUNE/HIRE_DATE côté entreprise, ou un trou de
+    // données) remonte moins de 12 bulletins pour SA fenêtre à lui. Sans
+    // ça, un cumul saisi il y a 2 ans avec un salaire d'alors pourrait
+    // ressurgir sur un cas limite, alors qu'il est censé n'avoir servi
+    // qu'au tout début.
+    const totalRealPayrollsEver = await this.prisma.payroll.count({
+      where: {
+        employeeId,
+        status: { in: ['DRAFT', 'VALIDATED', 'TO_PAY', 'PAID'] },
+        OR: [
+          { year: { lt: refYear } },
+          { year: refYear, month: { lte: refMonth } },
+        ],
+      },
+    });
+    const openingStillEligible = totalRealPayrollsEver < 12;
+
+    // ✅ CORRECTIF : le plafond de 26j était appliqué IDENTIQUE sur chaque
+    // cycle, même quand daysCount incluait déjà des jours d'ancienneté
+    // (30, 32, 34...) — les jours au-delà de 26 étaient alors purement
+    // perdus, y compris pour un départ normal à cycle unique. Chaque cycle
+    // a maintenant son propre plafond = 26 + bonus d'ancienneté APPLICABLE
+    // À CE CYCLE (l'ancienneté grandit dans le temps : un cycle ancien peut
+    // avoir un plafond plus bas qu'un cycle récent) — 0 si l'entreprise ne
+    // gère pas cette convention (`appliesSeniorityBonus` = false).
+    let totalIndemnity = 0;
+    let totalMonthsUsed = 0;
+    const breakdown: IndemnityCycleBreakdown[] = [];
+    let usedOpeningCumulative = false;
+    let currentMonthEstimated = false;
+    let remainingDays = daysCount; // ✅ jamais dépasser le nombre de jours réellement demandés
+
+    for (let i = 0; i < cycles.length; i++) {
+      const { from, to } = cycles[i];
+
+      const cycleSeniorityDays = appliesSeniorityBonus
+        ? getSeniorityDaysForConvention(
+            conventionKey,
+            Math.max(
+              0,
+              hireDate
+                ? (from.getTime() - hireDate.getTime()) /
+                    (1000 * 60 * 60 * 24 * 365.25)
+                : 0,
+            ),
+          )
+        : 0;
+      const daysPerCycle = CONGO_LEAVE.ANNUAL_DAYS + cycleSeniorityDays;
+
+      const historyRaw = await this.prisma.payroll.findMany({
+        where: {
+          employeeId,
+          // ✅ CORRECTIF (bug "0/12 mois connus" sur l'onglet congé payé) :
+          // les bulletins sont créés en DRAFT par le générateur — ne compter
+          // que VALIDATED/PAID faisait disparaître tout bulletin généré mais
+          // pas encore validé. Seul CANCELLED est exclu.
+          status: { in: ['DRAFT', 'VALIDATED', 'TO_PAY', 'PAID'] },
+          AND: [
+            {
+              OR: [
+                { year: { gt: from.getFullYear() } },
+                {
+                  year: from.getFullYear(),
+                  month: { gte: from.getMonth() + 1 },
+                },
+              ],
+            },
+            {
+              OR: [
+                { year: { lt: to.getFullYear() } },
+                { year: to.getFullYear(), month: { lte: to.getMonth() + 1 } },
+              ],
+            },
+          ],
+        },
+        orderBy: [{ year: 'asc' }, { month: 'asc' }],
+        select: {
+          grossSalary: true,
+          month: true,
+          year: true,
+          // Lignes d'indemnité de congé éventuellement déjà présentes sur ce
+          // bulletin (cas d'un recalcul) — à retirer du brut pour ne jamais
+          // recréer la boucle "indemnité calculée sur un brut qui contient
+          // déjà l'indemnité".
+          items: {
+            where: { code: { in: ['INDEM_CONGE', 'CONGE_SUPP'] } },
+            select: { amount: true },
+          },
+        },
+      });
+      const history = historyRaw.map((p: any) => {
+        const indemInside = (p.items ?? []).reduce(
+          (sum: number, it: any) => sum + Number(it.amount ?? 0),
+          0,
+        );
+        const isAnchorMonth = p.month === refMonth && p.year === refYear;
+        return {
+          grossSalary: isAnchorMonth
+            ? Math.max(0, Number(p.grossSalary) - indemInside)
+            : Number(p.grossSalary),
+          month: p.month as number,
+          year: p.year as number,
+        };
+      });
+
+      // ✅ MOIS DE PAIE = LE 12e MOIS DU CYCLE (règle confirmée) : 11 bruts
+      // passés + le brut PROPRE du mois où l'indemnité est payée (primes et
+      // heures sup comprises, JAMAIS l'indemnité elle-même) = 12 bruts, ÷ 12.
+      // Le bulletin de ce mois n'existe pas encore (ou existe en brouillon,
+      // indemnité comprise) : on ne le lit donc JAMAIS tel quel dans
+      // l'historique — il est remplacé par UN seul brut propre injecté
+      // (jamais de 13e mois).
+      const isLastCycle = i === cycles.length - 1;
+      const anchorStart = new Date(refYear, refMonth - 1, 1);
+      const anchorInWindow = isLastCycle && anchorStart >= from && anchorStart <= to;
+      const isAfterAnchor = (p: { month: number; year: number }) =>
+        p.year > refYear || (p.year === refYear && p.month > refMonth);
+      const historyBase = anchorInWindow
+        ? history.filter(
+            (p) =>
+              !(p.month === refMonth && p.year === refYear) && !isAfterAnchor(p),
+          )
+        : history;
+      const anchorRowGross = history.find(
+        (p) => p.month === refMonth && p.year === refYear,
+      )?.grossSalary;
+
+      let injectedGross: number | null = null;
+      let currentMonthEstimatedHere = false;
+      if (anchorInWindow) {
+        if (typeof currentMonthWorkGross === 'number' && Number.isFinite(currentMonthWorkGross) && currentMonthWorkGross >= 0) {
+          injectedGross = currentMonthWorkGross; // vrai brut propre, calculé par la paie
+        } else if (typeof anchorRowGross === 'number' && anchorRowGross > 0) {
+          injectedGross = anchorRowGross; // bulletin du mois déjà en base, indemnité retirée
+        } else if (opts?.estimateCurrentMonth) {
+          const lastKnown = historyBase.length
+            ? historyBase[historyBase.length - 1].grossSalary
+            : 0;
+          const est = lastKnown > 0 ? lastKnown : fallbackGross;
+          if (est > 0) {
+            injectedGross = est;
+            currentMonthEstimatedHere = true;
+          }
+        }
+      }
+
+      // 🆕 Mode ANNIVERSARY : substitution du/des mois de départ PASSÉS par
+      // le montant d'indemnité déjà versé pour couvrir ce mois précis
+      // (Leave.paidIndemnityAmount, figé par payroll-generator.service.ts /
+      // payrolls.service.ts une fois le bulletin réellement généré). Sans
+      // ça, ce mois (brut de travail quasi nul, l'employé étant en congé)
+      // tirerait la moyenne vers le bas à chaque cycle, pour toujours — ce
+      // montant EST par définition légale ce qu'il aurait gagné ce mois-là
+      // (maintien de salaire), donc un substitut légitime, pas une
+      // approximation. Ne concerne jamais LE cycle en cours (son propre
+      // congé n'a pas encore paidIndemnityAmount renseigné à ce stade).
+      // ⚠️ Un congé qui déborde sur 2 mois calendaires (ex: tout janvier +
+      // quelques jours de février) ne substitue QUE le(s) mois entièrement
+      // couverts (janvier) — le mois partiel (février) garde son vrai
+      // bulletin, déjà correctement proratisé ailleurs (voir plus bas).
+      const substitutedMonths = new Map<string, number>();
+      // 🆕 Mois de repos TRAVAILLÉ malgré l'indemnité déjà versée : le mois
+      // travaillé garde son vrai bulletin ET l'indemnité précédente s'ajoute
+      // (règle de l'expert). Concerne un congé payé qui ne couvre AUCUN mois
+      // entier (ex. 15 janv. → 10 févr.) et dont le départ tombe dans ce cycle.
+      let previousIndemnityExtra = 0;
+      if (cycleMode === 'ANNIVERSARY') {
+        const overlappingPaidLeaves = await this.prisma.leave.findMany({
+          where: {
+            employeeId,
+            type: 'ANNUAL',
+            status: 'APPROVED',
+            paidIndemnityAmount: { not: null },
+            startDate: { lte: to },
+            endDate: { gte: from },
+          },
+          select: { startDate: true, endDate: true, paidIndemnityAmount: true },
+        });
+        for (const pl of overlappingPaidLeaves) {
+          const fullMonthsBefore = substitutedMonths.size;
+          // 🐛 CORRECTIF (exemple confirmé : congé débordant sur 2 mois —
+          // ex. tout janvier + 5 jours de février) : on ne substitue QUE
+          // les mois ENTIÈREMENT couverts par ce congé (aucun jour
+          // travaillé). Un mois partiellement couvert (ex: février, avec un
+          // retour le 6) a déjà son propre vrai bulletin, correctement
+          // proratisé par le mécanisme d'absence (voir
+          // attendance-summary.service.ts — daysOnLeaveAnnual exclu du
+          // calcul, jours restants payés normalement) — le substituer
+          // écraserait un vrai chiffre juste ET compterait l'indemnité une
+          // 2e fois (une fois pour chaque mois touché), gonflant la
+          // moyenne à tort.
+          let cursorMonth = new Date(
+            pl.startDate.getFullYear(),
+            pl.startDate.getMonth(),
+            1,
+          );
+          const lastMonth = new Date(
+            pl.endDate.getFullYear(),
+            pl.endDate.getMonth(),
+            1,
+          );
+          while (cursorMonth <= lastMonth) {
+            const monthStart = cursorMonth;
+            const monthEnd = new Date(
+              cursorMonth.getFullYear(),
+              cursorMonth.getMonth() + 1,
+              0,
+            );
+            const fullyCovered =
+              pl.startDate <= monthStart && pl.endDate >= monthEnd;
+            if (
+              fullyCovered &&
+              monthStart >= from &&
+              monthStart <= to
+            ) {
+              substitutedMonths.set(
+                `${cursorMonth.getFullYear()}-${cursorMonth.getMonth() + 1}`,
+                Number(pl.paidIndemnityAmount),
+              );
+            }
+            cursorMonth = new Date(
+              cursorMonth.getFullYear(),
+              cursorMonth.getMonth() + 1,
+              1,
+            );
+          }
+          if (
+            substitutedMonths.size === fullMonthsBefore &&
+            pl.startDate >= from &&
+            pl.startDate <= to
+          ) {
+            previousIndemnityExtra += Number(pl.paidIndemnityAmount);
+          }
+        }
+      }
+      const history_final =
+        substitutedMonths.size === 0
+          ? historyBase
+          : [
+              // Mois réels NON substitués, tels quels.
+              ...historyBase.filter(
+                (p) => !substitutedMonths.has(`${p.year}-${p.month}`),
+              ),
+              // Mois substitués (réel remplacé par le montant d'indemnité,
+              // ou ajouté s'il n'y avait aucun bulletin réel ce mois-là).
+              ...Array.from(substitutedMonths.values()).map((amount) => ({
+                grossSalary: amount,
+              })),
+            ];
+
+      const injectCurrentMonth = injectedGross !== null;
+      const currentMonthGrossUsed = injectedGross ?? 0;
+      if (currentMonthEstimatedHere) currentMonthEstimated = true;
+      const historyCount = history_final.length + (injectCurrentMonth ? 1 : 0);
+
+      // ✅ CORRECTIF (règle confirmée) : on divise TOUJOURS par 12, jamais
+      // par le nombre de mois réellement trouvés. Ça se justifie : un congé
+      // ANNUAL ne peut être dû qu'après 12 mois de présence
+      // (CONGO_LEAVE.MIN_MONTHS_BEFORE_LEAVE) — "12 mois dus" n'est donc
+      // jamais une supposition pour ce type de congé, c'est déjà garanti
+      // ailleurs. Le numérateur ne contient que ce qu'on sait vraiment
+      // (bulletins réels + substitution ANNIVERSARY + cumul d'onboarding
+      // déclaré) — jamais une invention pour les mois pas encore atteints.
+      // Résultat : le montant affiché est un compteur qui grandit en direct
+      // au fil des bulletins validés (ex: à mi-cycle, seuls 6 mois sont
+      // connus → la somme de ces 6 mois ÷ 12 donne un montant volontairement
+      // bas, pas un faux "final") — jamais un repli sur le salaire de base
+      // qui masquerait l'absence de vraies données.
+      let avgBrut: number;
+      const realTotal =
+        history_final.reduce((s, p) => s + Number(p.grossSalary), 0) +
+        (injectCurrentMonth ? currentMonthGrossUsed : 0) +
+        previousIndemnityExtra;
+      const declaredOpeningMonths = openingStillEligible
+        ? (emp?.openingCumulativeMonths ?? 0)
+        : 0;
+      // Le cumul d'onboarding ne comble que les mois qui manquent pour
+      // atteindre 12 (plafond légal "12 derniers mois") — jamais plus,
+      // même si le cumul déclaré en couvre davantage.
+      const openingMonthsUsed = Math.max(
+        0,
+        Math.min(declaredOpeningMonths, 12 - historyCount),
+      );
+      const openingGrossUsed =
+        openingMonthsUsed > 0 && declaredOpeningMonths > 0
+          ? Number(emp?.openingCumulativeGross ?? 0) *
+            (openingMonthsUsed / declaredOpeningMonths)
+          : 0;
+      const monthsKnown = historyCount + openingMonthsUsed; // pour affichage/logs uniquement — jamais utilisé comme diviseur
+
+      // 1er cycle (depuis l'embauche) → diviseur du 1er cycle ; sinon cycles suivants.
+      const isFirstCycle = cycleStartsAtHire && from.getTime() === sinceDate.getTime();
+      const divisor = isFirstCycle ? leaveRules.firstCycleDivisor : leaveRules.nextCycleDivisor;
+      avgBrut = (realTotal + openingGrossUsed) / divisor;
+      // 🛟 Aucune donnée du tout sur ce cycle (ni bulletin, ni brut du mois, ni cumul d'onboarding) :
+      // la moyenne vaut 0 → indemnité 0 F → ligne absente du bulletin / aperçu « planning à payer » vide.
+      // On se replie sur le salaire de base (déjà utilisé comme repli ailleurs) et on le signale comme estimé.
+      if (realTotal + openingGrossUsed <= 0 && fallbackGross > 0) {
+        avgBrut = fallbackGross;
+        currentMonthEstimated = true;
+      }
+      totalMonthsUsed += monthsKnown;
+      if (openingMonthsUsed > 0) {
+        usedOpeningCumulative = true;
+      }
+      this.logger.log(
+        `📎 Cycle ${i + 1}: ${history_final.length} bulletin(s) réel(s)` +
+          (injectCurrentMonth ? ` + 1 mois de paie (${currentMonthGrossUsed.toLocaleString('fr-FR')} F${currentMonthEstimatedHere ? ', estimé' : ', brut propre hors indemnité'})` : '') +
+          (openingMonthsUsed > 0 ? ` + ${openingMonthsUsed} mois de cumul d'onboarding` : '') +
+          ` — ${monthsKnown}/12 mois connus, somme ÷ ${divisor} = ${Math.round(avgBrut).toLocaleString('fr-FR')} F`,
+      );
+
+      // ✅ On puise dans le solde de jours RESTANT à répartir, jamais plus —
+      // avant : 26j pleins pour tout cycle non-final, quel que soit daysCount,
+      // ce qui pouvait facturer bien plus de jours que la demande réelle dès
+      // qu'il y avait plusieurs cycles "dus" sans historique de paie.
+      const daysThisCycle = Math.min(daysPerCycle, remainingDays);
+      remainingDays -= daysThisCycle;
+
+      const dailyRate = avgBrut / CONGO_LEAVE.WORK_DAYS_PER_MONTH;
+      const indemnityPartial = Math.round(dailyRate * daysThisCycle);
+      totalIndemnity += indemnityPartial;
+
+      // 🆕 Détail visible : tous les mois de la fenêtre, avec ce qui a été pris
+      // (ou signalé manquant), pour que le RH voie l'intervalle de calcul.
+      {
+        const iso = (d: Date) =>
+          `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+        const byKey = new Map<string, IndemnityBreakdownItem>();
+        for (const p of historyBase) {
+          if (substitutedMonths.has(`${p.year}-${p.month}`)) continue;
+          byKey.set(`${p.year}-${p.month}`, { year: p.year, month: p.month, gross: Number(p.grossSalary), kind: 'REAL' });
+        }
+        for (const [k, amount] of substitutedMonths) {
+          const [yy, mm] = k.split('-').map(Number);
+          byKey.set(k, { year: yy, month: mm, gross: amount, kind: 'INDEMNITY' });
+        }
+        if (injectCurrentMonth) {
+          byKey.set(`${refYear}-${refMonth}`, {
+            year: refYear,
+            month: refMonth,
+            gross: currentMonthGrossUsed,
+            kind: currentMonthEstimatedHere ? 'ESTIMATED' : 'CURRENT',
+          });
+        }
+        const items: IndemnityBreakdownItem[] = [];
+        const cur = new Date(from.getFullYear(), from.getMonth(), 1);
+        const stop = new Date(to.getFullYear(), to.getMonth(), 1);
+        for (let guard = 0; cur <= stop && guard < 36; guard++) {
+          const key = `${cur.getFullYear()}-${cur.getMonth() + 1}`;
+          const found = byKey.get(key);
+          const afterAnchor =
+            cur.getFullYear() > refYear || (cur.getFullYear() === refYear && cur.getMonth() + 1 > refMonth);
+          items.push(
+            found ?? {
+              year: cur.getFullYear(),
+              month: cur.getMonth() + 1,
+              gross: 0,
+              kind: afterAnchor ? 'FUTURE' : 'MISSING',
+            },
+          );
+          cur.setMonth(cur.getMonth() + 1);
+        }
+        if (previousIndemnityExtra > 0) {
+          items.push({ label: 'Indemnité de congé précédente (mois de repos travaillé)', gross: previousIndemnityExtra, kind: 'INDEMNITY_EXTRA' });
+        }
+        if (openingMonthsUsed > 0) {
+          items.push({ label: `Cumul déclaré à l'embauche (${openingMonthsUsed} mois)`, gross: Math.round(openingGrossUsed), kind: 'OPENING' });
+        }
+        breakdown.push({
+          from: iso(from),
+          to: iso(to),
+          isFirstCycle,
+          divisor,
+          sum: Math.round(realTotal + openingGrossUsed),
+          averageMonthly: Math.round(avgBrut),
+          days: daysThisCycle,
+          amount: indemnityPartial,
+          items,
+        });
+      }
+
+      this.logger.log(
+        `💰 Cycle ${i + 1}/${cycles.length} [${from.toISOString().slice(0, 10)} → ${to.toISOString().slice(0, 10)}]: ` +
+          `${daysThisCycle}j × ${Math.round(dailyRate)} F/j (moy. ${Math.round(avgBrut).toLocaleString('fr-FR')} F sur ${history_final.length} mois, plafond cycle ${daysPerCycle}j${cycleSeniorityDays > 0 ? ` dont ${cycleSeniorityDays}j ancienneté` : ''}) = ${indemnityPartial} F`,
+      );
+
+      if (remainingDays <= 0) break; // plus rien à répartir sur les cycles suivants
+    }
+
+    // ✅ CORRECTIF (garde-fou) : si après avoir parcouru tous les cycles
+    // trouvés il reste des jours non distribués (ex: daysCount transmis par
+    // l'appelant supérieur au total réellement dû sur les cycles détectés —
+    // incohérence de données en amont), on ne les laisse plus disparaître
+    // silencieusement : on les indemnise sur le taux du DERNIER cycle traité
+    // (le plus proche/pertinent disponible) et on log un avertissement
+    // explicite pour que ce soit visible et investigable.
+    if (remainingDays > 0 && cycles.length > 0) {
+      const daysAlreadyPaid = daysCount - remainingDays;
+      const avgDailyRateSoFar =
+        daysAlreadyPaid > 0
+          ? totalIndemnity / daysAlreadyPaid
+          : fallbackGross / CONGO_LEAVE.WORK_DAYS_PER_MONTH;
+      const indemnityPartial = Math.round(avgDailyRateSoFar * remainingDays);
+      totalIndemnity += indemnityPartial;
+      this.logger.warn(
+        `⚠️ ${remainingDays}j restaient non distribués après ${cycles.length} cycle(s) trouvé(s) (daysCount=${daysCount} > total des plafonds de cycle) — indemnisés au taux moyen déjà calculé pour éviter une perte silencieuse, à vérifier.`,
+      );
+    }
+
+    const basedOnAverage =
+      totalIndemnity > 0
+        ? Math.round(
+            (totalIndemnity / daysCount) * CONGO_LEAVE.WORK_DAYS_PER_MONTH,
+          )
+        : fallbackGross;
+
+    this.logger.log(
+      `✅ Indemnité totale [${method}/glissant]: ${daysCount}j sur ${cycles.length} cycle(s) = ${totalIndemnity} F`,
+    );
+
+    return {
+      indemnity: totalIndemnity,
+      basedOnAverage,
+      monthsUsed: totalMonthsUsed,
+      breakdown,
+      cyclesCount: cycles.length,
+      method,
+      usedOpeningCumulative,
+      currentMonthEstimated,
+    };
+  }
+
+  // ============================================================================
+  // 🔗 EXPORT VERS LA PAIE
+  // ============================================================================
+
+  async getLeaveImpactForPayroll(
+    employeeId: string,
+    month: number,
+    year: number,
+    // ✅ CORRECTIF ("le trou") : brut de travail du mois EN COURS (base +
+    // heures sup + primes, jamais l'indemnité elle-même), transmis par
+    // l'appelant quand il l'a déjà — voir calculateLeaveIndemnity().
+    currentMonthWorkGross?: number,
+  ): Promise<LeaveImpactForPayroll | null> {
+    const periodStart = new Date(year, month - 1, 1);
+    const periodEnd = new Date(year, month, 0);
+
+    const leaves = await this.prisma.leave.findMany({
+      where: {
+        employeeId,
+        status: 'APPROVED',
+        OR: [
+          { startDate: { gte: periodStart, lte: periodEnd } },
+          { endDate: { gte: periodStart, lte: periodEnd } },
+          { startDate: { lte: periodStart }, endDate: { gte: periodEnd } },
+        ],
+      },
+    });
+
+    // ✅ Congé ANNUAL dont le PAIEMENT est programmé sur ce mois (règle :
+    // indemnité payée le mois précédant le départ, ex. décembre pour un
+    // départ en janvier) — indépendant du fait que ses dates réelles
+    // tombent ou non dans ce mois. C'est ce qui déclenche l'indemnité,
+    // plus le chevauchement de dates.
+    const payrollAnchoredLeave = await this.prisma.leave.findFirst({
+      where: {
+        employeeId,
+        status: 'APPROVED',
+        type: 'ANNUAL',
+        OR: [
+          { plannedPayrollMonth: month, plannedPayrollYear: year },
+          // Legacy approvals: pay in M-1, excluding unpaid carryover rest.
+          {
+            plannedPayrollMonth: null,
+            plannedPayrollYear: null,
+            carriedFromLeaveId: null,
+            startDate: {
+              gte: new Date(year, month, 1),
+              lt: new Date(year, month + 1, 1),
+            },
+          },
+        ],
+      },
+    });
+
+    if (leaves.length === 0 && !payrollAnchoredLeave) return null;
+
+    let leaveDays = 0;
+    let anchoredLeaveDaysInPeriod = 0;
+    let dominantType = leaves[0]?.type ?? payrollAnchoredLeave?.type;
+
+    for (const leave of leaves) {
+      const start =
+        leave.startDate > periodStart ? leave.startDate : periodStart;
+      const end = leave.endDate < periodEnd ? leave.endDate : periodEnd;
+      const days = await WorkingDays.calculateWorkingDays(
+        this.prisma,
+        leave.companyId,
+        start,
+        end,
+      );
+      leaveDays += days;
+      if (payrollAnchoredLeave && leave.id === payrollAnchoredLeave.id) {
+        anchoredLeaveDaysInPeriod += days;
+      }
+      if (days > 0) dominantType = leave.type;
+    }
+
+    if (leaveDays === 0 && !payrollAnchoredLeave) return null;
+
+    // ── Règle congés KonzaRH ────────────────────────────────────────────────────
+    // ANNUAL       → l'indemnité n'est JAMAIS calculée sur le mois des dates
+    //   réelles du congé : elle est payée UNE FOIS, sur le bulletin du mois
+    //   programmé (plannedPayrollMonth, en principe le mois qui précède le
+    //   départ). Sur ses dates réelles, le congé ANNUAL est neutre pour ce
+    //   service (ni indemnité ni déduction ici) — la réduction de salaire liée
+    //   aux jours non travaillés est déjà gérée en amont, via le module de
+    //   pointage/présence (daysToPay), pas ici.
+    // ANNUAL_ANTICIPATED → jamais d'indemnité à sa propre date non plus :
+    //   "l'employé prend juste un repos", son coût est absorbé dans le
+    //   paiement unique du congé ANNUAL qui clôt le cycle (payrollIndemnityDays
+    //   = droit total du cycle, pas seulement le reliquat de CE congé-ci).
+    // SICK / MATERNITY / PATERNITY / COMPENSATORY → valeurs historiques du
+    //   modèle Leave, "maintien salaire" inchangé.
+    // UNPAID       → déduction pure, aucune compensation (legacy également)
+    const isAnnualFamily =
+      dominantType === 'ANNUAL' || dominantType === 'ANNUAL_ANTICIPATED';
+    const isMaintained = !isAnnualFamily && dominantType !== 'UNPAID';
+
+    const emp = await this.prisma.employee.findUnique({
+      where: { id: employeeId },
+      select: {
+        baseSalary: true,
+        companyId: true,
+      },
+    });
+    const companyId =
+      leaves[0]?.companyId ?? payrollAnchoredLeave?.companyId ?? emp?.companyId ?? '';
+
+    const lastPayroll = await this.prisma.payroll.findFirst({
+      where: {
+        employeeId,
+        status: { in: ['VALIDATED', 'TO_PAY', 'PAID'] },
+        OR: [{ year: { lt: year } }, { year, month: { lt: month } }],
+      },
+      orderBy: [{ year: 'desc' }, { month: 'desc' }],
+      select: { grossSalary: true },
+    });
+    const referenceGross = lastPayroll
+      ? Number(lastPayroll.grossSalary)
+      : Number(emp?.baseSalary ?? 0);
+    const dailyRate = referenceGross / CONGO_LEAVE.WORK_DAYS_PER_MONTH;
+    // ⚠️ Ne sert plus qu'au "maintien salaire" (SICK/MATERNITY/...) — pour
+    // ANNUAL/ANNUAL_ANTICIPATED on ne déduit plus jamais rien ici (voir
+    // règle ci-dessus).
+    const absenceDeduction = isAnnualFamily
+      ? 0
+      : Math.floor(dailyRate * leaveDays);
+
+    let leaveIndemnity = 0;
+    let leaveIndemnityBase = 0;
+    let leaveIndemnitySeniority = 0;
+    let shouldClearOpeningCumulative = false;
+    let indemnifiedDays: number | undefined;
+    let indemnifiedSeniorityDays: number | undefined;
+    if (payrollAnchoredLeave) {
+      // Mois de paiement programmé : indemnité calculée sur le droit TOTAL
+      // du cycle (snapshot pris à la planification), pas sur daysCount du
+      // seul congé qui clôt le cycle.
+      // ✅ Un Decimal Prisma à 0 est « truthy » en JS : l'ancien test
+      // `x ? Number(x) : daysCount` ne se déclenchait JAMAIS pour 0.00 et
+      // renvoyait 0 jour → indemnité 0 F → ligne absente du bulletin. On teste
+      // la VALEUR : 0 ou négatif = droit plein du cycle (26j + ancienneté).
+      const entitlement = await this.resolveAnnualIndemnityDays(payrollAnchoredLeave, employeeId, companyId);
+      const totalDays = entitlement.totalDays;
+      indemnifiedDays = totalDays; // ✅ pour le libellé du bulletin — pas
+      // le même nombre que "leaveDays" ci-dessous, qui ne compte que les
+      // jours d'absence PHYSIQUE de CE mois (ex: un congé anticipé
+      // concomitant), potentiellement 0 ou très différent du droit total.
+      const result = await this.calculateLeaveIndemnity(
+        employeeId,
+        totalDays,
+        companyId,
+        month,
+        year,
+        currentMonthWorkGross,
+      );
+      leaveIndemnity = result.indemnity;
+      // ✅ Scinde l'indemnité en 2 (même taux journalier moyen pour les
+      // deux) : "Indemnité de congé" sur les 26j de base, "Congé
+      // supplémentaire" sur les jours d'ancienneté — pour 2 lignes
+      // distinctes sur le bulletin, qui se suivent.
+      const seniorityDays = Math.min(
+        totalDays,
+        entitlement.seniorityDays,
+      );
+      indemnifiedSeniorityDays = seniorityDays; // ✅ pour la quantité de la ligne "Congé supplémentaire"
+      const baseDays = Math.max(0, totalDays - seniorityDays);
+      const dailyRate = totalDays > 0 ? leaveIndemnity / totalDays : 0;
+      leaveIndemnityBase = Math.round(dailyRate * baseDays);
+      leaveIndemnitySeniority = leaveIndemnity - leaveIndemnityBase; // ✅ pas d'arrondi qui fait perdre/gagner des F au total
+      // ✅ Le cumul d'onboarding ne doit être vidé QUE quand ce calcul est
+      // un vrai règlement de paie (appelé depuis la génération réelle du
+      // bulletin), jamais depuis un simple aperçu (page "planning à
+      // payer", qui appelle aussi cette fonction pour afficher un montant
+      // estimé avant que la paie ne soit générée). C'est à l'appelant
+      // (payroll-generator) de confirmer, via clearOpeningCumulativeAfterUse(),
+      // une fois le bulletin réellement créé.
+      shouldClearOpeningCumulative = result.usedOpeningCumulative;
+      // 🛡️ Garde-fou : un congé ancré sur ce mois qui ressort à 0 F est une
+      // anomalie — on la rend visible dans les logs au lieu de laisser la ligne
+      // disparaître du bulletin sans aucune trace.
+      if (leaveIndemnity <= 0) {
+        this.logger.warn(
+          `⚠️ Congé ${payrollAnchoredLeave.id} (employé ${employeeId}) ancré sur ${month}/${year} mais indemnité = ${leaveIndemnity} F (jours indemnisés: ${totalDays}) — vérifier payrollIndemnityDays et l'historique de paie.`,
+        );
+        if (currentMonthWorkGross !== undefined) {
+          throw new BadRequestException(
+            `Indemnité de congé impossible à calculer pour ${month}/${year} : aucun brut disponible dans la période de référence. Vérifiez les bulletins et le cumul initial de l'employé.`,
+          );
+        }
+      }
+    } else if (isMaintained) {
+      leaveIndemnity = absenceDeduction;
+      leaveIndemnityBase = absenceDeduction;
+    }
+    // isAnnualFamily && !payrollAnchoredLeave → leaveIndemnity reste à 0 :
+    // c'est le cas "congé pris ce mois-ci mais déjà payé en décembre" (ou
+    // "employé qui travaille pendant son congé") — neutre ici par design.
+
+    // Le mois programmé (déc.) n'est pas un mois d'absence : l'employé
+    // travaille normalement, l'indemnité s'ajoute à son salaire du mois,
+    // elle ne le remplace pas. Si par coïncidence les dates réelles du
+    // congé ancré chevauchent aussi ce mois, on retire sa propre
+    // contribution de `leaveDays` — le reste (autre congé ce mois-là,
+    // ex. un arrêt maladie) reste compté normalement.
+    const displayLeaveDays = payrollAnchoredLeave
+      ? Math.max(0, leaveDays - anchoredLeaveDaysInPeriod)
+      : leaveDays;
+
+    const presenceDays = CONGO_LEAVE.WORK_DAYS_PER_MONTH - displayLeaveDays;
+    const transportRatio = Math.max(
+      0,
+      presenceDays / CONGO_LEAVE.WORK_DAYS_PER_MONTH,
+    );
+
+    return {
+      employeeId,
+      month,
+      year,
+      leaveDays: displayLeaveDays,
+      leaveType: dominantType,
+      isPaid: isAnnualFamily || isMaintained || !!payrollAnchoredLeave,
+      leaveIndemnity,
+      leaveIndemnityBase,
+      leaveIndemnitySeniority,
+      absenceDeduction,
+      transportProrata: transportRatio,
+      shouldClearOpeningCumulative,
+      indemnifiedDays,
+      indemnifiedSeniorityDays,
+      leaveId: payrollAnchoredLeave?.id,
+    };
+  }
+
+  /**
+   * ✅ À appeler UNIQUEMENT après la création réelle et réussie d'un
+   * bulletin de paie qui a consommé le cumul d'onboarding (shouldClear-
+   * OpeningCumulative renvoyé par getLeaveImpactForPayroll ci-dessus).
+   * JAMAIS depuis un aperçu/simulation (ex: page "planning à payer") — s'il
+   * est vidé trop tôt, la vraie génération de paie qui doit encore s'en
+   * servir se retrouverait sans donnée. Voir aussi : le nouveau cycle
+   * démarré au retour de congé n'a de toute façon plus besoin de ce cumul,
+   * qui ne représentait que "avant Konza RH" pour LE CYCLE QUI VIENT
+   * D'ÊTRE RÉGLÉ.
+   */
+  async clearOpeningCumulativeAfterUse(employeeId: string) {
+    await this.prisma.employee.update({
+      where: { id: employeeId },
+      data: { openingCumulativeGross: null, openingCumulativeMonths: null },
+    });
+  }
+
+  // ============================================================================
+  // 🔗 PROVISION POUR CONGÉS
+  // ✅ CORRECTIF (demande explicite) : le but réel de cette page est double —
+  //    1) dire à l'entreprise ce qu'elle devrait à l'employé sur ses congés
+  //       NON PRIS s'il y avait rupture aujourd'hui (dette sociale), et
+  //    2) alerter quand un employé n'a pris AUCUN congé annuel depuis trop
+  //       longtemps, avec un vrai risque légal au-delà de 3 ans
+  //       (CONGO_LEAVE.MAX_CUMUL_YEARS) sans départ.
+  //    Avant ce correctif, seul le solde du cycle LE PLUS RÉCENT était compté
+  //    (`findFirst` trié desc) — or un employé qui ne part jamais en congé
+  //    accumule un NOUVEAU cycle (jusqu'à 26j + ancienneté) chaque année sans
+  //    que l'ancien ne soit jamais soldé (`leaveCycleStartDate` ne bouge
+  //    QUE sur un vrai congé ANNUAL validé — voir updateStatus()/createManual()).
+  //    Un employé à 3 ans sans congé a donc en réalité 3 lignes LeaveBalance
+  //    distinctes en base, chacune avec son propre solde non nul — la dette
+  //    réelle est leur SOMME, pas seulement la plus récente. De même,
+  //    l'alerte se basait sur le ratio du seul cycle courant (26-45j selon
+  //    ancienneté) — un seuil qui n'a rien à voir avec le vrai risque légal
+  //    des 3 ans, et qui ne se déclenchait donc quasiment jamais dans ce cas
+  //    précis (voir aussi la même confusion corrigée sur /conges/soldes,
+  //    qui elle reste volontairement sur le solde du cycle courant — objectif
+  //    différent : "où en est ce cycle", pas "depuis quand n'est-il pas parti").
+  // ============================================================================
+
+  async getLeaveProvision(companyId: string): Promise<LeaveProvisionResult> {
+    const employees = await this.prisma.employee.findMany({
+      where: {
+        companyId,
+        status: 'ACTIVE',
+        ...leaveEligibleEmployeeFilter(),
+      },
+      select: {
+        id: true,
+        firstName: true,
+        lastName: true,
+        baseSalary: true,
+        hireDate: true,
+        leaveCycleStartDate: true,
+        company: { select: { leaveCycleMode: true } },
+      },
+    });
+
+    let totalProvision = 0;
+    const details: LeaveProvisionResult['details'] = [];
+    const now = new Date();
+
+    for (const emp of employees) {
+      // ✅ Toutes les lignes de solde, pas seulement la plus récente — un
+      // cycle ancien jamais soldé (l'employé n'est jamais parti dessus)
+      // reste une dette réelle tant qu'il n'a pas été consommé.
+      const balances = await this.prisma.leaveBalance.findMany({
+        where: { employeeId: emp.id },
+      });
+      const remainingDays = balances.reduce(
+        (sum, b) => sum + Number(b.annualRemaining || 0),
+        0,
+      );
+      if (remainingDays === 0) continue;
+
+      const { basedOnAverage } = await this.calculateLeaveIndemnity(
+        emp.id,
+        1,
+        companyId,
+      );
+      const dailyRate = basedOnAverage / CONGO_LEAVE.WORK_DAYS_PER_MONTH;
+      const provision = Math.round(dailyRate * remainingDays);
+      totalProvision += provision;
+
+      // ✅ Ancre légale : date du dernier congé ANNUAL réellement pris (ou
+      // date d'embauche si jamais pris) — c'est exactement ce que
+      // `leaveCycleStartDate` représente déjà dans le reste du module.
+      // 🆕 CORRECTIF : passe par resolveCycleWindow (mode-aware) au lieu de
+      // lire `leaveCycleStartDate` en dur — en ANNIVERSARY, cette date de
+      // retour n'est pas l'ancre pertinente pour "depuis combien de temps
+      // sans congé" (c'est toujours hireDate qui fait foi).
+      const cycleAnchor = resolveCycleWindow(
+        new Date(emp.hireDate),
+        emp.leaveCycleStartDate ? new Date(emp.leaveCycleStartDate) : null,
+        undefined,
+        ((emp as any)?.company?.leaveCycleMode as
+          | 'ROLLING'
+          | 'ANNIVERSARY') ?? 'ROLLING',
+      ).cycleStartDate;
+      const yearsWithoutLeave =
+        (now.getTime() - cycleAnchor.getTime()) /
+        (1000 * 60 * 60 * 24 * 365.25);
+      const yearsRatio = yearsWithoutLeave / CONGO_LEAVE.MAX_CUMUL_YEARS;
+      const alertLevel =
+        yearsRatio >= CONGO_LEAVE.ALERT_THRESHOLD_CRITICAL
+          ? 'CRITICAL'
+          : yearsRatio >= CONGO_LEAVE.ALERT_THRESHOLD_WARNING
+            ? 'WARNING'
+            : 'OK';
+
+      details.push({
+        employeeId: emp.id,
+        employeeName: `${emp.firstName} ${emp.lastName}`,
+        remainingDays,
+        dailyRate: Math.round(dailyRate),
+        provision,
+        alertLevel,
+        yearsWithoutLeave: Math.round(yearsWithoutLeave * 10) / 10,
+        maxCumulYears: CONGO_LEAVE.MAX_CUMUL_YEARS,
+      });
+    }
+
+    details.sort((a, b) => b.provision - a.provision);
+    return { totalProvision, currency: 'XAF', details };
+  }
+}

@@ -1,0 +1,117 @@
+// src/notifications/notifications.controller.ts
+
+import {
+  Controller,
+  Get,
+  Patch,
+  Post,
+  Delete,
+  Param,
+  UseGuards,
+  Request,
+  Query,
+  Body,
+} from '@nestjs/common';
+import { NotificationsService } from './notifications.service';
+import { PushNotificationsService } from './push-notifications.service';
+import { JwtAuthGuard } from '../auth/jwt-auth.guard';
+import { AuthGuard } from '@nestjs/passport';
+
+@Controller('notifications')
+@UseGuards(JwtAuthGuard)
+export class NotificationsController {
+  constructor(
+    private readonly notificationsService: NotificationsService,
+    private readonly pushService: PushNotificationsService,
+  ) {}
+
+  @Get()
+  findAll(@Request() req, @Query('limit') limit?: string) {
+    // ✅ Utiliser req.user.userId (cohérent avec la stratégie JWT)
+    return this.notificationsService.findAll(
+      req.user.userId,
+      limit ? Math.min(Math.max(parseInt(limit) || 50, 1), 100) : undefined, // plafonné : le front demande 100 au maximum
+    );
+  }
+
+  @Get('unread-count')
+  getUnreadCount(@Request() req) {
+    // ✅ Utiliser req.user.userId
+    return this.notificationsService.getUnreadCount(req.user.userId);
+  }
+
+  @Patch(':id/read')
+  markAsRead(@Param('id') id: string, @Request() req) {
+    // ✅ Utiliser req.user.userId
+    return this.notificationsService.markAsRead(id, req.user.userId);
+  }
+
+  @Patch('read-all')
+  markAllAsRead(@Request() req) {
+    // ✅ Utiliser req.user.userId
+    return this.notificationsService.markAllAsRead(req.user.userId);
+  }
+
+  // ========================================
+  // 🔑 VAPID Public Key (frontend en a besoin pour s'abonner)
+  // ========================================
+  @Get('push/vapid-key')
+  getVapidKey() {
+    return { publicKey: this.pushService.getPublicKey() };
+  }
+
+  // ========================================
+  // 📱 Enregistrer le token push du device
+  // ========================================
+  @Post('push/subscribe')
+  async subscribePush(
+    @Body()
+    body: {
+      endpoint: string;
+      keys: { p256dh: string; auth: string };
+      deviceLabel?: string;
+      // 🆕 identifiant stable de l'appareil (généré par l'app) — absent sur les anciennes versions
+      deviceId?: string;
+    },
+    @Request() req,
+  ) {
+    const { deviceLabel, deviceId, ...subscription } = body;
+    // On ne retient que les champs d'un abonnement Web Push (le front envoie aussi expirationTime, etc.)
+    const clean = { endpoint: subscription.endpoint, keys: subscription.keys };
+    await this.pushService.registerToken(req.user.userId, clean, {
+      deviceId,
+      deviceLabel,
+      userAgent: req.headers?.['user-agent'],
+    });
+    return {
+      success: true,
+      message: 'Notifications activées sur cet appareil.',
+    };
+  }
+
+  // ========================================
+  // 🔎 Le serveur connaît-il encore cet appareil ? (utilisé par le front pour réparer
+  // un abonnement mort : si false, le front en recrée un neuf)
+  // ========================================
+  @Get('push/status')
+  async pushStatus(@Query('endpoint') endpoint: string, @Request() req) {
+    return { registered: await this.pushService.hasEndpoint(req.user.userId, endpoint) };
+  }
+
+  // ========================================
+  // 🔕 Désabonner l'appareil courant (les autres appareils restent actifs)
+  // ========================================
+  @Delete('push/unsubscribe')
+  async unsubscribePush(
+    @Body() body: { endpoint?: string; deviceId?: string; data?: { endpoint?: string; deviceId?: string } },
+    @Request() req,
+  ) {
+    // `body.data` : les anciennes versions de l'app enveloppaient le corps dans { data: … }
+    // (c'était la cause du bug « désactiver sur un appareil les retire tous »).
+    await this.pushService.unregisterToken(req.user.userId, {
+      deviceId: body?.deviceId ?? body?.data?.deviceId,
+      endpoint: body?.endpoint ?? body?.data?.endpoint,
+    });
+    return { success: true, message: 'Notifications désactivées sur cet appareil.' };
+  }
+}

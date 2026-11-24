@@ -1,0 +1,1593 @@
+// ============================================================================
+// industrie.convention.ts
+// ============================================================================
+import {
+  IConvention,
+  ConventionBaremeLicenciement,
+  ConventionBaremeRetraite,
+  ConventionPreavis,
+  ConventionConges,
+  ConventionFiscalite,
+  ConventionDecesConfig,
+  GrilleSalariale,
+} from './convention.interface';
+import { _fmt } from '../helpers/calcul.helper';
+
+export class IndustrieConvention implements IConvention {
+  code = 'INDUSTRIE';
+  nom = 'Convention Collective Industrie & Métallurgie';
+  secteurs = ['industrie', 'métallurgie', 'fabrication', 'manufacture'];
+
+  baremeLicenciement: ConventionBaremeLicenciement = {
+    format: 'POURCENTAGE',
+    seuilMoisAnciennete: 24,
+    paliers: [
+      { anneeMin: 0, anneeMax: 5, valeur: 0.31 },
+      { anneeMin: 5, anneeMax: 10, valeur: 0.36 },
+      { anneeMin: 10, anneeMax: 20, valeur: 0.4 },
+      { anneeMin: 20, anneeMax: 999, valeur: 0.45 },
+    ],
+    palierEconomique: [{ anneeMin: 0, anneeMax: 999, valeur: 0.23 }],
+    seuilMoisEconomique: 12,
+    baseCalcul: 'avg12',
+    fractionsMinJours: 30,
+  };
+
+  baremeRetraite: ConventionBaremeRetraite = {
+    paliers: [{ anneeMin: 0, anneeMax: 999, moisSalaire: 5 }],
+    baseCalcul: 'base_anciennete',
+  };
+
+  preavis: ConventionPreavis = {
+    dureeParCategorie: {
+      1: 30,
+      2: 30,
+      3: 30,
+      4: 30,
+      5: 30,
+      6: 30,
+      7: 30,
+      8: 60,
+      9: 60,
+      10: 90,
+      11: 90,
+    },
+    dureeDefaut: 90,
+    uniteJours: 'calendaires',
+    doubleementSiRupturePendantConge: true,
+    baseIndemCompensatrice: 'avg12',
+    heuresRechercheEmploi: { type: 'jours_semaine', valeur: 2 },
+  };
+
+  conges: ConventionConges = { joursParAn: 26, baseCalcul: 'avg12' };
+
+  fiscalite: ConventionFiscalite = {
+    indemLicenciementExonereITS: true,
+    indemPreavisImposableITS: true,
+    indemCongesImposableITS: true,
+    indemGratificationImposable: true,
+    TAUX_CNSS_SALARIE: 0.04,
+    indemLicenciementExonereCNSS: true,
+    preavisAssietteCNSS: true,
+    congesAssietteCNSS: true,
+    dernierSalaireAssietteCNSS: true,
+    gratificationAssietteCNSS: true,
+  };
+
+  decesConfig: ConventionDecesConfig = {
+    ancienneteMinMois: 24,
+    type: 'EGAL_LICENCIEMENT',
+  };
+
+  grilleSalariale: GrilleSalariale = {
+    categories: {
+      1: { 1: 50463, 2: 52558 },
+      2: { 1: 55284 },
+      3: { 1: 67088 },
+      4: { 1: 70507, 2: 79107 },
+      5: { 1: 87383 },
+      6: { 1: 102683, 2: 107680 },
+      7: { 1: 120641, 2: 133446 },
+      8: { 1: 140657, 2: 158301 },
+      9: { 1: 164337, 2: 173098 },
+      10: { 1: 187357 },
+      11: { 1: 229495 },
+    },
+  };
+
+  getPreavisDays(categorie: number): number {
+    return (
+      this.preavis.dureeParCategorie[categorie] ?? this.preavis.dureeDefaut
+    );
+  }
+  getSalaireMinimum(cat: number, echelon = 1): number {
+    const echelons = this.grilleSalariale.categories[cat];
+    if (!echelons) return 50463;
+    // Échelon non chiffré dans le barème (ex. 3 alors que le barème s'arrête
+    // à 2) → on retombe sur le dernier échelon chiffré, au lieu de 50463.
+    const dispo = Object.keys(echelons)
+      .map(Number)
+      .sort((a, b) => a - b);
+    const retenu =
+      [...dispo].reverse().find((e) => e <= echelon) ?? dispo[0];
+    return echelons[retenu] ?? 50463;
+  }
+  getCategorieFromPoste(_p: string): number | null {
+    return null;
+  }
+
+  calcIndemLicenciement(
+    yearsExact: number,
+    avg12: number,
+    isEco = false,
+  ): { montant: number; detail: string } {
+    const paliers = isEco
+      ? this.baremeLicenciement.palierEconomique!
+      : this.baremeLicenciement.paliers;
+    let montant = 0;
+    const lignes: string[] = [];
+    for (const p of paliers) {
+      if (yearsExact <= p.anneeMin) break;
+      const n = Math.min(yearsExact, p.anneeMax) - p.anneeMin;
+      if (n <= 0) continue;
+      const c = avg12 * p.valeur * n;
+      montant += c;
+      lignes.push(
+        `${n.toFixed(2)}a × ${(p.valeur * 100).toFixed(0)}% × ${_fmt(avg12)} = ${_fmt(c)}`,
+      );
+    }
+    return {
+      montant: Math.round(montant),
+      detail: lignes.join(' + ') + ` = ${_fmt(montant)} FCFA`,
+    };
+  }
+
+  calcIndemRetraite(
+    yearsExact: number,
+    avg12: number,
+  ): { montant: number; detail: string } {
+    const montant = Math.round(avg12 * 5);
+    return {
+      montant,
+      detail: `5 mois (base + ancienneté) × ${_fmt(avg12)} = ${_fmt(montant)} FCFA`,
+    };
+  }
+
+  calcIndemDeces(
+    yearsExact: number,
+    avg12: number,
+  ): { montant: number; detail: string } {
+    if (yearsExact * 12 < 24)
+      return { montant: 0, detail: 'Ancienneté < 2 ans' };
+    return this.calcIndemLicenciement(yearsExact, avg12);
+  }
+}
+
+// ============================================================================
+// petrole.convention.ts
+// ============================================================================
+export class PetroleConvention implements IConvention {
+  code = 'PETROLE';
+  nom = 'Convention Collective Para-Pétrolier';
+  secteurs = ['pétrole', 'gaz', 'para-pétrolier', 'hydrocarbures'];
+
+  baremeLicenciement: ConventionBaremeLicenciement = {
+    format: 'POURCENTAGE',
+    seuilMoisAnciennete: 24,
+    paliers: [
+      { anneeMin: 0, anneeMax: 5, valeur: 0.45 },
+      { anneeMin: 5, anneeMax: 10, valeur: 0.5 },
+      { anneeMin: 10, anneeMax: 15, valeur: 0.6 },
+      { anneeMin: 15, anneeMax: 20, valeur: 0.65 },
+      { anneeMin: 20, anneeMax: 30, valeur: 0.7 },
+      { anneeMin: 30, anneeMax: 999, valeur: 0.85 },
+    ],
+    // Pétrole : même barème pour éco et personnel
+    baseCalcul: 'avg12',
+    fractionsMinJours: 0, // prorata mois
+  };
+
+  baremeRetraite: ConventionBaremeRetraite = {
+    paliers: [
+      { anneeMin: 1, anneeMax: 8, moisSalaire: 4 },
+      { anneeMin: 8, anneeMax: 16, moisSalaire: 8 },
+      { anneeMin: 16, anneeMax: 21, moisSalaire: 10 },
+      { anneeMin: 21, anneeMax: 999, moisSalaire: 12 }, // 12.5 arrondi
+    ],
+    baseCalcul: 'avg12',
+  };
+
+  preavis: ConventionPreavis = {
+    dureeParCategorie: {
+      1: 60,
+      2: 60,
+      3: 60,
+      4: 60,
+      5: 60,
+      6: 60,
+      7: 60,
+      8: 60,
+      9: 90,
+      10: 90,
+    },
+    dureeDefaut: 90,
+    uniteJours: 'calendaires',
+    doubleementSiRupturePendantConge: false,
+    baseIndemCompensatrice: 'avg12',
+    heuresRechercheEmploi: { type: 'heures_jour', valeur: 2 },
+  };
+
+  conges: ConventionConges = { joursParAn: 26, baseCalcul: 'avg12' };
+
+  fiscalite: ConventionFiscalite = {
+    indemLicenciementExonereITS: true,
+    indemPreavisImposableITS: true,
+    indemCongesImposableITS: true,
+    indemGratificationImposable: true,
+    TAUX_CNSS_SALARIE: 0.04,
+    indemLicenciementExonereCNSS: true,
+    preavisAssietteCNSS: true,
+    congesAssietteCNSS: true,
+    dernierSalaireAssietteCNSS: true,
+    gratificationAssietteCNSS: true,
+  };
+
+  decesConfig: ConventionDecesConfig = {
+    ancienneteMinMois: 12,
+    type: 'FORFAIT_PLUS_LICENCIEMENT',
+    moisForfait: 2,
+  };
+
+  grilleSalariale: GrilleSalariale = { categories: {} };
+
+  getPreavisDays(cat: number): number {
+    return this.preavis.dureeParCategorie[cat] ?? this.preavis.dureeDefaut;
+  }
+  getSalaireMinimum(_c: number): number {
+    return 70000;
+  }
+  getCategorieFromPoste(_p: string): number | null {
+    return null;
+  }
+
+  calcIndemLicenciement(
+    yearsExact: number,
+    avg12: number,
+  ): { montant: number; detail: string } {
+    const paliers = this.baremeLicenciement.paliers;
+    let montant = 0;
+    const lignes: string[] = [];
+    for (const p of paliers) {
+      if (yearsExact <= p.anneeMin) break;
+      const n = Math.min(yearsExact, p.anneeMax) - p.anneeMin;
+      if (n <= 0) continue;
+      const c = avg12 * p.valeur * n;
+      montant += c;
+      lignes.push(
+        `${n.toFixed(2)}a × ${(p.valeur * 100).toFixed(0)}% × ${_fmt(avg12)} = ${_fmt(c)}`,
+      );
+    }
+    return {
+      montant: Math.round(montant),
+      detail: lignes.join(' + ') + ` = ${_fmt(montant)} FCFA`,
+    };
+  }
+
+  calcIndemRetraite(
+    yearsExact: number,
+    avg12: number,
+  ): { montant: number; detail: string } {
+    const p =
+      this.baremeRetraite.paliers.find(
+        (x) => yearsExact >= x.anneeMin && yearsExact < x.anneeMax,
+      ) ?? this.baremeRetraite.paliers.at(-1)!;
+    const montant = Math.round(avg12 * p.moisSalaire);
+    return {
+      montant,
+      detail: `${p.moisSalaire} mois × ${_fmt(avg12)} = ${_fmt(montant)} FCFA`,
+    };
+  }
+
+  calcIndemDeces(
+    yearsExact: number,
+    avg12: number,
+  ): { montant: number; detail: string } {
+    const forfait = Math.round(avg12 * 2);
+    const lic =
+      yearsExact * 12 >= 12
+        ? this.calcIndemLicenciement(yearsExact, avg12).montant
+        : 0;
+    return {
+      montant: forfait + lic,
+      detail: `2 mois forfait (${_fmt(forfait)}) + indemnité licenciement (${_fmt(lic)}) = ${_fmt(forfait + lic)} FCFA`,
+    };
+  }
+}
+
+// ============================================================================
+// mine.convention.ts — Convention Collective des Entreprises de Prospection,
+// de Recherche et d'Exploitation Minières (signée 22/02/2013, Pointe-Noire)
+// ============================================================================
+export class MineConvention implements IConvention {
+  code = 'MINE';
+  nom = 'Convention Collective des Entreprises de Prospection, de Recherche et d\u2019Exploitation Minières';
+  secteurs = [
+    'mines',
+    'minier',
+    'exploitation minière',
+    'prospection',
+    'recherche minière',
+    'extraction',
+  ];
+
+  baremeLicenciement: ConventionBaremeLicenciement = {
+    format: 'POURCENTAGE',
+    // Aucun seuil minimum d'ancienneté explicite dans le texte (Art.43) —
+    // contrairement à Industrie/BTP (24 mois), les tranches démarrent dès
+    // l'année 1 de présence.
+    seuilMoisAnciennete: 0,
+    paliers: [
+      { anneeMin: 0, anneeMax: 5, valeur: 0.3 },
+      { anneeMin: 5, anneeMax: 10, valeur: 0.37 },
+      { anneeMin: 10, anneeMax: 15, valeur: 0.55 },
+      { anneeMin: 15, anneeMax: 20, valeur: 0.65 },
+      { anneeMin: 20, anneeMax: 25, valeur: 0.75 },
+      { anneeMin: 25, anneeMax: 30, valeur: 0.85 },
+      { anneeMin: 30, anneeMax: 999, valeur: 1.0 },
+    ],
+    // Pas de barème économique distinct dans le texte (Art.44 renvoie
+    // simplement à la procédure du Code du Travail, sans taux séparé) —
+    // mêmes paliers utilisés qu'il s'agisse d'un motif personnel ou
+    // économique.
+    baseCalcul: 'avg12',
+    fractionsMinJours: 30,
+  };
+
+  baremeRetraite: ConventionBaremeRetraite = {
+    // Art.48 : 2 mois de salaire moyen mensuel, forfaitaire, sans palier
+    // d'ancienneté.
+    paliers: [{ anneeMin: 0, anneeMax: 999, moisSalaire: 2 }],
+    baseCalcul: 'avg12',
+  };
+
+  preavis: ConventionPreavis = {
+    // Art.42 : 1 mois Exécution (cat.1-9), 2 mois Maîtrise (cat.10-14),
+    // 3 mois Cadre (cat.15-21).
+    dureeParCategorie: {
+      1: 30,
+      2: 30,
+      3: 30,
+      4: 30,
+      5: 30,
+      6: 30,
+      7: 30,
+      8: 30,
+      9: 30,
+      10: 60,
+      11: 60,
+      12: 60,
+      13: 60,
+      14: 60,
+      15: 90,
+      16: 90,
+      17: 90,
+      18: 90,
+      19: 90,
+      20: 90,
+      21: 90,
+    },
+    dureeDefaut: 90,
+    uniteJours: 'calendaires',
+    // Art.42 : préavis doublé si rupture dans les 30j avant congé, pendant
+    // le congé, ou dans les 30j suivant le retour de congé.
+    doubleementSiRupturePendantConge: true,
+    baseIndemCompensatrice: 'avg12',
+    // Art.42 : 2 jours par semaine pour recherche d'emploi.
+    heuresRechercheEmploi: { type: 'jours_semaine', valeur: 2 },
+  };
+
+  conges: ConventionConges = { joursParAn: 26, baseCalcul: 'avg12' };
+
+  fiscalite: ConventionFiscalite = {
+    indemLicenciementExonereITS: true,
+    indemPreavisImposableITS: true,
+    indemCongesImposableITS: true,
+    indemGratificationImposable: true,
+    TAUX_CNSS_SALARIE: 0.04,
+    indemLicenciementExonereCNSS: true,
+    preavisAssietteCNSS: true,
+    congesAssietteCNSS: true,
+    dernierSalaireAssietteCNSS: true,
+    gratificationAssietteCNSS: true,
+  };
+
+  decesConfig: ConventionDecesConfig = {
+    // Art.47 : allocation forfaitaire (1 mois de rémunération brute)
+    // toujours due au décès ; indemnité complémentaire égale à
+    // l'indemnité de licenciement due uniquement si ≥ 2 ans d'ancienneté.
+    ancienneteMinMois: 24,
+    type: 'FORFAIT_PLUS_LICENCIEMENT',
+    moisForfait: 1,
+  };
+
+  grilleSalariale: GrilleSalariale = { categories: {} };
+
+  getPreavisDays(cat: number): number {
+    return this.preavis.dureeParCategorie[cat] ?? this.preavis.dureeDefaut;
+  }
+  getSalaireMinimum(_c: number): number {
+    // Plancher réel du barème (Cat.1, Éch.1) — voir mine-grille.ts pour la
+    // grille complète utilisée côté paie/RH.
+    return 68000;
+  }
+  getCategorieFromPoste(_p: string): number | null {
+    return null;
+  }
+
+  calcIndemLicenciement(
+    yearsExact: number,
+    avg12: number,
+  ): { montant: number; detail: string } {
+    const paliers = this.baremeLicenciement.paliers;
+    let montant = 0;
+    const lignes: string[] = [];
+    for (const p of paliers) {
+      if (yearsExact <= p.anneeMin) break;
+      const n = Math.min(yearsExact, p.anneeMax) - p.anneeMin;
+      if (n <= 0) continue;
+      const c = avg12 * p.valeur * n;
+      montant += c;
+      lignes.push(
+        `${n.toFixed(2)}a × ${(p.valeur * 100).toFixed(0)}% × ${_fmt(avg12)} = ${_fmt(c)}`,
+      );
+    }
+    return {
+      montant: Math.round(montant),
+      detail: lignes.join(' + ') + ` = ${_fmt(montant)} FCFA`,
+    };
+  }
+
+  calcIndemRetraite(
+    _yearsExact: number,
+    avg12: number,
+  ): { montant: number; detail: string } {
+    const montant = Math.round(avg12 * 2);
+    return {
+      montant,
+      detail: `2 mois (Art.48) × ${_fmt(avg12)} = ${_fmt(montant)} FCFA`,
+    };
+  }
+
+  calcIndemDeces(
+    yearsExact: number,
+    avg12: number,
+  ): { montant: number; detail: string } {
+    const forfait = Math.round(avg12 * (this.decesConfig.moisForfait ?? 1));
+    const lic =
+      yearsExact * 12 >= this.decesConfig.ancienneteMinMois
+        ? this.calcIndemLicenciement(yearsExact, avg12).montant
+        : 0;
+    return {
+      montant: forfait + lic,
+      detail: `1 mois forfait (Art.47, ${_fmt(forfait)}) + indemnité licenciement si ≥2 ans (${_fmt(lic)}) = ${_fmt(forfait + lic)} FCFA`,
+    };
+  }
+}
+
+// ============================================================================
+// btp.convention.ts
+// ============================================================================
+export class BTPConvention implements IConvention {
+  code = 'BTP';
+  nom = 'Convention Collective BTP';
+  secteurs = ['bâtiment', 'travaux publics', 'construction', 'génie civil'];
+
+  baremeLicenciement: ConventionBaremeLicenciement = {
+    format: 'POURCENTAGE',
+    seuilMoisAnciennete: 24,
+    paliers: [
+      { anneeMin: 0, anneeMax: 5, valeur: 0.35 },
+      { anneeMin: 5, anneeMax: 10, valeur: 0.4 },
+      { anneeMin: 10, anneeMax: 999, valeur: 0.45 },
+    ],
+    palierEconomique: [{ anneeMin: 0, anneeMax: 999, valeur: 0.2 }],
+    seuilMoisEconomique: 18,
+    baseCalcul: 'avg12',
+    // BTP exclut AUSSI les primes diverses (pas seulement frais)
+    exclusionsBase: ['remboursements_frais', 'primes_diverses'],
+    fractionsMinJours: 30,
+  };
+
+  baremeRetraite: ConventionBaremeRetraite = {
+    paliers: [
+      { anneeMin: 2, anneeMax: 6, moisSalaire: 2 },
+      { anneeMin: 6, anneeMax: 999, moisSalaire: 3 },
+    ],
+    baseCalcul: 'avg12',
+    // ≥ 6 ans : 3 mois + 1.5% par année, max +25%
+    bonusMajoration: { anneeDepart: 6, moisParPeriode: 0.015, periodeMois: 12 },
+  };
+
+  preavis: ConventionPreavis = {
+    // BTP : jours OUVRABLES
+    dureeParCategorie: {
+      1: 21,
+      2: 21,
+      3: 21, // cat 1-3 : 21 jours ouvrables
+      4: 35,
+      5: 35, // cat 4-5 : 35 jours ouvrables
+      6: 40,
+      7: 40,
+      8: 40, // cat 6-8 : 40 jours ouvrables
+      9: 90, // cat 9+  : 3 mois
+    },
+    dureeDefaut: 90,
+    uniteJours: 'ouvrables',
+    doubleementSiRupturePendantConge: true,
+    baseIndemCompensatrice: 'avg12',
+    heuresRechercheEmploi: { type: 'jours_semaine', valeur: 2 },
+  };
+
+  conges: ConventionConges = { joursParAn: 26, baseCalcul: 'avg12' };
+
+  fiscalite: ConventionFiscalite = {
+    indemLicenciementExonereITS: true,
+    indemPreavisImposableITS: true,
+    indemCongesImposableITS: true,
+    indemGratificationImposable: true,
+    TAUX_CNSS_SALARIE: 0.04,
+    indemLicenciementExonereCNSS: true,
+    preavisAssietteCNSS: true,
+    congesAssietteCNSS: true,
+    dernierSalaireAssietteCNSS: true,
+    gratificationAssietteCNSS: true,
+  };
+
+  decesConfig: ConventionDecesConfig = {
+    ancienneteMinMois: 18,
+    type: 'EGAL_LICENCIEMENT',
+  };
+
+  grilleSalariale: GrilleSalariale = { categories: {} };
+
+  getPreavisDays(cat: number): number {
+    return this.preavis.dureeParCategorie[cat] ?? this.preavis.dureeDefaut;
+  }
+  getSalaireMinimum(_c: number): number {
+    return 70000;
+  }
+  getCategorieFromPoste(_p: string): number | null {
+    return null;
+  }
+
+  calcIndemLicenciement(
+    yearsExact: number,
+    avg12: number,
+    isEco = false,
+  ): { montant: number; detail: string } {
+    const paliers = isEco
+      ? this.baremeLicenciement.palierEconomique!
+      : this.baremeLicenciement.paliers;
+    let montant = 0;
+    const lignes: string[] = [];
+    for (const p of paliers) {
+      if (yearsExact <= p.anneeMin) break;
+      const n = Math.min(yearsExact, p.anneeMax) - p.anneeMin;
+      if (n <= 0) continue;
+      const c = avg12 * p.valeur * n;
+      montant += c;
+      lignes.push(
+        `${n.toFixed(2)}a × ${(p.valeur * 100).toFixed(0)}% × ${_fmt(avg12)} = ${_fmt(c)}`,
+      );
+    }
+    return {
+      montant: Math.round(montant),
+      detail: lignes.join(' + ') + ` = ${_fmt(montant)} FCFA`,
+    };
+  }
+
+  calcIndemRetraite(
+    yearsExact: number,
+    avg12: number,
+  ): { montant: number; detail: string } {
+    if (yearsExact < 2) return { montant: 0, detail: 'Ancienneté < 2 ans' };
+    if (yearsExact < 6) {
+      const montant = Math.round(avg12 * 2);
+      return {
+        montant,
+        detail: `2 mois × ${_fmt(avg12)} = ${_fmt(montant)} FCFA`,
+      };
+    }
+    // ≥ 6 ans : 3 mois + 1.5% par année, max +25%
+    const bonus = Math.min(yearsExact * 0.015, 0.25);
+    const mois = 3 * (1 + bonus);
+    const montant = Math.round(avg12 * mois);
+    return {
+      montant,
+      detail: `3 mois × (1 + ${(bonus * 100).toFixed(1)}%) × ${_fmt(avg12)} = ${_fmt(montant)} FCFA`,
+    };
+  }
+
+  calcIndemDeces(
+    yearsExact: number,
+    avg12: number,
+  ): { montant: number; detail: string } {
+    if (yearsExact * 12 < 18)
+      return { montant: 0, detail: 'Ancienneté < 18 mois' };
+    return this.calcIndemLicenciement(yearsExact, avg12);
+  }
+}
+
+// ============================================================================
+// hotellerie.convention.ts
+// ============================================================================
+export class HotellerieConvention implements IConvention {
+  code = 'HOTELLERIE';
+  nom = 'Convention Collective Hôtellerie & Catering';
+  secteurs = ['hôtellerie', 'restauration', 'catering', 'tourisme'];
+
+  baremeLicenciement: ConventionBaremeLicenciement = {
+    format: 'POURCENTAGE',
+    seuilMoisAnciennete: 24,
+    paliers: [
+      { anneeMin: 0, anneeMax: 5, valeur: 0.5 },
+      { anneeMin: 5, anneeMax: 10, valeur: 0.6 },
+      { anneeMin: 10, anneeMax: 999, valeur: 0.7 },
+    ],
+    palierEconomique: [{ anneeMin: 0, anneeMax: 999, valeur: 0.55 }],
+    seuilMoisEconomique: 12,
+    baseCalcul: 'avg12',
+    fractionsMinJours: 30,
+  };
+
+  baremeRetraite: ConventionBaremeRetraite = {
+    paliers: [
+      { anneeMin: 5, anneeMax: 10, moisSalaire: 4 },
+      { anneeMin: 10, anneeMax: 15, moisSalaire: 6 },
+      { anneeMin: 15, anneeMax: 20, moisSalaire: 8 },
+      { anneeMin: 20, anneeMax: 999, moisSalaire: 8 }, // +1 mois tous les 2 ans
+    ],
+    baseCalcul: 'avg12',
+    bonusMajoration: { anneeDepart: 20, moisParPeriode: 1, periodeMois: 24 },
+  };
+
+  preavis: ConventionPreavis = {
+    dureeParCategorie: {
+      1: 30,
+      2: 30,
+      3: 30,
+      4: 30,
+      5: 30,
+      6: 30,
+      7: 30,
+      8: 60,
+      9: 60,
+      10: 90,
+    },
+    dureeDefaut: 90,
+    uniteJours: 'calendaires',
+    doubleementSiRupturePendantConge: true,
+    baseIndemCompensatrice: 'avg12',
+    heuresRechercheEmploi: { type: 'jours_semaine', valeur: 2 },
+  };
+
+  conges: ConventionConges = { joursParAn: 26, baseCalcul: 'avg12' };
+
+  fiscalite: ConventionFiscalite = {
+    indemLicenciementExonereITS: true,
+    indemPreavisImposableITS: true,
+    indemCongesImposableITS: true,
+    indemGratificationImposable: true,
+    TAUX_CNSS_SALARIE: 0.04,
+    indemLicenciementExonereCNSS: true,
+    preavisAssietteCNSS: true,
+    congesAssietteCNSS: true,
+    dernierSalaireAssietteCNSS: true,
+    gratificationAssietteCNSS: true,
+  };
+
+  decesConfig: ConventionDecesConfig = {
+    ancienneteMinMois: 24,
+    type: 'EGAL_LICENCIEMENT',
+  };
+
+  grilleSalariale: GrilleSalariale = { categories: {} };
+
+  getPreavisDays(cat: number): number {
+    return this.preavis.dureeParCategorie[cat] ?? this.preavis.dureeDefaut;
+  }
+  getSalaireMinimum(_c: number): number {
+    return 70000;
+  }
+  getCategorieFromPoste(_p: string): number | null {
+    return null;
+  }
+
+  calcIndemLicenciement(
+    yearsExact: number,
+    avg12: number,
+    isEco = false,
+  ): { montant: number; detail: string } {
+    const paliers = isEco
+      ? this.baremeLicenciement.palierEconomique!
+      : this.baremeLicenciement.paliers;
+    let montant = 0;
+    const lignes: string[] = [];
+    for (const p of paliers) {
+      if (yearsExact <= p.anneeMin) break;
+      const n = Math.min(yearsExact, p.anneeMax) - p.anneeMin;
+      if (n <= 0) continue;
+      const c = avg12 * p.valeur * n;
+      montant += c;
+      lignes.push(
+        `${n.toFixed(2)}a × ${(p.valeur * 100).toFixed(0)}% × ${_fmt(avg12)} = ${_fmt(c)}`,
+      );
+    }
+    return {
+      montant: Math.round(montant),
+      detail: lignes.join(' + ') + ` = ${_fmt(montant)} FCFA`,
+    };
+  }
+
+  calcIndemRetraite(
+    yearsExact: number,
+    avg12: number,
+  ): { montant: number; detail: string } {
+    if (yearsExact < 5) return { montant: 0, detail: 'Ancienneté < 5 ans' };
+    let mois = 8;
+    if (yearsExact >= 20) mois = 8 + Math.floor((yearsExact - 20) / 2);
+    else if (yearsExact >= 15) mois = 8;
+    else if (yearsExact >= 10) mois = 6;
+    else mois = 4;
+    const montant = Math.round(avg12 * mois);
+    return {
+      montant,
+      detail: `${mois} mois × ${_fmt(avg12)} = ${_fmt(montant)} FCFA`,
+    };
+  }
+
+  calcIndemDeces(
+    yearsExact: number,
+    avg12: number,
+  ): { montant: number; detail: string } {
+    if (yearsExact * 12 < 24)
+      return { montant: 0, detail: 'Ancienneté < 2 ans' };
+    return this.calcIndemLicenciement(yearsExact, avg12);
+  }
+}
+
+// ============================================================================
+// pharmacie.convention.ts
+// ============================================================================
+export class PharmacieConvention implements IConvention {
+  code = 'PHARMACIE';
+  nom = 'Convention Collective Officines de Pharmacies';
+  secteurs = ['pharmacie', 'parapharmacie', 'officine'];
+
+  baremeLicenciement: ConventionBaremeLicenciement = {
+    format: 'POURCENTAGE',
+    seuilMoisAnciennete: 24,
+    paliers: [
+      { anneeMin: 0, anneeMax: 5, valeur: 0.32 },
+      { anneeMin: 5, anneeMax: 10, valeur: 0.38 },
+      { anneeMin: 10, anneeMax: 999, valeur: 0.44 },
+    ],
+    palierEconomique: [{ anneeMin: 0, anneeMax: 999, valeur: 0.24 }],
+    seuilMoisEconomique: 12,
+    baseCalcul: 'avg12',
+    fractionsMinJours: 30,
+  };
+
+  baremeRetraite: ConventionBaremeRetraite = {
+    paliers: [
+      { anneeMin: 0, anneeMax: 10, moisSalaire: 4 },
+      { anneeMin: 10, anneeMax: 15, moisSalaire: 5 },
+      { anneeMin: 15, anneeMax: 999, moisSalaire: 6 },
+    ],
+    baseCalcul: 'base', // ⚠️ salaire de base, pas avg12
+  };
+
+  preavis: ConventionPreavis = {
+    dureeParCategorie: {
+      1: 30,
+      2: 30,
+      3: 30,
+      4: 30,
+      5: 60,
+      6: 60,
+      7: 60,
+      8: 90,
+      9: 90,
+    },
+    dureeDefaut: 90,
+    uniteJours: 'calendaires',
+    doubleementSiRupturePendantConge: false,
+    baseIndemCompensatrice: 'avg12',
+    heuresRechercheEmploi: { type: 'jours_semaine', valeur: 2 },
+  };
+
+  conges: ConventionConges = { joursParAn: 26, baseCalcul: 'avg12' };
+
+  fiscalite: ConventionFiscalite = {
+    indemLicenciementExonereITS: true,
+    indemPreavisImposableITS: true,
+    indemCongesImposableITS: true,
+    indemGratificationImposable: true,
+    TAUX_CNSS_SALARIE: 0.04,
+    indemLicenciementExonereCNSS: true,
+    preavisAssietteCNSS: true,
+    congesAssietteCNSS: true,
+    dernierSalaireAssietteCNSS: true,
+    gratificationAssietteCNSS: true,
+  };
+
+  decesConfig: ConventionDecesConfig = {
+    ancienneteMinMois: 12,
+    type: 'EGAL_LICENCIEMENT',
+  };
+
+  grilleSalariale: GrilleSalariale = { categories: {} };
+
+  getPreavisDays(cat: number): number {
+    return this.preavis.dureeParCategorie[cat] ?? this.preavis.dureeDefaut;
+  }
+  getSalaireMinimum(_c: number): number {
+    return 70000;
+  }
+  getCategorieFromPoste(_p: string): number | null {
+    return null;
+  }
+
+  calcIndemLicenciement(
+    yearsExact: number,
+    avg12: number,
+    isEco = false,
+  ): { montant: number; detail: string } {
+    const paliers = isEco
+      ? this.baremeLicenciement.palierEconomique!
+      : this.baremeLicenciement.paliers;
+    let montant = 0;
+    const lignes: string[] = [];
+    for (const p of paliers) {
+      if (yearsExact <= p.anneeMin) break;
+      const n = Math.min(yearsExact, p.anneeMax) - p.anneeMin;
+      if (n <= 0) continue;
+      const c = avg12 * p.valeur * n;
+      montant += c;
+      lignes.push(
+        `${n.toFixed(2)}a × ${(p.valeur * 100).toFixed(0)}% × ${_fmt(avg12)} = ${_fmt(c)}`,
+      );
+    }
+    return {
+      montant: Math.round(montant),
+      detail: lignes.join(' + ') + ` = ${_fmt(montant)} FCFA`,
+    };
+  }
+
+  calcIndemRetraite(
+    _yearsExact: number,
+    _avg12: number,
+    _cat?: string,
+    salaireBase?: number,
+  ): { montant: number; detail: string } {
+    const base = salaireBase ?? _avg12;
+    const p =
+      this.baremeRetraite.paliers.find(
+        (x) => _yearsExact >= x.anneeMin && _yearsExact < x.anneeMax,
+      ) ?? this.baremeRetraite.paliers.at(-1)!;
+    const montant = Math.round(base * p.moisSalaire);
+    return {
+      montant,
+      detail: `${p.moisSalaire} mois × salaire de base (${_fmt(base)}) = ${_fmt(montant)} FCFA`,
+    };
+  }
+
+  calcIndemDeces(
+    yearsExact: number,
+    avg12: number,
+  ): { montant: number; detail: string } {
+    if (yearsExact * 12 < 12)
+      return { montant: 0, detail: 'Ancienneté < 1 an' };
+    return this.calcIndemLicenciement(yearsExact, avg12);
+  }
+}
+
+// ============================================================================
+// transport.convention.ts — Barème FORFAITAIRE par tranche
+// ============================================================================
+export class TransportConvention implements IConvention {
+  code = 'TRANSPORT';
+  nom = 'Convention Collective Auxiliaires de Transport';
+  secteurs = ['transport', 'logistique', 'fret', 'manutention'];
+
+  baremeLicenciement: ConventionBaremeLicenciement = {
+    format: 'FORFAIT',
+    seuilMoisAnciennete: 12,
+    // Pour le transport, paliers = montants forfaitaires par TRANCHE (pas × années)
+    // valeur = nombre de mois de salaire brut total pour la tranche
+    paliers: [
+      { anneeMin: 1, anneeMax: 3, valeur: 2 },
+      { anneeMin: 3, anneeMax: 5, valeur: 3 },
+      { anneeMin: 5, anneeMax: 10, valeur: 4 },
+      { anneeMin: 10, anneeMax: 999, valeur: 6 },
+    ],
+    palierEconomique: [
+      { anneeMin: 1, anneeMax: 3, valeur: 2 },
+      { anneeMin: 3, anneeMax: 6, valeur: 4 },
+      { anneeMin: 6, anneeMax: 9, valeur: 5 },
+      { anneeMin: 9, anneeMax: 12, valeur: 8 },
+      { anneeMin: 12, anneeMax: 999, valeur: 10 },
+    ],
+    baseCalcul: 'avg12',
+    fractionsMinJours: 30,
+  };
+
+  baremeRetraite: ConventionBaremeRetraite = {
+    paliers: [
+      {
+        anneeMin: 0,
+        anneeMax: 999,
+        moisSalaire: 0,
+        parCategorie: { execution: 11, maitrise: 9, cadre: 5 },
+      },
+    ],
+    baseCalcul: 'avg12',
+    primeSpeciale: { execution: 500000, maitrise: 550000, cadre: 600000 },
+  };
+
+  preavis: ConventionPreavis = {
+    dureeParCategorie: {
+      1: 30,
+      2: 30,
+      3: 30,
+      4: 30,
+      5: 30,
+      6: 30,
+      7: 60,
+      8: 60,
+      9: 90,
+      10: 90,
+    },
+    dureeDefaut: 90,
+    uniteJours: 'calendaires',
+    doubleementSiRupturePendantConge: true,
+    baseIndemCompensatrice: 'avg12',
+    heuresRechercheEmploi: { type: 'jours_semaine', valeur: 2 },
+  };
+
+  conges: ConventionConges = { joursParAn: 26, baseCalcul: 'avg12' };
+
+  fiscalite: ConventionFiscalite = {
+    indemLicenciementExonereITS: true,
+    indemPreavisImposableITS: true,
+    indemCongesImposableITS: true,
+    indemGratificationImposable: true,
+    TAUX_CNSS_SALARIE: 0.04,
+    indemLicenciementExonereCNSS: true,
+    preavisAssietteCNSS: true,
+    congesAssietteCNSS: true,
+    dernierSalaireAssietteCNSS: true,
+    gratificationAssietteCNSS: true,
+  };
+
+  decesConfig: ConventionDecesConfig = {
+    ancienneteMinMois: 12,
+    type: 'EGAL_LICENCIEMENT',
+  };
+
+  grilleSalariale: GrilleSalariale = { categories: {} };
+
+  getPreavisDays(cat: number): number {
+    return this.preavis.dureeParCategorie[cat] ?? this.preavis.dureeDefaut;
+  }
+  getSalaireMinimum(_c: number): number {
+    return 70000;
+  }
+  getCategorieFromPoste(_p: string): number | null {
+    return null;
+  }
+
+  calcIndemLicenciement(
+    yearsExact: number,
+    avg12: number,
+    isEco = false,
+  ): { montant: number; detail: string } {
+    // Transport : montant forfaitaire basé sur la tranche (pas × années)
+    const paliers = isEco
+      ? this.baremeLicenciement.palierEconomique!
+      : this.baremeLicenciement.paliers;
+    const palier = [...paliers].reverse().find((p) => yearsExact >= p.anneeMin);
+    if (!palier) return { montant: 0, detail: 'Ancienneté insuffisante' };
+
+    const montantBase = Math.round(avg12 * palier.valeur);
+
+    // Majoration 25% du salaire de base par année au-delà du min de tranche (motif personnel)
+    let majoration = 0;
+    if (!isEco) {
+      const anneesAuDela = Math.max(0, yearsExact - palier.anneeMin);
+      majoration = Math.round(avg12 * 0.25 * anneesAuDela);
+    }
+
+    const montant = montantBase + majoration;
+    const detail = isEco
+      ? `${palier.valeur} mois forfait × ${_fmt(avg12)} = ${_fmt(montantBase)} FCFA`
+      : `${palier.valeur} mois × ${_fmt(avg12)} = ${_fmt(montantBase)} + maj. 25%/an (${_fmt(majoration)}) = ${_fmt(montant)} FCFA`;
+
+    return { montant, detail };
+  }
+
+  calcIndemRetraite(
+    yearsExact: number,
+    avg12: number,
+    categorieLabel = 'execution',
+  ): { montant: number; detail: string } {
+    const cat = categorieLabel.toLowerCase();
+    const mois = this.baremeRetraite.paliers[0].parCategorie?.[cat] ?? 5;
+    const prime = this.baremeRetraite.primeSpeciale?.[cat] ?? 0;
+    const montant = Math.round(avg12 * mois) + prime;
+    return {
+      montant,
+      detail: `${mois} mois × ${_fmt(avg12)} + prime ${_fmt(prime)} = ${_fmt(montant)} FCFA`,
+    };
+  }
+
+  calcIndemDeces(
+    yearsExact: number,
+    avg12: number,
+  ): { montant: number; detail: string } {
+    const forfait = 1_300_000;
+    const lic =
+      yearsExact * 12 >= 12
+        ? this.calcIndemLicenciement(yearsExact, avg12, true).montant
+        : 0;
+    return {
+      montant: forfait + lic,
+      detail: `Forfait obsèques ${_fmt(forfait)} + indemnité éco (${_fmt(lic)}) = ${_fmt(forfait + lic)} FCFA`,
+    };
+  }
+}
+
+// ============================================================================
+// presse.convention.ts — Barème MOIS_PAR_AN avec plafond
+// ============================================================================
+export class PresseConvention implements IConvention {
+  code = 'PRESSE';
+  nom =
+    "Convention Collective Personnel de l'Information et de la Communication";
+  secteurs = [
+    'presse',
+    'médias',
+    'journalisme',
+    'communication',
+    'audiovisuel',
+  ];
+
+  baremeLicenciement: ConventionBaremeLicenciement = {
+    format: 'MOIS_PAR_AN',
+    seuilMoisAnciennete: 0,
+    paliers: [
+      { anneeMin: 0, anneeMax: 5, valeur: 1.0 },
+      { anneeMin: 5, anneeMax: 10, valeur: 1.5 },
+      { anneeMin: 10, anneeMax: 15, valeur: 2.0 },
+      { anneeMin: 15, anneeMax: 20, valeur: 2.5 },
+      { anneeMin: 20, anneeMax: 999, valeur: 3.0 },
+    ],
+    baseCalcul: 'avg12',
+    fractionsMinJours: 0,
+    plafondMois: 33,
+  };
+
+  baremeRetraite: ConventionBaremeRetraite = {
+    paliers: [{ anneeMin: 0, anneeMax: 999, moisSalaire: 6 }],
+    baseCalcul: 'base_anciennete',
+  };
+
+  preavis: ConventionPreavis = {
+    dureeParCategorie: {
+      1: 30,
+      2: 30,
+      3: 30,
+      4: 30,
+      5: 60,
+      6: 60,
+      7: 60,
+      8: 90,
+      9: 90,
+    },
+    dureeDefaut: 90,
+    uniteJours: 'calendaires',
+    doubleementSiRupturePendantConge: false,
+    baseIndemCompensatrice: 'avg12',
+    heuresRechercheEmploi: { type: 'jours_semaine', valeur: 2 },
+  };
+
+  conges: ConventionConges = { joursParAn: 26, baseCalcul: 'avg12' };
+
+  fiscalite: ConventionFiscalite = {
+    indemLicenciementExonereITS: true,
+    indemPreavisImposableITS: true,
+    indemCongesImposableITS: true,
+    indemGratificationImposable: true,
+    TAUX_CNSS_SALARIE: 0.04,
+    indemLicenciementExonereCNSS: true,
+    preavisAssietteCNSS: true,
+    congesAssietteCNSS: true,
+    dernierSalaireAssietteCNSS: true,
+    gratificationAssietteCNSS: true,
+  };
+
+  decesConfig: ConventionDecesConfig = {
+    ancienneteMinMois: 0,
+    type: 'PROGRESSIF',
+    paliers: [
+      { anneeMin: 0, anneeMax: 1, moisSalaire: 2 },
+      { anneeMin: 1, anneeMax: 5, moisSalaire: 3 },
+      { anneeMin: 5, anneeMax: 15, moisSalaire: 4 },
+      { anneeMin: 15, anneeMax: 20, moisSalaire: 5 },
+      { anneeMin: 20, anneeMax: 999, moisSalaire: 6 },
+    ],
+    majorationJoursParEnfant: 15,
+  };
+
+  grilleSalariale: GrilleSalariale = { categories: {} };
+
+  getPreavisDays(cat: number): number {
+    return this.preavis.dureeParCategorie[cat] ?? this.preavis.dureeDefaut;
+  }
+  getSalaireMinimum(_c: number): number {
+    return 70000;
+  }
+  getCategorieFromPoste(_p: string): number | null {
+    return null;
+  }
+
+  calcIndemLicenciement(
+    yearsExact: number,
+    avg12: number,
+  ): { montant: number; detail: string } {
+    let montant = 0;
+    const lignes: string[] = [];
+    for (const p of this.baremeLicenciement.paliers) {
+      if (yearsExact <= p.anneeMin) break;
+      const n = Math.min(yearsExact, p.anneeMax) - p.anneeMin;
+      if (n <= 0) continue;
+      const c = avg12 * p.valeur * n;
+      montant += c;
+      lignes.push(
+        `${n.toFixed(2)}a × ${p.valeur} mois × ${_fmt(avg12)} = ${_fmt(c)}`,
+      );
+    }
+    // Plafond 33 mois
+    const plafond = avg12 * 33;
+    if (montant > plafond) {
+      return {
+        montant: Math.round(plafond),
+        detail: `Plafonné à 33 mois : ${_fmt(plafond)} FCFA (calculé : ${_fmt(montant)})`,
+      };
+    }
+    return {
+      montant: Math.round(montant),
+      detail: lignes.join(' + ') + ` = ${_fmt(montant)} FCFA`,
+    };
+  }
+
+  calcIndemRetraite(
+    _yearsExact: number,
+    avg12: number,
+  ): { montant: number; detail: string } {
+    const montant = Math.round(avg12 * 6);
+    return {
+      montant,
+      detail: `6 mois (base + ancienneté) × ${_fmt(avg12)} = ${_fmt(montant)} FCFA`,
+    };
+  }
+
+  calcIndemDeces(
+    yearsExact: number,
+    avg12: number,
+    nbEnfants = 0,
+  ): { montant: number; detail: string } {
+    const p =
+      this.decesConfig.paliers?.find(
+        (x) => yearsExact >= x.anneeMin && yearsExact < x.anneeMax,
+      ) ?? this.decesConfig.paliers?.at(-1)!;
+    const majorationJours =
+      (this.decesConfig.majorationJoursParEnfant ?? 0) * nbEnfants;
+    const mois = p.moisSalaire;
+    const bonus = Math.round((avg12 / 30) * majorationJours);
+    const montant = Math.round(avg12 * mois) + bonus;
+    return {
+      montant,
+      detail: `${mois} mois × ${_fmt(avg12)} + ${majorationJours}j enfants (${_fmt(bonus)}) = ${_fmt(montant)} FCFA`,
+    };
+  }
+}
+
+// ============================================================================
+// ntic.convention.ts — Convention Collective des Entreprises de
+// Télécommunication et des Technologies Associées (10/07/2003)
+// Barème MOIS_PAR_AN avec plafond 36 mois (Art.50).
+// Sources : Art.50 (préavis, licenciement), Art.57 (retraite), Art.58 (décès).
+// ============================================================================
+export class NTICConvention implements IConvention {
+  code = 'NTIC';
+  nom =
+    'Convention Collective des Entreprises de Télécommunication et des Technologies Associées';
+  secteurs = [
+    'télécommunications',
+    'télécommunication',
+    'télécoms',
+    'telecom',
+    'technologies associées',
+    'informatique',
+    'numérique',
+    'tech',
+    'NTIC',
+  ];
+
+  baremeLicenciement: ConventionBaremeLicenciement = {
+    format: 'MOIS_PAR_AN',
+    // Art.50 : indemnité "après confirmation dans son emploi" (donc hors
+    // période d'essai) — pas de seuil d'ancienneté chiffré dans le texte.
+    seuilMoisAnciennete: 0,
+    paliers: [
+      { anneeMin: 0, anneeMax: 3, valeur: 1.0 }, // 3 premières années
+      { anneeMin: 3, anneeMax: 10, valeur: 1.5 }, // 4e à 10e année
+      { anneeMin: 10, anneeMax: 15, valeur: 2.0 }, // 11e à 15e année
+      { anneeMin: 15, anneeMax: 999, valeur: 2.5 }, // à compter de la 16e année
+    ],
+    baseCalcul: 'avg12',
+    fractionsMinJours: 0, // "il doit être tenu compte des fractions d'années"
+    plafondMois: 36, // plafonnée à 36 mois de salaire moyen
+  };
+
+  baremeRetraite: ConventionBaremeRetraite = {
+    paliers: [],
+    // Art.57 : % du salaire annuel brut (moyenne des 12 derniers mois × 12),
+    // après 5 / 10 / 20 / 30 ans d'ancienneté révolus. Rien avant 5 ans.
+    paliersPourcent: [
+      { anneeMin: 5, anneeMax: 10, pourcent: 0.1 },
+      { anneeMin: 10, anneeMax: 20, pourcent: 0.2 },
+      { anneeMin: 20, anneeMax: 30, pourcent: 0.4 },
+      { anneeMin: 30, anneeMax: 999, pourcent: 0.6 },
+    ],
+    baseCalcul: 'annuel',
+  };
+
+  preavis: ConventionPreavis = {
+    // Art.50 : 1 mois Ouvriers/Employés (cat.1-8), 2 mois Agents de maîtrise
+    // (cat.9D, 9, 10), 3 mois Cadres (cat.11D, 11, 12, 13).
+    // 9D et 11D se lisent 9 et 11 (ConventionsService._parseCategorieNum) :
+    // même durée que leur catégorie principale.
+    dureeParCategorie: {
+      1: 30,
+      2: 30,
+      3: 30,
+      4: 30,
+      5: 30,
+      6: 30,
+      7: 30,
+      8: 30,
+      9: 60,
+      10: 60,
+      11: 90,
+      12: 90,
+      13: 90,
+    },
+    dureeDefaut: 90,
+    uniteJours: 'calendaires',
+    // Art.50 : pas de doublement de l'indemnité (le texte prévoit seulement
+    // une notification 1 mois avant un départ en congé — autre règle).
+    doubleementSiRupturePendantConge: false,
+    baseIndemCompensatrice: 'avg12',
+    // Art.50 : 2 jours par semaine pour chercher un emploi, payés à plein salaire.
+    heuresRechercheEmploi: { type: 'jours_semaine', valeur: 2 },
+  };
+
+  conges: ConventionConges = { joursParAn: 26, baseCalcul: 'avg12' }; // Art.87
+
+  fiscalite: ConventionFiscalite = {
+    indemLicenciementExonereITS: true,
+    indemPreavisImposableITS: true,
+    indemCongesImposableITS: true,
+    indemGratificationImposable: true,
+    TAUX_CNSS_SALARIE: 0.04,
+    indemLicenciementExonereCNSS: true,
+    preavisAssietteCNSS: true,
+    congesAssietteCNSS: true,
+    dernierSalaireAssietteCNSS: true,
+    gratificationAssietteCNSS: true,
+  };
+
+  decesConfig: ConventionDecesConfig = {
+    // Art.58 : indemnité due EN PLUS des salaires de présence, allocation de
+    // congé et indemnités acquis. Le texte laisse des trous entre tranches
+    // ("0 à 5", "6 à 15", "16 à 20", "plus de 20") — retenu ici : les
+    // tranches changent aux années pleines 5 / 15 / 20.
+    ancienneteMinMois: 0,
+    type: 'PROGRESSIF',
+    paliers: [
+      { anneeMin: 0, anneeMax: 5, moisSalaire: 4 },
+      { anneeMin: 5, anneeMax: 15, moisSalaire: 10 },
+      { anneeMin: 15, anneeMax: 20, moisSalaire: 12 },
+      { anneeMin: 20, anneeMax: 999, moisSalaire: 15 },
+    ],
+  };
+
+  grilleSalariale: GrilleSalariale = { categories: {} };
+
+  getPreavisDays(cat: number): number {
+    return this.preavis.dureeParCategorie[cat] ?? this.preavis.dureeDefaut;
+  }
+  getSalaireMinimum(_c: number): number {
+    // Plancher réel du barème (Cat.1, Éch.1) — la grille complète est dans
+    // conventions/ntic-grille.ts (utilisée côté paie/RH).
+    return 104916;
+  }
+  getCategorieFromPoste(_p: string): number | null {
+    return null;
+  }
+
+  calcIndemLicenciement(
+    yearsExact: number,
+    avg12: number,
+  ): { montant: number; detail: string } {
+    let montant = 0;
+    const lignes: string[] = [];
+    for (const p of this.baremeLicenciement.paliers) {
+      if (yearsExact <= p.anneeMin) break;
+      const n = Math.min(yearsExact, p.anneeMax) - p.anneeMin;
+      if (n <= 0) continue;
+      const c = avg12 * p.valeur * n;
+      montant += c;
+      lignes.push(
+        `${n.toFixed(2)}a × ${p.valeur} mois × ${_fmt(avg12)} = ${_fmt(c)}`,
+      );
+    }
+    const plafond = avg12 * (this.baremeLicenciement.plafondMois ?? 36);
+    if (montant > plafond)
+      return {
+        montant: Math.round(plafond),
+        detail: `Plafonné 36 mois : ${_fmt(plafond)} FCFA`,
+      };
+    return {
+      montant: Math.round(montant),
+      detail: lignes.join(' + ') + ` = ${_fmt(montant)} FCFA`,
+    };
+  }
+
+  calcIndemRetraite(
+    yearsExact: number,
+    avg12: number,
+  ): { montant: number; detail: string } {
+    // ✅ Corrigé : l'ancienne version retombait sur le DERNIER palier (60 %)
+    // quand aucune tranche ne correspondait, donc un salarié < 5 ans touchait
+    // 60 % du salaire annuel. Avant 5 ans : aucune indemnité (Art.57).
+    const p = this.baremeRetraite.paliersPourcent?.find(
+      (x) => yearsExact >= x.anneeMin && yearsExact < x.anneeMax,
+    );
+    if (!p)
+      return {
+        montant: 0,
+        detail: "Ancienneté < 5 ans : pas d'indemnité de départ à la retraite (Art.57)",
+      };
+    const salAnnuel = avg12 * 12;
+    const montant = Math.round(salAnnuel * p.pourcent);
+    return {
+      montant,
+      detail: `${(p.pourcent * 100).toFixed(0)}% × salaire annuel (${_fmt(salAnnuel)}) = ${_fmt(montant)} FCFA`,
+    };
+  }
+
+  calcIndemDeces(
+    yearsExact: number,
+    avg12: number,
+  ): { montant: number; detail: string } {
+    const p =
+      this.decesConfig.paliers?.find(
+        (x) => yearsExact >= x.anneeMin && yearsExact < x.anneeMax,
+      ) ?? this.decesConfig.paliers?.at(-1)!;
+    const montant = Math.round(avg12 * p.moisSalaire);
+    return {
+      montant,
+      detail: `${p.moisSalaire} mois × ${_fmt(avg12)} = ${_fmt(montant)} FCFA`,
+    };
+  }
+}
+
+// ============================================================================
+// banque.convention.ts — Convention Collective des travailleurs des Banques,
+// Assurances et Assureur-conseils (juin 2011)
+// Barème MOIS_PAR_AN avec plafond 40 mois (Art.27).
+// Sources : Art.26 (préavis), Art.27 (licenciement), Art.29 (fin de carrière),
+// Art.31 (décès). Numérotation interne des codes : voir banque-grille.ts
+// (catégories 3-9 → 3..9 ; classes 1-10 → 11..20 ; hors classe → 21).
+// ============================================================================
+export class BanqueConvention implements IConvention {
+  code = 'BANQUE';
+  nom =
+    'Convention Collective des travailleurs des Banques, Assurances et Assureur-conseils';
+  secteurs = [
+    'banque',
+    'banques',
+    'assurance',
+    'assurances',
+    'assureur-conseils',
+    'assureur conseil',
+    'établissement de crédit',
+    'crédit',
+    'finance',
+    'microfinance',
+  ];
+
+  baremeLicenciement: ConventionBaremeLicenciement = {
+    format: 'MOIS_PAR_AN',
+    // Art.27 : droit à l'indemnité "lorsqu'il accomplit une durée de service
+    // égale à un (1) an".
+    seuilMoisAnciennete: 12,
+    paliers: [
+      { anneeMin: 0, anneeMax: 3, valeur: 1.5 }, // 3 premières années
+      { anneeMin: 3, anneeMax: 10, valeur: 2.5 }, // années 4 à 10
+      { anneeMin: 10, anneeMax: 15, valeur: 3.5 }, // années 11 à 15
+      { anneeMin: 15, anneeMax: 999, valeur: 4.5 }, // au-delà de 15 ans
+    ],
+    // Pas de barème distinct pour motif économique (Art.28 renvoie à la loi).
+    baseCalcul: 'avg12', // "salaire brut moyen des douze derniers mois"
+    fractionsMinJours: 0, // texte muet sur les fractions d'année : toutes comptées
+    plafondMois: 40, // "ne peut dépasser 40 mois de salaire brut moyen"
+  };
+
+  baremeRetraite: ConventionBaremeRetraite = {
+    // Art.29 : 3 mois de salaire brut PAR TRANCHE COMPLÈTE de 5 ans de présence.
+    // (affichage en paliers ; le calcul utilise floor(années / 5) × 3 mois)
+    paliers: [
+      { anneeMin: 5, anneeMax: 10, moisSalaire: 3 },
+      { anneeMin: 10, anneeMax: 15, moisSalaire: 6 },
+      { anneeMin: 15, anneeMax: 20, moisSalaire: 9 },
+      { anneeMin: 20, anneeMax: 25, moisSalaire: 12 },
+      { anneeMin: 25, anneeMax: 30, moisSalaire: 15 },
+      { anneeMin: 30, anneeMax: 35, moisSalaire: 18 },
+      { anneeMin: 35, anneeMax: 40, moisSalaire: 21 },
+      { anneeMin: 40, anneeMax: 999, moisSalaire: 24 },
+    ],
+    baseCalcul: 'avg12',
+  };
+
+  preavis: ConventionPreavis = {
+    // Art.26 (= durée de la période d'essai, Art.17) : 1 mois personnel de
+    // service et employés (catégories 3-9), 2 mois gradés (classes 1-5),
+    // 3 mois cadres (classes 6-10). Numéros internes : classe n = 10 + n.
+    // Hors classe (21) : non précisé dans le texte → traité comme cadre.
+    dureeParCategorie: {
+      3: 30,
+      4: 30,
+      5: 30,
+      6: 30,
+      7: 30,
+      8: 30,
+      9: 30,
+      11: 60,
+      12: 60,
+      13: 60,
+      14: 60,
+      15: 60,
+      16: 90,
+      17: 90,
+      18: 90,
+      19: 90,
+      20: 90,
+      21: 90,
+    },
+    dureeDefaut: 90,
+    uniteJours: 'calendaires',
+    doubleementSiRupturePendantConge: false,
+    baseIndemCompensatrice: 'avg12',
+    // Art.26 : 2 jours par semaine, sans réduction de salaire.
+    heuresRechercheEmploi: { type: 'jours_semaine', valeur: 2 },
+  };
+
+  conges: ConventionConges = { joursParAn: 26, baseCalcul: 'avg12' }; // Art.40 : réglementation en vigueur
+
+  fiscalite: ConventionFiscalite = {
+    indemLicenciementExonereITS: true,
+    indemPreavisImposableITS: true,
+    indemCongesImposableITS: true,
+    indemGratificationImposable: true,
+    TAUX_CNSS_SALARIE: 0.04,
+    indemLicenciementExonereCNSS: true,
+    preavisAssietteCNSS: true,
+    congesAssietteCNSS: true,
+    dernierSalaireAssietteCNSS: true,
+    gratificationAssietteCNSS: true,
+  };
+
+  decesConfig: ConventionDecesConfig = {
+    // Art.31 : si ≥ 1 an d'ancienneté → indemnité égale à l'indemnité de
+    // licenciement (Art.27) ; EN OUTRE prime de 75 000 FCFA par enfant à charge
+    // (sans condition d'ancienneté).
+    ancienneteMinMois: 12,
+    type: 'EGAL_LICENCIEMENT',
+    primeFixeParEnfant: 75000,
+  };
+
+  grilleSalariale: GrilleSalariale = { categories: {} };
+
+  getPreavisDays(cat: number): number {
+    return this.preavis.dureeParCategorie[cat] ?? this.preavis.dureeDefaut;
+  }
+  getSalaireMinimum(_c: number): number {
+    // Plancher réel du barème (Cat.3 Éch.1 : indice 95 × 805) — la grille
+    // complète est dans conventions/banque-grille.ts.
+    return 76475;
+  }
+  getCategorieFromPoste(_p: string): number | null {
+    return null;
+  }
+
+  calcIndemLicenciement(
+    yearsExact: number,
+    avg12: number,
+  ): { montant: number; detail: string } {
+    let montant = 0;
+    const lignes: string[] = [];
+    for (const p of this.baremeLicenciement.paliers) {
+      if (yearsExact <= p.anneeMin) break;
+      const n = Math.min(yearsExact, p.anneeMax) - p.anneeMin;
+      if (n <= 0) continue;
+      const c = avg12 * p.valeur * n;
+      montant += c;
+      lignes.push(
+        `${n.toFixed(2)}a × ${p.valeur} mois × ${_fmt(avg12)} = ${_fmt(c)}`,
+      );
+    }
+    const plafond = avg12 * (this.baremeLicenciement.plafondMois ?? 40);
+    if (montant > plafond)
+      return {
+        montant: Math.round(plafond),
+        detail: `Plafonné 40 mois : ${_fmt(plafond)} FCFA`,
+      };
+    return {
+      montant: Math.round(montant),
+      detail: lignes.join(' + ') + ` = ${_fmt(montant)} FCFA`,
+    };
+  }
+
+  calcIndemRetraite(
+    yearsExact: number,
+    avg12: number,
+  ): { montant: number; detail: string } {
+    // Art.29 : 3 mois de salaire brut par tranche COMPLÈTE de 5 ans.
+    // ⚠️ "sous déduction des avances, acomptes et prêts de toute nature" :
+    // la déduction n'est pas calculée ici (à traiter avec le module prêts).
+    const tranches = Math.floor(yearsExact / 5);
+    if (tranches < 1)
+      return {
+        montant: 0,
+        detail: "Ancienneté < 5 ans : pas d'indemnité de fin de carrière (Art.29)",
+      };
+    const mois = tranches * 3;
+    const montant = Math.round(avg12 * mois);
+    return {
+      montant,
+      detail: `${tranches} tranche(s) de 5 ans × 3 mois = ${mois} mois × ${_fmt(avg12)} = ${_fmt(montant)} FCFA`,
+    };
+  }
+
+  calcIndemDeces(
+    yearsExact: number,
+    avg12: number,
+    nbEnfants = 0,
+  ): { montant: number; detail: string } {
+    const lic =
+      yearsExact * 12 >= this.decesConfig.ancienneteMinMois
+        ? this.calcIndemLicenciement(yearsExact, avg12).montant
+        : 0;
+    const primeEnfants =
+      (this.decesConfig.primeFixeParEnfant ?? 0) * Math.max(0, nbEnfants);
+    const montant = lic + primeEnfants;
+    return {
+      montant,
+      detail: `Indemnité licenciement si ≥1 an (${_fmt(lic)}) + ${nbEnfants} enfant(s) × ${_fmt(this.decesConfig.primeFixeParEnfant ?? 0)} (${_fmt(primeEnfants)}) = ${_fmt(montant)} FCFA`,
+    };
+  }
+}

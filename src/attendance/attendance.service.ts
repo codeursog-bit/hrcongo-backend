@@ -1,0 +1,1093 @@
+// 📁 EMPLACEMENT (projet backend) : src/attendance/attendance.service.ts
+import { buildShiftUpdate } from './work-shift-validation';
+// ============================================================================
+// ✅ v5.1 — Orchestrateur principal — cohérent avec tous les services v5
+//
+// CHANGEMENTS v5.1 :
+//   - createManual : utilise buildOvertimeContext + calculateOvertimeV3
+//     (au lieu de calculateOvertime legacy) → même logique que checkOut
+//   - createManual : workDays réels de l'entreprise (pas hardcode isWeekend)
+//   - createManual : jour férié vérifié via DB
+//   - Tous les délégués pointent vers les services v5.1
+// ============================================================================
+
+import { atCongoTime, congoDateString, congoDayOfWeek } from '../common/utils/congo-time';
+import { resolveUserEmployeeId } from '../common/utils/user-employee.util';
+import { Injectable, ForbiddenException, BadRequestException } from '@nestjs/common';
+import { PrismaService } from '../prisma/prisma.service';
+import { CreateAttendanceDto } from './dto/create-attendance.dto';
+import {
+  AttendanceUtilsService,
+  DEFAULT_WORK_DAYS,
+  SHIFT_LATE_TOLERANCE_MINUTES,
+} from './services/attendance-utils.service';
+import { AttendanceCalculationService } from './services/attendance-calculation.service';
+import {
+  AttendanceCheckService,
+  AttendanceActingOptions,
+} from './services/attendance-check.service';
+import { AttendanceReportService } from './services/attendance-report.service';
+
+export { DayStatusEnum } from './services/attendance-utils.service';
+export type {
+  DayStatus,
+  MonthlyReportItem,
+  NotificationPayload,
+  AuditChange,
+} from './services/attendance-utils.service';
+
+@Injectable()
+export class AttendanceService {
+  constructor(
+    private prisma: PrismaService,
+    private utils: AttendanceUtilsService,
+    private calculation: AttendanceCalculationService,
+    private check: AttendanceCheckService,
+    private report: AttendanceReportService,
+  ) {}
+
+  // ============================================================================
+  // 🔒 HELPER : user vérifié + companyId
+  // ============================================================================
+  private async getVerifiedUser(userId: string, overrideCompanyId?: string): Promise<{
+    id: string;
+    companyId: string;
+    role: string;
+    email: string | null;
+    canRecordAttendanceForAll: boolean;
+  }> {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: {
+        id: true,
+        companyId: true,
+        role: true,
+        email: true,
+        canRecordAttendanceForAll: true, // 🆕 permission "secrétaire" pointage
+        manageMultipleCompanies: true,
+      },
+    });
+    if (!user) {
+      throw new ForbiddenException(
+        'Utilisateur non rattaché à une entreprise.',
+      );
+    }
+    // 🆕 Admin multi-entreprises : companyId fourni par l'appelant
+    // (PortfolioAttendanceService), après vérification d'appartenance.
+    if (overrideCompanyId && user.manageMultipleCompanies) {
+      return { ...user, companyId: overrideCompanyId };
+    }
+    if (!user.companyId) {
+      throw new ForbiddenException(
+        'Utilisateur non rattaché à une entreprise.',
+      );
+    }
+    return { ...user, companyId: user.companyId };
+  }
+
+  // ============================================================================
+  // 🔒 HELPER : département du manager
+  // ============================================================================
+  private async getManagerDeptId(
+    userId: string,
+    companyId: string,
+  ): Promise<string | null> {
+    const dept = await this.prisma.department.findFirst({
+      where: { managerId: userId, companyId },
+      select: { id: true },
+    });
+    if (dept) return dept.id;
+
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { email: true },
+    });
+    if (user?.email) {
+      const emp = await this.prisma.employee.findFirst({
+        where: { email: user.email, companyId },
+        select: { departmentId: true },
+      });
+      return emp?.departmentId ?? null;
+    }
+    return null;
+  }
+
+  // ============================================================================
+  // 🔒 HELPER : vérifier accès employé (+ département si MANAGER)
+  // ============================================================================
+  private static readonly MANAGE_ALL_ROLES = [
+    'ADMIN',
+    'SUPER_ADMIN',
+    'HR_MANAGER',
+  ];
+
+  async assertCanAccessEmployee(
+    userId: string,
+    companyId: string,
+    role: string,
+    employeeId: string,
+    canRecordAttendanceForAll: boolean = false, // 🆕 permission "secrétaire" pointage
+  ): Promise<void> {
+    const employee = await this.prisma.employee.findUnique({
+      where: { id: employeeId },
+      select: { companyId: true, departmentId: true },
+    });
+    if (!employee || employee.companyId !== companyId) {
+      throw new ForbiddenException(
+        "Cet employé n'appartient pas à votre entreprise.",
+      );
+    }
+
+    // ✅ ADMIN/SUPER_ADMIN/HR_MANAGER : accès complet à l'entreprise
+    if (AttendanceService.MANAGE_ALL_ROLES.includes(role)) return;
+
+    // 🆕 Permission "secrétaire" : accès total à l'entreprise, quel que soit
+    //    le rôle de base (MANAGER sort de son département, EMPLOYEE sort de sa propre fiche)
+    if (canRecordAttendanceForAll) return;
+
+    // ✅ MANAGER : uniquement son département
+    if (role === 'MANAGER') {
+      const deptId = await this.getManagerDeptId(userId, companyId);
+      if (!deptId || employee.departmentId !== deptId) {
+        throw new ForbiddenException(
+          "Vous n'avez accès qu'aux pointages de votre département.",
+        );
+      }
+      return;
+    }
+
+    // 🔒 Employé standard : uniquement sa propre fiche — c'était le trou :
+    //    avant ce correctif, n'importe quel employé pouvait consulter le
+    //    résumé de n'importe quel collègue en changeant l'employeeId dans l'URL.
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { email: true },
+    });
+    const ownEmployee = user?.email
+      ? await this.prisma.employee.findFirst({
+          where: { email: user.email, companyId },
+          select: { id: true },
+        })
+      : null;
+    if (!ownEmployee || ownEmployee.id !== employeeId) {
+      throw new ForbiddenException(
+        "Vous n'avez accès qu'à vos propres pointages.",
+      );
+    }
+  }
+
+  // ============================================================================
+  // 🆕 Liste des employés pour le sélecteur du pointage manuel
+  //    (scopée exclusivement au module attendance — n'affecte aucun autre
+  //    module comme congés, prêts, paie, matériel, etc.)
+  // ============================================================================
+  async getEmployeesForManualAttendance(userId: string) {
+    const user = await this.getVerifiedUser(userId);
+    if (!user.companyId) return [];
+
+    const canSeeAll =
+      AttendanceService.MANAGE_ALL_ROLES.includes(user.role) ||
+      user.canRecordAttendanceForAll;
+
+    if (!canSeeAll && user.role !== 'MANAGER') {
+      throw new ForbiddenException('Accès non autorisé.');
+    }
+
+    const whereClause: any = { companyId: user.companyId, status: 'ACTIVE' };
+
+    if (!canSeeAll && user.role === 'MANAGER') {
+      const deptId = await this.getManagerDeptId(user.id, user.companyId);
+      if (!deptId) return [];
+      whereClause.departmentId = deptId;
+    }
+
+    return this.prisma.employee.findMany({
+      where: whereClause,
+      select: {
+        id: true,
+        firstName: true,
+        lastName: true,
+        employeeNumber: true,
+        position: true,
+        photoUrl: true,
+        department: { select: { id: true, name: true } },
+      },
+      orderBy: { firstName: 'asc' },
+    });
+  }
+
+  // ============================================================================
+  // ✅ DÉLÉGATION CALCULS
+  // ============================================================================
+  async calculateDayStatuses(
+    employeeId: string,
+    startDate: Date,
+    endDate: Date,
+  ) {
+    return this.calculation.calculateDayStatuses(
+      employeeId,
+      startDate,
+      endDate,
+    );
+  }
+
+  // ============================================================================
+  // ✅ DÉLÉGATION CHECK-IN/OUT
+  // ============================================================================
+  async checkIn(
+    dto: CreateAttendanceDto,
+    userId: string,
+    opts?: AttendanceActingOptions,
+  ) {
+    return this.check.checkIn(dto, userId, opts);
+  }
+
+  async checkOut(
+    dto: CreateAttendanceDto,
+    userId: string,
+    opts?: AttendanceActingOptions,
+  ) {
+    return this.check.checkOut(dto, userId, opts);
+  }
+
+  async correctAttendanceDay(userId: string, body: any, req?: any) {
+    return this.check.correctAttendanceDay(userId, body, req);
+  }
+
+  async correctAttendance(
+    attendanceId: string,
+    userId: string,
+    updates: any,
+    req?: any,
+  ) {
+    return this.check.correctAttendance(attendanceId, userId, updates, req);
+  }
+
+  async deleteAttendance(
+    attendanceId: string,
+    userId: string,
+    reason: string,
+    req?: any,
+  ) {
+    return this.check.deleteAttendance(attendanceId, userId, reason, req);
+  }
+
+  // ============================================================================
+  // ✅ DÉLÉGATION RAPPORTS
+  // ============================================================================
+  async generateMonthlyReport(
+    userId: string,
+    month: number,
+    year: number,
+    overrideCompanyId?: string,
+  ) {
+    return this.report.generateMonthlyReport(
+      userId,
+      month,
+      year,
+      overrideCompanyId,
+    );
+  }
+
+  async generateMonthlyAttendanceGrid(
+    companyId: string,
+    month: number,
+    year: number,
+  ) {
+    return this.report.generateMonthlyAttendanceGrid(companyId, month, year);
+  }
+
+  // ============================================================================
+  // ✅ LISTE DU JOUR — filtrée par département si MANAGER
+  // ============================================================================
+  async findToday(userId: string, overrideCompanyId?: string) {
+    const user = await this.getVerifiedUser(userId, overrideCompanyId);
+
+    const whereClause: any = {
+      companyId: user.companyId,
+      date: this.utils.getTodayString(),
+    };
+
+    if (user.role === 'MANAGER' && !user.canRecordAttendanceForAll) {
+      const deptId = await this.getManagerDeptId(user.id, user.companyId);
+      if (!deptId) return [];
+      whereClause.employee = { departmentId: deptId };
+    }
+
+    return this.prisma.attendance.findMany({
+      where: whereClause,
+      include: {
+        pause: true, // 🆕
+        employee: {
+          select: {
+            firstName: true,
+            lastName: true,
+            position: true,
+            department: { select: { id: true, name: true } },
+          },
+        },
+      },
+      orderBy: { checkIn: 'desc' },
+    });
+  }
+
+  // ============================================================================
+  // 🆕 MON POINTAGE DU JOUR — via ma fiche employé, indépendamment de l'entreprise active
+  // (admin multi-entreprises dont la fiche employé est dans une autre entreprise que l'active).
+  // Renvoie un tableau (0 ou 1 élément) pour rester compatible avec la page « Ma pointeuse ».
+  // ============================================================================
+  async findMyToday(userId: string) {
+    const myEmployeeId = await resolveUserEmployeeId(this.prisma, userId); // 🆕 lie la fiche si besoin
+    if (!myEmployeeId) return [];
+    return (this.prisma.attendance as any).findMany({
+      where: { employeeId: myEmployeeId, date: this.utils.getTodayString() },
+      include: {
+        pause: true,
+        employee: {
+          select: {
+            firstName: true,
+            lastName: true,
+            position: true,
+            department: { select: { id: true, name: true } },
+          },
+        },
+      },
+    });
+  }
+
+  // ============================================================================
+  // ✅ HISTORIQUE MENSUEL — filtré par département si MANAGER
+  // ============================================================================
+  async findAll(userId: string, month: number, year: number, overrideCompanyId?: string) {
+    const user = await this.getVerifiedUser(userId, overrideCompanyId);
+
+    const startDate = new Date(year, month - 1, 1);
+    const endDate = new Date(year, month, 0);
+    const startDateStr = this.utils.formatDate(startDate);
+    const endDateStr = this.utils.formatDate(endDate);
+
+    let departmentFilter: any = undefined;
+    if (user.role === 'MANAGER' && !user.canRecordAttendanceForAll) {
+      const deptId = await this.getManagerDeptId(user.id, user.companyId);
+      if (!deptId)
+        return {
+          employees: [],
+          attendances: [],
+          dayStatuses: [],
+          settings: null,
+        };
+      departmentFilter = { departmentId: deptId };
+    }
+
+    const payrollSettings = await this.prisma.payrollSettings.findFirst({
+      where: { companyId: user.companyId },
+      orderBy: { effectiveDate: 'desc' },
+      select: {
+        workDays: true,
+        officialStartHour: true,
+        officialStartMinute: true,
+        lateToleranceMinutes: true,
+      },
+    });
+
+    const workDays = (payrollSettings?.workDays ||
+      DEFAULT_WORK_DAYS) as number[];
+
+    const employeeWhere: any = {
+      companyId: user.companyId,
+      status: 'ACTIVE',
+      ...departmentFilter,
+    };
+
+    const [employees, allAttendances, allLeaves, allHolidays, allAbsenceRequests] =
+      await Promise.all([
+        this.prisma.employee.findMany({
+          where: employeeWhere,
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            photoUrl: true,
+            employeeNumber: true,
+            position: true,
+            phone: true,
+            hireDate: true, // 🆕 pas d'absence avant l'embauche
+            terminationDate: true,
+            department: { select: { name: true } },
+          },
+        }),
+        this.prisma.attendance.findMany({
+          where: {
+            companyId: user.companyId,
+            date: { gte: startDateStr, lte: endDateStr },
+            ...(departmentFilter ? { employee: departmentFilter } : {}),
+          },
+          include: { employee: true, pause: true }, // 🆕 pause
+          orderBy: { date: 'desc' },
+        }),
+        this.prisma.leave.findMany({
+          where: {
+            companyId: user.companyId,
+            status: 'APPROVED',
+            startDate: { lte: endDate },
+            endDate: { gte: startDate },
+            ...(departmentFilter ? { employee: departmentFilter } : {}),
+          },
+        }),
+        this.prisma.publicHoliday.findMany({
+          where: { companyId: user.companyId, year: startDate.getFullYear() },
+        }),
+        // 🆕 absences approuvées (jours justifiés pris en compte dans dayStatuses)
+        this.prisma.absenceRequest.findMany({
+          where: {
+            companyId: user.companyId,
+            status: 'APPROVED',
+            startDate: { lte: endDate },
+            endDate: { gte: startDate },
+            ...(departmentFilter ? { employee: departmentFilter } : {}),
+          },
+        }),
+      ]);
+
+    const attendancesByEmp = new Map<string, any[]>();
+    const leavesByEmp = new Map<string, any[]>();
+
+    allAttendances.forEach((att) => {
+      if (!attendancesByEmp.has(att.employeeId))
+        attendancesByEmp.set(att.employeeId, []);
+      attendancesByEmp.get(att.employeeId)!.push(att);
+    });
+
+    allLeaves.forEach((leave) => {
+      if (!leavesByEmp.has(leave.employeeId))
+        leavesByEmp.set(leave.employeeId, []);
+      leavesByEmp.get(leave.employeeId)!.push(leave);
+    });
+
+    const holidayDates = new Set(allHolidays.map((h) => h.date));
+
+    const absenceDatesByEmp = await this.calculation.buildAbsenceDatesByEmployee(
+      user.companyId,
+      allAbsenceRequests,
+    );
+
+    // 🆕 Règle unique : absent dès l'heure officielle (ou le début du shift) AUJOURD'HUI,
+    //    jamais avant l'embauche ni après la sortie — identique aux dashboards et au suivi des absences.
+    const todayStrRule = this.utils.getTodayString();
+    const todayCutoffs =
+      startDateStr <= todayStrRule && endDateStr >= todayStrRule
+        ? await this.calculation.getTodayCutoffs(user.companyId, employees.map((e) => e.id))
+        : new Map<string, number>();
+
+    const dayStatuses = employees.map((emp) =>
+      this.calculation.calculateDayStatusesOptimized(
+        emp.id,
+        startDate,
+        endDate,
+        attendancesByEmp.get(emp.id) || [],
+        leavesByEmp.get(emp.id) || [],
+        holidayDates,
+        workDays,
+        absenceDatesByEmp.get(emp.id),
+        {
+          hireDateStr: emp.hireDate ? this.utils.formatDate(emp.hireDate) : null,
+          exitDateStr: emp.terminationDate ? this.utils.formatDate(emp.terminationDate) : null,
+          todayCutoffMin: todayCutoffs.get(emp.id),
+        },
+      ),
+    );
+
+    return {
+      employees,
+      attendances: allAttendances,
+      dayStatuses,
+      settings: {
+        workDays,
+        officialStartHour: payrollSettings?.officialStartHour ?? 8,
+        officialStartMinute: payrollSettings?.officialStartMinute ?? 0,
+        lateToleranceMinutes: payrollSettings?.lateToleranceMinutes || 0,
+      },
+    };
+  }
+
+  // ============================================================================
+  // ✅ GET OR CREATE
+  // ============================================================================
+  async getOrCreate(userId: string, employeeId: string, date: string) {
+    const user = await this.getVerifiedUser(userId);
+    await this.assertCanAccessEmployee(
+      user.id,
+      user.companyId,
+      user.role,
+      employeeId,
+      user.canRecordAttendanceForAll,
+    );
+
+    let attendance = await this.prisma.attendance.findFirst({
+      where: { employeeId, date },
+    });
+
+    if (!attendance) {
+      attendance = await this.prisma.attendance.create({
+        data: {
+          employeeId,
+          companyId: user.companyId,
+          date,
+          status: 'UNKNOWN',
+        },
+      });
+    }
+
+    return attendance;
+  }
+
+  // ============================================================================
+  // ✅ CREATE MANUAL
+  // ✅ v5.1 : utilise buildOvertimeContext + calculateOvertimeV3
+  //           workDays réels + jour férié DB + shift individuel
+  // ============================================================================
+  async createManual(
+    userId: string,
+    body: {
+      employeeId: string;
+      date: string;
+      status: string;
+      checkIn?: string;
+      checkOut?: string;
+      notes: string;
+    },
+    // 🆕 opts : pointeuse externe (method DEVICE + nom) et traçabilité (ip / navigateur).
+    //    Absent = comportement historique (MANUAL, sans source).
+    opts?: { method?: 'MANUAL' | 'DEVICE'; source?: string; ip?: string; userAgent?: string },
+  ) {
+    const user = await this.getVerifiedUser(userId);
+    await this.assertCanAccessEmployee(
+      user.id,
+      user.companyId,
+      user.role,
+      body.employeeId,
+      user.canRecordAttendanceForAll,
+    );
+
+    // ✅ Présent / Retard / Télétravail = HEURES OBLIGATOIRES (jamais « présent sans heure »).
+    //    Aujourd'hui : l'entrée suffit. Jour passé : entrée ET sortie.
+    if (['PRESENT', 'LATE', 'REMOTE'].includes(body.status)) {
+      if (!body.checkIn) {
+        throw new BadRequestException("L'heure d'entrée est obligatoire pour un jour présent");
+      }
+      if (!body.checkOut && String(body.date).slice(0, 10) < congoDateString()) {
+        throw new BadRequestException("L'heure de sortie est obligatoire pour un jour passé");
+      }
+    }
+    if (body.checkIn && body.checkOut && new Date(body.checkOut) <= new Date(body.checkIn)) {
+      throw new BadRequestException("L'heure de sortie doit être après l'heure d'entrée");
+    }
+
+    const attendanceData: any = {
+      employeeId: body.employeeId,
+      companyId: user.companyId,
+      date: body.date,
+      status: body.status,
+      notes: body.notes,
+      checkIn: body.checkIn ? new Date(body.checkIn) : null,
+      checkOut: body.checkOut ? new Date(body.checkOut) : null,
+      checkInMethod: body.checkIn ? (opts?.method ?? 'MANUAL') : null,
+      checkOutMethod: body.checkOut ? (opts?.method ?? 'MANUAL') : null,
+      ...(opts?.source
+        ? {
+            checkInSource: body.checkIn ? opts.source : null,
+            checkOutSource: body.checkOut ? opts.source : null,
+          }
+        : {}),
+    };
+
+    if (
+      (body.status === 'PRESENT' || body.status === 'LATE') &&
+      body.checkIn &&
+      body.checkOut
+    ) {
+      const checkInDate = new Date(body.checkIn);
+      const checkOutDate = new Date(body.checkOut);
+
+      // ✅ Settings entreprise
+      const ps = await this.prisma.payrollSettings.findFirst({
+        where: { companyId: user.companyId },
+        orderBy: { effectiveDate: 'desc' },
+        select: {
+          workHoursPerDay: true,
+          officialStartHour: true,
+          officialStartMinute: true,
+          officialEndHour: true,
+          overtimeEnabled: true,
+          workDays: true,
+          lateToleranceMinutes: true,
+        } as any,
+      });
+
+      const workHoursPerDay = Number(ps?.workHoursPerDay ?? 8);
+      const officialStartHour = Number((ps as any)?.officialStartHour ?? 8);
+      const officialStartMinute = Number((ps as any)?.officialStartMinute ?? 0);
+      const overtimeEnabled = (ps as any)?.overtimeEnabled ?? true;
+      const workDays = ((ps as any)?.workDays ?? DEFAULT_WORK_DAYS) as number[];
+      const officialEndHour = Number(
+        (ps as any)?.officialEndHour ?? officialStartHour + workHoursPerDay,
+      );
+
+      // ✅ Shift individuel pour cette date
+      const dateObj = new Date(body.date);
+      const sa = await this.prisma.employeeShiftAssignment.findFirst({
+        where: {
+          employeeId: body.employeeId,
+          OR: [
+            { specificDate: body.date },
+            {
+              dayOfWeek: congoDayOfWeek(dateObj),
+              specificDate: null,
+              OR: [{ validFrom: null }, { validFrom: { lte: dateObj } }],
+              AND: [
+                {
+                  OR: [{ validUntil: null }, { validUntil: { gte: dateObj } }],
+                },
+              ],
+            },
+          ],
+        },
+        include: { shift: true },
+        orderBy: { specificDate: 'desc' },
+      });
+      const shift = sa?.shift ?? null;
+
+      // ✅ Jour férié DB
+      const holiday = await this.prisma.publicHoliday.findFirst({
+        where: { companyId: user.companyId, date: body.date },
+      });
+      const isHoliday = !!holiday;
+
+      // ✅ Contexte HS v5 (même logique que checkOut)
+      const ctx = this.utils.buildOvertimeContext({
+        shift,
+        officialEndH: officialEndHour,
+        officialEndMin: 0,
+        workHoursPerDay,
+        workDays,
+        isHoliday,
+        attendanceDate: dateObj,
+        overtimeEnabled,
+      });
+
+      // ✅ Bridage arrivée anticipée
+      const startH = shift?.startHour ?? officialStartHour;
+      const startMin = shift ? (shift.startMinute ?? 0) : officialStartMinute;
+      const shiftStartThreshold = atCongoTime(checkInDate, startH, startMin);
+      const effectiveCheckIn =
+        checkInDate < shiftStartThreshold && !shift?.crossesMidnight
+          ? shiftStartThreshold
+          : checkInDate;
+
+      const totalHours = parseFloat(
+        Math.max(
+          0,
+          (checkOutDate.getTime() - effectiveCheckIn.getTime()) / 3_600_000,
+        ).toFixed(2),
+      );
+
+      // ✅ Calcul HS via calculateOvertimeV3 (cohérent avec checkOut)
+      const ot = this.utils.calculateOvertimeV3(
+        effectiveCheckIn,
+        checkOutDate,
+        ctx,
+      );
+
+      Object.assign(attendanceData, {
+        checkIn: effectiveCheckIn,
+        totalHours,
+        normalHours: ot.normalHours,
+        overtime10: ot.overtime10,
+        overtime25: ot.overtime25,
+        overtime50: ot.overtime50,
+        overtime100: ot.overtime100,
+        isNightShift: ot.isNightShift,
+      });
+
+      // PRESENT ⇄ LATE : décidé par l'heure d'entrée (mêmes seuils que le pointage normal)
+      const lateTolerance = shift
+        ? SHIFT_LATE_TOLERANCE_MINUTES
+        : Number((ps as any)?.lateToleranceMinutes ?? 60);
+      attendanceData.status = this.utils.isLateCheckIn(checkInDate, startH, lateTolerance, startMin)
+        ? 'LATE'
+        : 'PRESENT';
+    }
+
+    // 🆕 État AVANT, pour tracer le vrai « avant → après »
+    const before = await this.prisma.attendance.findUnique({
+      where: { employeeId_date: { employeeId: body.employeeId, date: body.date } },
+      select: { status: true, checkIn: true, checkOut: true },
+    });
+
+    const attendance = await this.prisma.attendance.upsert({
+      where: {
+        employeeId_date: { employeeId: body.employeeId, date: body.date },
+      },
+      update: attendanceData,
+      create: attendanceData,
+    });
+
+    // 🆕 Trace : qui (modifiedBy + rôle), quoi (action + avant → après), quand (modifiedAt), pourquoi (reason)
+    const iso = (d?: Date | null) => (d ? d.toISOString() : '');
+    await this.prisma.attendanceLog.create({
+      data: {
+        attendanceId: attendance.id,
+        modifiedBy: userId,
+        field: 'status,checkIn,checkOut',
+        oldValue: [before?.status ?? '', iso(before?.checkIn), iso(before?.checkOut)].join(','),
+        newValue: [attendance.status, iso(attendance.checkIn), iso(attendance.checkOut)].join(','),
+        reason: body.notes,
+        action:
+          opts?.method === 'DEVICE'
+            ? 'DEVICE_SYNC'
+            : before?.checkIn || before?.checkOut
+              ? 'CORRECTION'
+              : 'MANUAL_CREATE',
+        actorRole: user.role,
+        ipAddress: opts?.ip,
+        userAgent: opts?.userAgent,
+      } as any,
+    });
+
+    return { success: true, attendance };
+  }
+
+  // ============================================================================
+  // ✅ LOGS D'AUDIT
+  // ============================================================================
+  async getLogs(
+    userId: string,
+    month: number,
+    year: number,
+    overrideCompanyId?: string,
+    attendanceId?: string, // 🆕 historique d'UN pointage (sans filtre de mois)
+  ) {
+    const user = await this.getVerifiedUser(userId, overrideCompanyId);
+
+    const startDate = `${year}-${String(month).padStart(2, '0')}-01`;
+    const lastDay = new Date(year, month, 0).getDate();
+    const endDate = `${year}-${String(month).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
+
+    // 🔒 Un employé sans permission « secrétaire » n'a pas à lire les corrections des autres.
+    if (user.role === 'EMPLOYEE' && !user.canRecordAttendanceForAll) return { logs: [] };
+
+    const whereClause: any = {
+      ...(attendanceId ? { attendanceId } : {}),
+      attendance: {
+        companyId: user.companyId,
+        ...(attendanceId ? {} : { date: { gte: startDate, lte: endDate } }),
+      },
+    };
+
+    if (user.role === 'MANAGER' && !user.canRecordAttendanceForAll) {
+      const deptId = await this.getManagerDeptId(user.id, user.companyId);
+      if (!deptId) return { logs: [] };
+      whereClause.attendance.employee = { departmentId: deptId };
+    }
+
+    const logs = await this.prisma.attendanceLog.findMany({
+      where: whereClause,
+      include: {
+        attendance: {
+          include: {
+            employee: {
+              select: {
+                id: true,
+                firstName: true,
+                lastName: true,
+                employeeNumber: true,
+                department: { select: { name: true } },
+              },
+            },
+          },
+        },
+        modifier: {
+          select: { id: true, firstName: true, lastName: true, role: true },
+        },
+      },
+      orderBy: { modifiedAt: 'desc' },
+      take: attendanceId ? 50 : 100,
+    });
+
+    return {
+      logs: logs.map((log) => ({
+        id: log.id,
+        attendanceId: log.attendanceId,
+        date: log.attendance.date,
+        action: (log as any).action ?? null,
+        actorRole: (log as any).actorRole ?? null,
+        field: log.field,
+        oldValue: log.oldValue,
+        newValue: log.newValue,
+        reason: log.reason,
+        createdAt: log.modifiedAt,
+        employee: log.attendance.employee,
+        modifiedBy: log.modifier,
+        ipAddress: log.ipAddress,
+      })),
+    };
+  }
+
+  // ============================================================================
+  // ✅ RÉSUMÉ EMPLOYÉ SÉCURISÉ
+  // ============================================================================
+  async getEmployeeSummarySecure(
+    userId: string,
+    employeeId: string,
+    month: number,
+    year: number,
+    summaryService: any,
+    overrideCompanyId?: string,
+  ) {
+    const user = await this.getVerifiedUser(userId, overrideCompanyId);
+    await this.assertCanAccessEmployee(
+      user.id,
+      user.companyId,
+      user.role,
+      employeeId,
+      user.canRecordAttendanceForAll,
+    );
+
+    const stored = await summaryService.getStoredSummaries(
+      user.companyId,
+      month,
+      year,
+      [employeeId],
+    );
+    if (stored.length > 0) return stored[0];
+    return summaryService.getMonthlyAttendanceSummary(employeeId, month, year);
+  }
+
+  async getCompanyId(userId: string): Promise<string> {
+    const user = await this.getVerifiedUser(userId);
+    return user.companyId;
+  }
+
+  async getEmployeeDayStatuses(
+    userId: string,
+    employeeId: string,
+    month: number,
+    year: number,
+    overrideCompanyId?: string,
+  ): Promise<any[]> {
+    const user = await this.getVerifiedUser(userId, overrideCompanyId);
+    await this.assertCanAccessEmployee(
+      user.id,
+      user.companyId,
+      user.role,
+      employeeId,
+      user.canRecordAttendanceForAll,
+    );
+    const startDate = new Date(year, month - 1, 1);
+    const endDate = new Date(year, month, 0);
+    return this.calculation.calculateDayStatuses(
+      employeeId,
+      startDate,
+      endDate,
+    );
+  }
+
+  // ============================================================================
+  // ✅ SHIFTS — inchangés (délégation Prisma directe)
+  // ============================================================================
+
+  async createShift(data: {
+    companyId: string;
+    name: string;
+    startHour: number;
+    startMinute?: number;
+    endHour: number;
+    endMinute?: number;
+    isNightShift?: boolean;
+    nightPremiumRate?: number;
+    color?: string;
+    isDefault?: boolean;
+  }) {
+    const { companyId, ...input } = data;
+    const normalized = buildShiftUpdate(input);
+
+    return this.prisma.workShift.create({
+      data: {
+        companyId: data.companyId,
+        name: normalized.name,
+        startHour: data.startHour,
+        startMinute: normalized.startMinute,
+        endHour: data.endHour,
+        endMinute: normalized.endMinute,
+        durationHours: normalized.durationHours,
+        crossesMidnight: normalized.crossesMidnight,
+        isNightShift: data.isNightShift ?? normalized.crossesMidnight,
+        nightPremiumRate: data.nightPremiumRate ?? 0,
+        color: data.color ?? '#0EA5E9',
+        isDefault: data.isDefault ?? false,
+        isActive: true,
+      },
+    });
+  }
+
+  async getShifts(companyId: string) {
+    return this.prisma.workShift.findMany({
+      where: { companyId, isActive: true },
+      orderBy: { startHour: 'asc' },
+    });
+  }
+
+  async updateShift(shiftId: string, companyId: string, data: any) {
+    const shift = await this.prisma.workShift.findFirst({
+      where: { id: shiftId, companyId },
+    });
+    if (!shift) throw new Error('Shift introuvable');
+
+    const normalized = buildShiftUpdate(data, shift);
+    return this.prisma.workShift.update({ where: { id: shiftId }, data: normalized });
+  }
+
+  async deleteShift(shiftId: string, companyId: string) {
+    const shift = await this.prisma.workShift.findFirst({
+      where: { id: shiftId, companyId },
+    });
+    if (!shift) throw new Error('Shift introuvable');
+    return this.prisma.workShift.update({
+      where: { id: shiftId },
+      data: { isActive: false },
+    });
+  }
+
+  async assignShift(data: {
+    companyId: string;
+    employeeId: string;
+    shiftId: string;
+    specificDate?: string;
+    dayOfWeek?: number;
+    validFrom?: Date;
+    validUntil?: Date;
+    notes?: string;
+  }, userId: string) {
+    const user = await this.getVerifiedUser(userId);
+    if (data.companyId !== user.companyId) throw new ForbiddenException();
+    await this.assertCanAccessEmployee(user.id, user.companyId, user.role, data.employeeId, user.canRecordAttendanceForAll);
+    if (data.specificDate !== undefined) {
+      const parsed = new Date(`${data.specificDate}T00:00:00Z`);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(data.specificDate) || Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== data.specificDate) throw new BadRequestException('Date de planning invalide.');
+    } else if (!Number.isInteger(data.dayOfWeek) || data.dayOfWeek! < 0 || data.dayOfWeek! > 6) {
+      throw new BadRequestException('Jour de planning invalide.');
+    }
+    if ((data.validFrom && Number.isNaN(data.validFrom.getTime())) || (data.validUntil && Number.isNaN(data.validUntil.getTime())) ||
+        (data.validFrom && data.validUntil && data.validUntil < data.validFrom)) throw new BadRequestException('Période de planning invalide.');
+    const [employee, shift] = await Promise.all([
+      this.prisma.employee.findFirst({ where: { id: data.employeeId, companyId: data.companyId }, select: { id: true } }),
+      this.prisma.workShift.findFirst({ where: { id: data.shiftId, companyId: data.companyId, isActive: true }, select: { id: true } }),
+    ]);
+    if (!employee || !shift) throw new ForbiddenException('Salarié ou shift non autorisé.');
+    if (data.specificDate) {
+      return this.prisma.employeeShiftAssignment.upsert({
+        where: {
+          employeeId_specificDate: {
+            employeeId: data.employeeId,
+            specificDate: data.specificDate,
+          },
+        },
+        update: { shiftId: data.shiftId, notes: data.notes },
+        create: {
+          companyId: data.companyId,
+          employeeId: data.employeeId,
+          shiftId: data.shiftId,
+          specificDate: data.specificDate,
+          notes: data.notes,
+        },
+      });
+    }
+    return this.prisma.employeeShiftAssignment.create({
+      data: {
+        companyId: data.companyId,
+        employeeId: data.employeeId,
+        shiftId: data.shiftId,
+        dayOfWeek: data.dayOfWeek,
+        validFrom: data.validFrom,
+        validUntil: data.validUntil,
+        notes: data.notes,
+      },
+    });
+  }
+
+  async getEmployeeShifts(employeeId: string, userId: string) {
+    const user = await this.getVerifiedUser(userId);
+    const employee = await this.prisma.employee.findFirst({
+      where: { id: employeeId, companyId: user.companyId }, select: { id: true },
+    });
+    if (!employee) throw new ForbiddenException('Salarié non autorisé.');
+    await this.assertCanAccessEmployee(user.id, user.companyId, user.role, employeeId, user.canRecordAttendanceForAll);
+    return this.prisma.employeeShiftAssignment.findMany({
+      where: { employeeId, companyId: user.companyId },
+      include: { shift: true },
+      orderBy: [{ specificDate: 'asc' }, { dayOfWeek: 'asc' }],
+    });
+  }
+
+  async getAllShiftAssignments(userId: string) {
+    const user = await this.getVerifiedUser(userId);
+    const companyId = user.companyId;
+    const departmentId = user.role === 'MANAGER' && !user.canRecordAttendanceForAll ? await this.getManagerDeptId(user.id, companyId) : undefined;
+    if (departmentId === null) throw new ForbiddenException();
+    return this.prisma.employeeShiftAssignment.findMany({
+      where: { companyId, ...(departmentId ? { employee: { departmentId } } : {}) },
+      include: {
+        shift: true,
+        employee: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            position: true,
+            photoUrl: true,
+            department: { select: { name: true } },
+          },
+        },
+      },
+      orderBy: [{ specificDate: 'asc' }, { dayOfWeek: 'asc' }],
+    });
+  }
+
+  async getEmployeeShiftForDate(
+    employeeId: string,
+    companyId: string,
+    date: string,
+    userId: string,
+  ): Promise<any | null> {
+    const user = await this.getVerifiedUser(userId);
+    if (companyId !== user.companyId) throw new ForbiddenException();
+    await this.assertCanAccessEmployee(user.id, companyId, user.role, employeeId, user.canRecordAttendanceForAll);
+    const dateObj = new Date(date);
+    const dayOfWeek = congoDayOfWeek(dateObj);
+
+    const specific = await this.prisma.employeeShiftAssignment.findFirst({
+      where: { employeeId, companyId, specificDate: date, shift: { companyId, isActive: true } },
+      include: { shift: true },
+    });
+    if (specific) return specific.shift;
+
+    const recurring = await this.prisma.employeeShiftAssignment.findFirst({
+      where: {
+        employeeId,
+        companyId,
+        shift: { companyId, isActive: true },
+        dayOfWeek,
+        specificDate: null,
+        OR: [{ validFrom: null }, { validFrom: { lte: dateObj } }],
+        AND: [{ OR: [{ validUntil: null }, { validUntil: { gte: dateObj } }] }],
+      },
+      include: { shift: true },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (recurring) return recurring.shift;
+
+    return this.prisma.workShift.findFirst({
+      where: { companyId, isDefault: true, isActive: true },
+    });
+  }
+}

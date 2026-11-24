@@ -1,0 +1,307 @@
+[
+  {
+    "id": "payroll",
+    "title": "Préparer la paie",
+    "question": "Comment faire la paie ?",
+    "keywords": [
+      "paie",
+      "bulletin",
+      "salaire",
+      "salaires"
+    ],
+    "roles": [
+      "ADMIN",
+      "HR_MANAGER"
+    ],
+    "text": "Ouvrez Paie & Salaires, puis choisissez une paie individuelle, en masse ou une saisie manuelle. Renseignez la période et les employés concernés, puis vérifiez les éléments et l’aperçu avant de confirmer. Le guide vous montre où commencer ; il ne génère aucun bulletin.",
+    "path": "/paie",
+    "guideId": "payroll-create"
+  },
+  {
+    "id": "recruitment",
+    "title": "Créer une offre",
+    "question": "Comment créer une offre de recrutement ?",
+    "keywords": [
+      "recrutement",
+      "offre",
+      "offres",
+      "recruter",
+      "candidature"
+    ],
+    "roles": [
+      "ADMIN",
+      "HR_MANAGER"
+    ],
+    "text": "Dans Recrutement, choisissez Nouvelle offre, puis le mode manuel ou IA selon votre abonnement. Complétez le poste, les conditions et la visibilité, puis relisez avant de soumettre. Le recrutement assisté reste une fonction distincte de cet assistant.",
+    "path": "/recrutement",
+    "guideId": "recruitment-create"
+  },
+  {
+    "id": "employees",
+    "title": "Ajouter un employé",
+    "question": "Comment ajouter un employé ou importer une équipe ?",
+    "keywords": [
+      "employe",
+      "employes",
+      "salarie",
+      "salaries",
+      "dossier",
+      "import",
+      "importer",
+      "excel"
+    ],
+    "roles": [
+      "ADMIN",
+      "HR_MANAGER"
+    ],
+    "text": "Ouvrez Gestion Employés puis Ajouter un employé. Choisissez un dossier individuel ou l’import Excel. Dans le formulaire, suivez le parcours et vérifiez le récapitulatif ; pour l’import, associez les colonnes et corrigez les lignes signalées avant de lancer l’intégration.",
+    "path": "/employes/nouveau",
+    "guideId": "employee-create"
+  },
+  {
+    "id": "leave",
+    "title": "Demander un congé",
+    "question": "Comment demander un congé ?",
+    "keywords": [
+      "conge",
+      "conges",
+      "vacances"
+    ],
+    "roles": [
+      "ADMIN",
+      "HR_MANAGER",
+      "MANAGER",
+      "EMPLOYEE"
+    ],
+    "text": "Ouvrez votre espace Congés et choisissez une nouvelle demande. Renseignez le type et les dates, complétez les détails puis relisez le récapitulatif avant d’envoyer. Les possibilités dépendent de votre contrat et de vos droits ; les soldes et calculs affichés viennent du service de congés.",
+    "path": "/conges/mon-espace"
+  },
+  {
+    "id": "loan",
+    "title": "Demander un prêt ou une avance",
+    "question": "Comment demander un prêt ou une avance ?",
+    "keywords": [
+      "pret",
+      "prets",
+      "avance",
+      "avances"
+    ],
+    "roles": [
+      "ADMIN",
+      "HR_MANAGER",
+      "MANAGER",
+      "EMPLOYEE"
+    ],
+    "text": "Ouvrez Avances & Prêts, puis votre espace personnel. Choisissez le type de demande, renseignez le montant et les modalités proposées, puis vérifiez le récapitulatif avant envoi. L’assistant ne donne pas d’accord et ne remplace pas la validation de votre entreprise.",
+    "path": "/loans/mon-espace"
+  },
+  {
+    "id": "attendance",
+    "title": "Pointer ma journée",
+    "question": "Où pointer mon arrivée et mon départ ?",
+    "keywords": [
+      "pointer",
+      "pointage",
+      "pointeuse",
+      "arrivee",
+      "depart",
+      "qr"
+    ],
+    "roles": [
+      "ADMIN",
+      "HR_MANAGER",
+      "MANAGER",
+      "EMPLOYEE"
+    ],
+    "text": "Ouvrez Ma pointeuse. Utilisez le mode de pointage autorisé par votre entreprise et suivez les instructions à l’écran pour l’arrivée ou le départ. Les demandes de localisation et les contrôles de présence restent ceux de l’application. L’assistant ne pointe jamais à votre place.",
+    "path": "/presences/pointage"
+  },
+  {
+    "id": "appearance",
+    "title": "Changer mon apparence",
+    "question": "Comment changer les couleurs ou le mode sombre ?",
+    "keywords": [
+      "apparence",
+      "couleur",
+      "couleurs",
+      "theme",
+      "sombre",
+      "clair",
+      "auto"
+    ],
+    "roles": [
+      "ADMIN",
+      "HR_MANAGER",
+      "MANAGER",
+      "EMPLOYEE"
+    ],
+    "text": "Ouvrez Apparence pour choisir votre mode clair, sombre ou automatique. Les couleurs personnelles sont proposées si l’entreprise les autorise. L’administrateur règle les couleurs et cette autorisation dans la vue entreprise ; le mode d’affichage reste toujours personnel.",
+    "path": "/apparence"
+  },
+  {
+    "id": "personal-pay",
+    "title": "Consulter mes bulletins",
+    "question": "Où consulter mes bulletins de paie ?",
+    "keywords": [
+      "bulletin",
+      "bulletins",
+      "paie",
+      "consulter",
+      "telecharger"
+    ],
+    "roles": [
+      "ADMIN",
+      "HR_MANAGER",
+      "MANAGER",
+      "EMPLOYEE"
+    ],
+    "text": "Ouvrez Ma paie pour consulter les bulletins auxquels votre compte a accès. Choisissez le bulletin, puis utilisez l’aperçu ou le téléchargement proposé. L’assistant ne lit ni ne communique de salaire dans ce lot d’aide.",
+    "path": "/ma-paie"
+  },
+  {
+    "id": "notifications",
+    "title": "Retrouver mes notifications",
+    "question": "Où voir mes notifications et mes messages ?",
+    "keywords": [
+      "notification",
+      "notifications",
+      "cloche",
+      "messages",
+      "messagerie"
+    ],
+    "roles": [
+      "ADMIN",
+      "HR_MANAGER",
+      "MANAGER",
+      "EMPLOYEE"
+    ],
+    "text": "La cloche de la barre du haut affiche les notifications récentes. La page Notifications permet de retrouver le flux complet disponible pour votre compte ; la messagerie reste accessible depuis Messages. Les notifications d’ancienneté sont aussi présentées dans Ma journée.",
+    "path": "/notifications"
+  },
+  {
+    "id": "cnss",
+    "title": "Préparer une déclaration CNSS",
+    "question": "Où préparer une déclaration CNSS ?",
+    "keywords": [
+      "cnss",
+      "declaration",
+      "declarer"
+    ],
+    "roles": [
+      "ADMIN",
+      "HR_MANAGER"
+    ],
+    "text": "Ouvrez Déclaration CNSS pour retrouver les périodes et les documents disponibles. Vérifiez les informations administratives et les données de paie avant toute sortie officielle. Le statut déclaré d’un employé dans son dossier ne constitue pas à lui seul un dépôt auprès de la CNSS. L’assistant ne réalise aucun dépôt.",
+    "path": "/cnss-declaration"
+  },
+  {
+    "id": "contracts",
+    "title": "Retrouver les contrats",
+    "question": "Où générer un contrat ?",
+    "keywords": [
+      "contrat",
+      "contrats",
+      "generer"
+    ],
+    "roles": [
+      "ADMIN",
+      "HR_MANAGER"
+    ],
+    "text": "Ouvrez Contrats, choisissez l’employé et le modèle proposés par l’application, puis vérifiez les informations avant la génération. Le document officiel conserve son propre rendu. L’assistant ne choisit pas une clause et ne fournit pas de conseil juridique.",
+    "path": "/contrats"
+  },
+  {
+    "id": "profile",
+    "title": "Mon compte et ma sécurité",
+    "question": "Où modifier mon profil et ma sécurité ?",
+    "keywords": [
+      "profil",
+      "compte",
+      "securite",
+      "passe",
+      "connexion",
+      "authentification"
+    ],
+    "roles": [
+      "ADMIN",
+      "HR_MANAGER",
+      "MANAGER",
+      "EMPLOYEE"
+    ],
+    "text": "Ouvrez Mon profil pour retrouver vos informations et les réglages de compte disponibles. Certaines données du dossier sont réservées aux RH ou nécessitent une autorisation temporaire. Ne communiquez jamais de mot de passe, de code de connexion ou de document sensible dans le chat.",
+    "path": "/mon-profil"
+  },
+  {
+    "id": "getting-started",
+    "title": "Premiers pas dans Konza",
+    "question": "Par où commencer ?",
+    "keywords": [
+      "commencer",
+      "demarrer",
+      "debuter",
+      "premiers pas",
+      "configurer",
+      "configuration",
+      "parcours"
+    ],
+    "roles": [
+      "ADMIN"
+    ],
+    "text": "Le guide « Premiers pas » vous accompagne dans l’ordre : vérifier votre entreprise, créer vos primes, configurer vos taxes, ajouter vos employés, leur attribuer leurs primes, puis créer un premier bulletin de test. Il ne modifie rien à votre place.",
+    "path": "/parametres",
+    "guideId": "getting-started"
+  },
+  {
+    "id": "contract-generate",
+    "title": "Générer un contrat",
+    "question": "Comment générer un contrat ?",
+    "keywords": [
+      "generer",
+      "creer contrat",
+      "faire un contrat",
+      "produire contrat",
+      "generer contrat",
+      "nouveau contrat",
+      "modele",
+      "modeles",
+      "modele contrat"
+    ],
+    "roles": [
+      "ADMIN",
+      "HR_MANAGER"
+    ],
+    "text": "Dans Contrats, « Générer un contrat » : choisissez un modèle, sélectionnez l’employé (ses informations et celles de l’entreprise se remplissent seules), complétez les champs manquants puis générez le PDF. Les modèles se préparent dans « Modèles ».",
+    "path": "/contrats/modeles/generer",
+    "guideId": "contract-generate"
+  },
+  {
+    "id": "contract-manage",
+    "title": "Gérer les contrats",
+    "question": "Comment gérer les contrats ?",
+    "keywords": [
+      "gerer",
+      "gestion",
+      "renouveler",
+      "renouvellement",
+      "essai",
+      "rupture",
+      "licenciement",
+      "demission",
+      "historique",
+      "avenant",
+      "contrat",
+      "contrats",
+      "licencier",
+      "licencie",
+      "renvoyer",
+      "fin de contrat"
+    ],
+    "roles": [
+      "ADMIN",
+      "HR_MANAGER"
+    ],
+    "text": "Dans Contrats, les onglets classent vos contrats (actifs, expirant bientôt, périodes d’essai, BNC, terminés). Sur chaque ligne : renouveler, consulter l’historique (avenants, PDF, Word) ou ouvrir le dossier. « Rupture de contrat » prépare une fin de contrat avec le calcul des indemnités.",
+    "path": "/contrats",
+    "guideId": "contract-manage"
+  }
+]

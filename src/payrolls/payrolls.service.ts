@@ -1,0 +1,3991 @@
+import { legalNow } from '../legal-parameters/legal-parameters.core';
+// import { PrismaService } from '../prisma/prisma.service';
+// import { Prisma } from '@prisma/client';
+
+// import { PayrollCalculatorService } from './services/payroll-calculator.service';
+// import { PayrollItemsService } from './services/payroll-items.service';
+// import { PayrollSmicProtectionService } from './services/payroll-smic-protection.service';
+// import { PayrollDeductionsService } from './services/payroll-deductions.service';
+// import { PayrollGeneratorService } from './services/payroll-generator.service';
+// import { SubscriptionGuard } from '../subscriptions/guards/subscription.guard';
+// import { PayrollBonusesService } from './services/payroll-bonuses.service';
+// import { CompanyTaxService } from '../company-taxes/company-tax.service'; // ✅
+
+// import { LoansService } from '../loans/loans.service';
+// import { AttendanceSummaryService } from '../attendance/attendance-summary.service';
+// import { PayrollSettingsService } from '../payroll/settings/settings.service';
+
+// import { CreatePayrollDto } from './dto/create-payroll.dto';
+// import { UpdatePayrollDto } from './dto/update-payroll.dto';
+// import {
+//   CompanyNotFoundException, EmployeeNotFoundException,
+//   PayrollAlreadyExistsException, PayrollNotFoundException, PayrollAlreadyPaidException
+// } from '../exceptions/business.exceptions';
+
+// export interface SimulatePayrollOverrides {
+//   baseSalary?:       number;
+//   workedDays?:       number;
+//   overtimeHours10?:  number;
+//   overtimeHours25?:  number;
+//   overtimeHours50?:  number;
+//   overtimeHours100?: number;
+//   manualBonuses?: Array<{ id?: string; bonusType: string; amount: number; isTaxable?: boolean; isCnss?: boolean }>;
+// }
+
+// @Injectable()
+// export class PayrollsService {
+//   private readonly logger = new Logger(PayrollsService.name);
+
+//   constructor(
+//     private prisma: PrismaService,
+//     private calculator: PayrollCalculatorService,
+//     private itemsService: PayrollItemsService,
+//     private smicProtection: PayrollSmicProtectionService,
+//     private deductionsService: PayrollDeductionsService,
+//     private generator: PayrollGeneratorService,
+//     private loansService: LoansService,
+//     private attendanceSummary: AttendanceSummaryService,
+//     private payrollSettingsService: PayrollSettingsService,
+//     private subscriptionGuard: SubscriptionGuard,
+//     private bonusesService: PayrollBonusesService,
+//     private companyTaxService: CompanyTaxService, // ✅
+//   ) {}
+
+//   private getMonthNumber(month: string): number {
+//     const months = ['janvier','février','mars','avril','mai','juin','juillet','août','septembre','octobre','novembre','décembre'];
+//     const index = months.indexOf(month.toLowerCase());
+//     if (index !== -1) return index + 1;
+//     const parsed = parseInt(month, 10);
+//     return isNaN(parsed) ? new Date().getMonth() + 1 : parsed;
+//   }
+
+//   private async shouldEmployeeBePaid(employeeId: string, companyId: string, month: number, year: number) {
+//     await this.attendanceSummary.generateAndStoreAllMonthlySummaries(companyId, month, year);
+//     const summaries = await this.attendanceSummary.getStoredSummaries(companyId, month, year, [employeeId]);
+//     if (summaries.length === 0) return { shouldPay: false, daysToPay: 0, summary: null, reason: 'Aucun pointage enregistré pour ce mois' };
+//     const summary = summaries[0];
+//     if (summary.daysToPay <= 0) return { shouldPay: false, daysToPay: 0, summary, reason: `Aucun jour travaillé` };
+//     return { shouldPay: true, daysToPay: summary.daysToPay, summary };
+//   }
+
+//   // ============================================================================
+//   // CREATE
+//   // ============================================================================
+//   async create(createPayrollDto: CreatePayrollDto, userId: string) {
+//     const user = await this.prisma.user.findUnique({
+//       where: { id: userId },
+//       select: { companyId: true, role: true },
+//     });
+
+//     // ✅ FIX BUG 6: CABINET_ADMIN n'a pas de companyId sur son User
+//     // Il fournit le companyId directement dans le DTO (front l'envoie déjà)
+//     const isCabinet = user?.role === 'CABINET_ADMIN' || user?.role === 'CABINET_GESTIONNAIRE';
+//     const effectiveCompanyId = isCabinet
+//       ? (createPayrollDto as any).companyId
+//       : user?.companyId;
+
+//     if (!effectiveCompanyId) throw new CompanyNotFoundException();
+
+//     // Vérification abonnement : uniquement pour les entreprises directes (pas cabinet)
+//     if (!isCabinet) {
+//       await this.subscriptionGuard.checkFeatureAccess(effectiveCompanyId, 'hasPayrollIndividual');
+//     }
+
+//     const { employeeId, month, year, overtime10, overtime25, overtime50, overtime100, workedDays } = createPayrollDto as any;
+//     const monthNum = this.getMonthNumber(month);
+
+//     const [employee, company] = await Promise.all([
+//       this.prisma.employee.findUnique({
+//         where: { id: employeeId },
+//         select: {
+//           id: true, firstName: true, lastName: true, baseSalary: true,
+//           maritalStatus: true, numberOfChildren: true,
+//           isSubjectToIrpp: true, isSubjectToCnss: true, isSubjectToTus: true,
+//           taxExemptionReason: true, tolZone: true,
+//           contractType: true, // ← détermine CNSS/ITS/TUS/BNC
+//           isResident: true,   // ← taux BNC 10% ou 20%
+//         }
+//       }),
+//       this.prisma.company.findUnique({ where: { id: effectiveCompanyId }, select: { appliesCnssEmployer: true, cnssEmployerRate: true, isSubjectToTus: true } })
+//     ]);
+
+//     if (!employee) throw new EmployeeNotFoundException(employeeId);
+
+//     // Bloquer la génération de bulletin pour INTERIM (géré par l'agence)
+//     if ((employee as any).contractType === 'INTERIM') {
+//       throw new BadRequestException(
+//         'Les intérimaires sont gérés par leur agence. Aucun bulletin ne peut être généré côté entreprise.'
+//       );
+//     }
+
+//     const existing = await this.prisma.payroll.findFirst({ where: { employeeId, month: monthNum, year, companyId: effectiveCompanyId } });
+//     if (existing) throw new PayrollAlreadyExistsException(`${employee.firstName} ${employee.lastName}`, monthNum, year);
+
+//     const { shouldPay, daysToPay, summary, reason } = await this.shouldEmployeeBePaid(employeeId, effectiveCompanyId, monthNum, year);
+//     if (!shouldPay) throw new Error(`❌ Impossible de créer le bulletin : ${reason}`);
+
+//     const [settings, companyTaxes] = await Promise.all([
+//       this.payrollSettingsService.getSettingsByCompanyId(effectiveCompanyId),
+//       this.companyTaxService.findActive(effectiveCompanyId), // ✅ Charger les taxes actives
+//     ]);
+
+//     const eff10  = (overtime10  != null) ? Number(overtime10)  : Number((summary as any).overtime10Hours  ?? 0);
+//     const eff25  = (overtime25  != null) ? Number(overtime25)  : Number((summary as any).overtime25Hours  ?? 0);
+//     const eff50  = (overtime50  != null) ? Number(overtime50)  : Number((summary as any)?.overtime50Hours  ?? 0);
+//     const eff100 = (overtime100 != null) ? Number(overtime100) : Number((summary as any).overtime100Hours ?? 0);
+
+//     const calculatedBonuses = await this.bonusesService.calculateEmployeeBonuses(employeeId, Number(employee.baseSalary), monthNum, year);
+//     const [loans, advances] = await Promise.all([
+//       this.deductionsService.getActiveLoans(employeeId),
+//       this.deductionsService.getApprovedAdvances(employeeId, monthNum, year)
+//     ]);
+
+//     const hasVoluntaryDeductions = loans.length > 0 || advances.length > 0;
+//     const protectionMode = this.smicProtection.determineMode(Number(employee.baseSalary), hasVoluntaryDeductions);
+
+//     // ✅ Passer companyTaxes au calculateur
+//     const prelimCalc = this.calculator.calculate(
+//       Number(employee.baseSalary), eff10, eff25, eff50, eff100,
+//       calculatedBonuses, [], settings, daysToPay, settings.workDaysPerMonth, employee, company, companyTaxes
+//     );
+
+//     const { adjustedDeductions, loansToUpdate, advancesToDeduct, warnings } =
+//       this.smicProtection.handleDeductions(employee, prelimCalc, loans, advances, protectionMode);
+
+//     const calc = this.calculator.calculate(
+//       Number(employee.baseSalary), eff10, eff25, eff50, eff100,
+//       calculatedBonuses, adjustedDeductions, settings, daysToPay, settings.workDaysPerMonth, employee, company, companyTaxes
+//     );
+
+//     warnings.forEach(w => this.logger.warn(w));
+//     const absenceDays = Math.max(0, settings.workDaysPerMonth - daysToPay);
+
+//     return this.prisma.$transaction(async (tx) => {
+//       const payroll = await tx.payroll.create({
+//         data: {
+//           employeeId, companyId: effectiveCompanyId,
+//           month: monthNum, year,
+//           periodStart: new Date(year, monthNum - 1, 1),
+//           periodEnd:   new Date(year, monthNum, 0),
+//           workDays: settings.workDaysPerMonth,
+//           workedDays: daysToPay, absenceDays,
+//           daysOnLeave: (summary as any)?.daysOnLeave ?? 0, daysRemote: (summary as any)?.daysRemote ?? 0, daysHoliday: (summary as any)?.daysHoliday ?? 0,
+//           overtimeHours10: eff10, overtimeHours25: eff25, overtimeHours50: eff50, overtimeHours100: eff100,
+//           baseSalary: Number(employee.baseSalary),
+//           adjustedBaseSalary: calc.adjustedBaseSalary,
+//           absenceDeduction:   calc.absenceDeduction,
+//           overtimeAmount10:   calc.overtimeAmount10,
+//           overtimeAmount25:   calc.overtimeAmount25,
+//           overtimeAmount50:   calc.overtimeAmount50,
+//           overtimeAmount100:  calc.overtimeAmount100,
+//           totalOvertimeAmount: calc.totalOvertimeAmount,
+//           totalBonuses:       calc.totalBonuses,
+//           grossSalary:        calc.grossSalary,
+//           netSalary:          calc.netSalary,
+//           cnssSalarial:       calc.cnssSalarial,
+//           cnssEmployer:       calc.cnssEmployer,
+//           its:                calc.its,
+//           totalDeductions:    calc.totalDeductions,
+//           totalEmployerCost:  calc.totalEmployerCost,
+//           irppAbattement:    calc.irppDetails?.abattement    || 0,
+//           irppFiscalParts:   calc.irppDetails?.fiscalParts   || 1,
+//           irppEffectiveRate: calc.irppDetails?.effectiveRate || 0,
+//           cnssEmployerPension:  calc.cnssEmployerPension,
+//           cnssEmployerFamily:   calc.cnssEmployerFamily,
+//           cnssEmployerAccident: calc.cnssEmployerAccident,
+//           tusDgiAmount:  calc.tusDgiAmount,
+//           tusCnssAmount: calc.tusCnssAmount,
+//           tusTotal:      calc.tusTotal,
+//           // ✅ Stocker les totaux taxes custom
+//           employeeCustomTaxTotal: calc.employeeCustomTaxTotal,
+//           employerCustomTaxTotal: calc.employerCustomTaxTotal,
+//           status: 'DRAFT', createdById: userId,
+//         } as any
+//       });
+
+//       await this.itemsService.create(
+//         tx, payroll.id, employee, calc,
+//         { ...summary, overtime10Hours: eff10, overtime25Hours: eff25, overtime50Hours: eff50, overtime100Hours: eff100 },
+//         loans, advances, settings, calculatedBonuses
+//       );
+
+//       for (const loanUpdate of loansToUpdate) {
+//         const loan = loans.find(l => l.id === loanUpdate.id);
+//         if (loan) {
+//           const isPartial = loanUpdate.deduction < Number(loan.monthlyRepayment);
+//           await this.deductionsService.updateLoan(tx, loanUpdate.id, loanUpdate.deduction, Number(loan.remainingBalance), monthNum, year, isPartial);
+//         }
+//       }
+
+//       await this.deductionsService.markAdvancesAsDeducted(tx, advancesToDeduct);
+//       return payroll;
+//     }, { maxWait: 10000, timeout: 30000, isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
+//   }
+
+//   async generateMonthlyPayrolls(userId: string, month: number, year: number, employeeIds?: string[], customWorkDays?: number) {
+//     return this.generator.generate(userId, month, year, employeeIds, customWorkDays);
+//   }
+
+//   // ============================================================================
+//   // FIND ALL — avec filtres companyId / month / year / limit
+//   // ✅ Remplace l'ancienne méthode findAll
+//   // ============================================================================
+//   async findAll(
+//     userId: string,
+//     employeeId?: string,
+//     filters?: { companyId?: string; month?: number; year?: number; limit?: number },
+//   ) {
+//     const user = await this.prisma.user.findUnique({
+//       where:  { id: userId },
+//       select: { companyId: true, role: true, employeeId: true, email: true },
+//     });
+
+//     // Pour les rôles cabinet, on utilise le companyId passé en filtre
+//     const isCabinet = user?.role === 'CABINET_ADMIN' || user?.role === 'CABINET_GESTIONNAIRE';
+//     const effectiveCompanyId = (isCabinet && filters?.companyId)
+//       ? filters.companyId
+//       : user?.companyId;
+
+//     if (!effectiveCompanyId) return [];
+
+//     const whereClause: any = { companyId: effectiveCompanyId };
+
+//     if (user?.role === 'EMPLOYEE') {
+//       whereClause.employeeId = user.employeeId
+//         ?? (await this.prisma.employee.findFirst({ where: { email: user.email, companyId: effectiveCompanyId } }))?.id;
+//       if (!whereClause.employeeId) return [];
+//       whereClause.status = 'PAID';
+//     } else if (employeeId) {
+//       whereClause.employeeId = employeeId;
+//     }
+
+//     if (filters?.month) whereClause.month = filters.month;
+//     if (filters?.year)  whereClause.year  = filters.year;
+
+//     return this.prisma.payroll.findMany({
+//       where:   whereClause,
+//       include: { employee: { select: { firstName: true, lastName: true, employeeNumber: true, position: true } } },
+//       orderBy: [{ year: 'desc' }, { month: 'desc' }, { createdAt: 'desc' }],
+//       take:    filters?.limit ?? 200,
+//     });
+//   }
+
+//   async findOne(id: string, userId: string) {
+//     const payroll = await this.prisma.payroll.findUnique({ where: { id }, include: { employee: { select: { id: true, firstName: true, lastName: true, employeeNumber: true, position: true, baseSalary: true, maritalStatus: true, numberOfChildren: true, cnssNumber: true, paymentMethod: true, department: { select: { id: true, name: true, code: true } } } }, items: { orderBy: { order: 'asc' } }, company: true } });
+//     if (!payroll) throw new PayrollNotFoundException(id);
+//     const user = await this.prisma.user.findUnique({ where: { id: userId }, select: { role: true, employeeId: true, companyId: true, email: true } });
+//     if (!user) throw new ForbiddenException('Utilisateur non trouvé');
+//     if (user.companyId !== payroll.companyId) throw new ForbiddenException('Accès refusé');
+//     if (user.role === 'EMPLOYEE') {
+//       const isOwner = user.employeeId === payroll.employeeId;
+//       if (!isOwner) {
+//         const emp = await this.prisma.employee.findFirst({ where: { email: user.email, companyId: user.companyId } });
+//         if (!emp || emp.id !== payroll.employeeId) throw new ForbiddenException('Accès à vos bulletins uniquement');
+//       }
+//       if (payroll.status !== 'PAID') throw new ForbiddenException('Bulletin non encore disponible');
+//     }
+//     return payroll;
+//   }
+
+//   async update(id: string, updatePayrollDto: UpdatePayrollDto, userId?: string) {
+//     const payroll = await this.prisma.payroll.findUnique({ where: { id } });
+//     if (!payroll) throw new PayrollNotFoundException(id);
+//     if (payroll.status === 'PAID') throw new PayrollAlreadyPaidException();
+//     if (userId) {
+//       const user = await this.prisma.user.findUnique({ where: { id: userId }, select: { role: true, companyId: true } });
+//       if (user?.role === 'EMPLOYEE') throw new ForbiddenException('Modification réservée aux admins/RH');
+//       if (user?.companyId !== payroll.companyId) throw new ForbiddenException('Accès refusé');
+//     }
+//     return this.prisma.payroll.update({ where: { id }, data: { ...updatePayrollDto, updatedAt: new Date() } });
+//   }
+
+//   async remove(id: string) {
+//     const payroll = await this.prisma.payroll.findUnique({ where: { id } });
+//     if (!payroll) throw new PayrollNotFoundException(id);
+//     if (payroll.status === 'PAID') throw new PayrollAlreadyPaidException();
+//     await this.prisma.payroll.delete({ where: { id } });
+//     return { success: true, message: 'Bulletin supprimé avec succès' };
+//   }
+
+//   // ============================================================================
+//   // RECALCULATE
+//   // ============================================================================
+//   async recalculatePayroll(id: string, userId: string, overrides?: any) {
+//     const payroll = await this.prisma.payroll.findUnique({ where: { id }, include: { employee: true } });
+//     if (!payroll) throw new PayrollNotFoundException(id);
+//     if (payroll.status === 'PAID') throw new PayrollAlreadyPaidException();
+//     const user = await this.prisma.user.findUnique({ where: { id: userId }, select: { role: true, companyId: true } });
+//     if (user?.role === 'EMPLOYEE') throw new ForbiddenException('Recalcul réservé aux admins/RH');
+//     if (user?.companyId !== payroll.companyId) throw new ForbiddenException('Accès refusé');
+
+//     if(await this.prisma.comptaDelivery.findFirst({where:{payrollId:id},select:{id:true}}))throw new ForbiddenException('Bulletin transmis à Compta : annulez-le avant toute correction comptable.');
+//     const [employee, company, settings, companyTaxes] = await Promise.all([
+//       this.prisma.employee.findUnique({ where: { id: payroll.employeeId }, select: { id: true, firstName: true, lastName: true, baseSalary: true, maritalStatus: true, numberOfChildren: true, isSubjectToIrpp: true, isSubjectToCnss: true, isSubjectToTus: true, taxExemptionReason: true, tolZone: true, contractType: true, isResident: true } }),
+//       this.prisma.company.findUnique({ where: { id: payroll.companyId }, select: { appliesCnssEmployer: true, cnssEmployerRate: true, isSubjectToTus: true } }),
+//       this.payrollSettingsService.getSettingsByCompanyId(payroll.companyId),
+//       this.companyTaxService.findActive(payroll.companyId), // ✅
+//     ]);
+
+//     if (!employee) throw new EmployeeNotFoundException(payroll.employeeId);
+
+//     const effectiveBaseSalary = overrides?.baseSalary ?? Number(payroll.baseSalary);
+//     const effectiveDays       = overrides?.workedDays ?? Number(payroll.workedDays);
+//     const eff10  = overrides?.overtimeHours10  ?? Number((payroll as any).overtimeHours10  || 0);
+//     const eff25  = overrides?.overtimeHours25  ?? Number((payroll as any).overtimeHours25  || 0);
+//     const eff50  = overrides?.overtimeHours50  ?? Number((payroll as any).overtimeHours50  || 0);
+//     const eff100 = overrides?.overtimeHours100 ?? Number((payroll as any).overtimeHours100 || 0);
+
+//     let calculatedBonuses: any[];
+//     if (overrides?.manualBonuses && overrides.manualBonuses.length > 0) {
+//       calculatedBonuses = overrides.manualBonuses.map((b: any, i: number) => ({ id: `manual-recalc-${i}`, bonusType: b.bonusType, amount: Number(b.amount), isTaxable: b.isTaxable ?? true, isCnss: b.isCnss ?? true, source: 'MANUAL', isRecurring: true }));
+//     } else {
+//       calculatedBonuses = await this.bonusesService.calculateEmployeeBonuses(payroll.employeeId, effectiveBaseSalary, payroll.month, payroll.year);
+//     }
+
+//     const [loans, advances] = await Promise.all([
+//       this.deductionsService.getActiveLoans(payroll.employeeId),
+//       this.deductionsService.getApprovedAdvances(payroll.employeeId, payroll.month, payroll.year)
+//     ]);
+
+//     const protectionMode = this.smicProtection.determineMode(effectiveBaseSalary, loans.length > 0 || advances.length > 0);
+//     const prelimCalc = this.calculator.calculate(effectiveBaseSalary, eff10, eff25, eff50, eff100, calculatedBonuses, [], settings, effectiveDays, settings.workDaysPerMonth, employee, company, companyTaxes);
+//     const { adjustedDeductions } = this.smicProtection.handleDeductions(employee, prelimCalc, loans, advances, protectionMode);
+//     const calc = this.calculator.calculate(effectiveBaseSalary, eff10, eff25, eff50, eff100, calculatedBonuses, adjustedDeductions, settings, effectiveDays, settings.workDaysPerMonth, employee, company, companyTaxes);
+
+//     const updated = await this.prisma.payroll.update({
+//       where: { id },
+//       data: {
+//         baseSalary: effectiveBaseSalary, workedDays: effectiveDays,
+//         absenceDays: Math.max(0, settings.workDaysPerMonth - effectiveDays),
+//         overtimeHours10: eff10, overtimeHours25: eff25, overtimeHours50: eff50, overtimeHours100: eff100,
+//         adjustedBaseSalary: calc.adjustedBaseSalary, absenceDeduction: calc.absenceDeduction,
+//         overtimeAmount10: calc.overtimeAmount10, overtimeAmount25: calc.overtimeAmount25,
+//         overtimeAmount50: calc.overtimeAmount50, overtimeAmount100: calc.overtimeAmount100,
+//         totalOvertimeAmount: calc.totalOvertimeAmount, totalBonuses: calc.totalBonuses,
+//         grossSalary: calc.grossSalary, netSalary: calc.netSalary,
+//         cnssSalarial: calc.cnssSalarial, cnssEmployer: calc.cnssEmployer, its: calc.its,
+//         totalDeductions: calc.totalDeductions, totalEmployerCost: calc.totalEmployerCost,
+//         irppAbattement: calc.irppDetails?.abattement || 0, irppFiscalParts: calc.irppDetails?.fiscalParts || 1, irppEffectiveRate: calc.irppDetails?.effectiveRate || 0,
+//         cnssEmployerPension: calc.cnssEmployerPension, cnssEmployerFamily: calc.cnssEmployerFamily, cnssEmployerAccident: calc.cnssEmployerAccident,
+//         tusDgiAmount: calc.tusDgiAmount, tusCnssAmount: calc.tusCnssAmount, tusTotal: calc.tusTotal,
+//         employeeCustomTaxTotal: calc.employeeCustomTaxTotal, // ✅
+//         employerCustomTaxTotal: calc.employerCustomTaxTotal, // ✅
+//         updatedAt: new Date(),
+//       } as any
+//     });
+
+//     return { ...updated, recalculated: true, calc };
+//   }
+
+//   // ============================================================================
+//   // SIMULATE
+//   // ============================================================================
+//   async simulatePayroll(employeeId: string, month: string | number, year: number, userId: string, overrides?: SimulatePayrollOverrides) {
+//     const user = await this.prisma.user.findUnique({ where: { id: userId }, select: { companyId: true } });
+//     if (!user?.companyId) throw new CompanyNotFoundException();
+
+//     const monthNum = typeof month === 'string' ? this.getMonthNumber(month) : month;
+
+//     const [employee, company] = await Promise.all([
+//       this.prisma.employee.findUnique({ where: { id: employeeId }, select: { id: true, firstName: true, lastName: true, baseSalary: true, maritalStatus: true, numberOfChildren: true, isSubjectToIrpp: true, isSubjectToCnss: true, isSubjectToTus: true, taxExemptionReason: true, tolZone: true, contractType: true, isResident: true } }),
+//       this.prisma.company.findUnique({ where: { id: user.companyId }, select: { appliesCnssEmployer: true, cnssEmployerRate: true, isSubjectToTus: true } })
+//     ]);
+//     if (!employee) throw new EmployeeNotFoundException(employeeId);
+
+//     const [settings, companyTaxes] = await Promise.all([
+//       this.payrollSettingsService.getSettingsByCompanyId(user.companyId),
+//       this.companyTaxService.findActive(user.companyId), // ✅
+//     ]);
+
+//     let daysToPay = settings.workDaysPerMonth;
+//     let att10 = 0, att25 = 0, att50 = 0, att100 = 0;
+
+//     const hasWorkedDaysOverride = overrides?.workedDays != null;
+//     const hasOvertimeOverride   = overrides?.overtimeHours10 != null || overrides?.overtimeHours25 != null || overrides?.overtimeHours50 != null || overrides?.overtimeHours100 != null;
+
+//     if (!hasWorkedDaysOverride || !hasOvertimeOverride) {
+//       try {
+//         await this.attendanceSummary.generateAndStoreAllMonthlySummaries(user.companyId, monthNum, year);
+//         const summaries = await this.attendanceSummary.getStoredSummaries(user.companyId, monthNum, year, [employeeId]);
+//         if (summaries.length > 0) {
+//           const s = summaries[0];
+//           if (!hasWorkedDaysOverride && s.daysToPay > 0) daysToPay = s.daysToPay;
+//           if (!hasOvertimeOverride) {
+//             att10  = Number((s as any).overtime10Hours  ?? 0);
+//             att25  = Number((s as any).overtime25Hours  ?? 0);
+//             att50  = Number(s.overtime50Hours  ?? 0);
+//             att100 = Number((s as any).overtime100Hours ?? 0);
+//           }
+//         }
+//       } catch { this.logger.warn(`⚠️ Pointage indisponible pour ${employeeId}`); }
+//     }
+
+//     if (hasWorkedDaysOverride) daysToPay = overrides!.workedDays!;
+//     const eff10  = overrides?.overtimeHours10  != null ? overrides.overtimeHours10  : att10;
+//     const eff25  = overrides?.overtimeHours25  != null ? overrides.overtimeHours25  : att25;
+//     const eff50  = overrides?.overtimeHours50  != null ? overrides.overtimeHours50  : att50;
+//     const eff100 = overrides?.overtimeHours100 != null ? overrides.overtimeHours100 : att100;
+//     const effectiveBaseSalary = (overrides?.baseSalary != null && overrides.baseSalary > 0) ? overrides.baseSalary : Number(employee.baseSalary);
+
+//     let calculatedBonuses: any[], simulationMode: string;
+//     if (overrides?.manualBonuses && overrides.manualBonuses.length > 0) {
+//       calculatedBonuses = (overrides!.manualBonuses as any[]).map(b => ({ id: b.id ?? `manual-${Date.now()}`, bonusType: b.bonusType, amount: Number(b.amount), isTaxable: b.isTaxable ?? true, isCnss: b.isCnss ?? true, source: 'MANUAL', isRecurring: true }));
+//       simulationMode = 'MANUAL_OVERRIDE';
+//     } else {
+//       calculatedBonuses = await this.bonusesService.calculateEmployeeBonuses(employeeId, effectiveBaseSalary, monthNum, year);
+//       simulationMode = (overrides && Object.keys(overrides).length > 0) ? 'MANUAL_OVERRIDE' : 'FROM_ATTENDANCE';
+//     }
+
+//     const [loans, advances] = await Promise.all([
+//       this.deductionsService.getActiveLoans(employeeId),
+//       this.deductionsService.getApprovedAdvances(employeeId, monthNum, year)
+//     ]);
+
+//     const protectionMode = this.smicProtection.determineMode(effectiveBaseSalary, loans.length > 0 || advances.length > 0);
+//     const prelimCalc = this.calculator.calculate(effectiveBaseSalary, eff10, eff25, eff50, eff100, calculatedBonuses, [], settings, daysToPay, settings.workDaysPerMonth, employee, company, companyTaxes);
+//     const { adjustedDeductions } = this.smicProtection.handleDeductions(employee, prelimCalc, loans, advances, protectionMode);
+//     const calc = this.calculator.calculate(effectiveBaseSalary, eff10, eff25, eff50, eff100, calculatedBonuses, adjustedDeductions, settings, daysToPay, settings.workDaysPerMonth, employee, company, companyTaxes);
+
+//     const totalLoanDeduction    = loans.reduce((s, l) => s + Number(l.monthlyRepayment), 0);
+//     const totalAdvanceDeduction = advances.reduce((s, a) => s + Number(a.amount), 0);
+
+//     return {
+//       employee: { id: employee.id, firstName: employee.firstName, lastName: employee.lastName, baseSalary: Number(employee.baseSalary), effectiveBaseSalary, isSubjectToCnss: employee.isSubjectToCnss, isSubjectToIrpp: employee.isSubjectToIrpp, isSubjectToTus: employee.isSubjectToTus, taxExemptionReason: employee.taxExemptionReason },
+//       month: monthNum, year, daysToPay, workDays: settings.workDaysPerMonth,
+//       overtime: { hours10: eff10, amount10: calc.overtimeAmount10, hours25: eff25, amount25: calc.overtimeAmount25, hours50: eff50, amount50: calc.overtimeAmount50, hours100: eff100, amount100: calc.overtimeAmount100, total: calc.totalOvertimeAmount },
+//       bonuses: calculatedBonuses, totalBonuses: calc.totalBonuses,
+//       adjustedBaseSalary: calc.adjustedBaseSalary, absenceDeduction: calc.absenceDeduction,
+//       grossSalary: calc.grossSalary, cnssSalarial: calc.cnssSalarial,
+//       cnssEmployer: calc.cnssEmployer, cnssEmployerPension: calc.cnssEmployerPension, cnssEmployerFamily: calc.cnssEmployerFamily, cnssEmployerAccident: calc.cnssEmployerAccident,
+//       tusDgiAmount: calc.tusDgiAmount, tusCnssAmount: calc.tusCnssAmount, tusTotal: calc.tusTotal,
+//       its: calc.its, irppDetails: calc.irppDetails,
+//       // ✅ Taxes custom dans la réponse simulation
+//       customTaxes:            calc.customTaxDetails,
+//       employeeCustomTaxTotal: calc.employeeCustomTaxTotal,
+//       employerCustomTaxTotal: calc.employerCustomTaxTotal,
+//       loans:    loans.map(l => ({ id: l.id, monthlyRepayment: Number(l.monthlyRepayment), remainingBalance: Number(l.remainingBalance) })),
+//       advances: advances.map(a => ({ id: a.id, amount: Number(a.amount), createdAt: a.createdAt })),
+//       totalLoanDeduction, totalAdvanceDeduction,
+//       totalDeductions: calc.totalDeductions, netSalary: calc.netSalary, totalEmployerCost: calc.totalEmployerCost,
+//       settings: { cnssSalarialRate: settings.cnssSalarialRate, cnssEmployerRate: settings.cnssEmployerRate, cnssCeiling: settings.cnssCeiling, overtimeRate10: settings.overtimeRate10 ?? 10, overtimeRate25: settings.overtimeRate25 ?? 25, overtimeRate50: settings.overtimeRate50 ?? 50, overtimeRate100: settings.overtimeRate100 ?? 100 },
+//       simulationMode,
+//     };
+//   }
+
+//   // ============================================================================
+//   // SIMULATE BATCH
+//   // ============================================================================
+//   async simulateBatchPayroll(employeeIds: string[], month: number, year: number, userId: string) {
+//     const simulations = await Promise.allSettled(employeeIds.map(id => this.simulatePayroll(id, month, year, userId)));
+//     const results = simulations.map((result, index) => {
+//       if (result.status === 'fulfilled') return { employeeId: employeeIds[index], success: true, data: result.value };
+//       return { employeeId: employeeIds[index], success: false, error: (result.reason as Error).message };
+//     });
+//     const successful = results.filter(r => r.success).map(r => r.data!);
+//     return {
+//       results,
+//       summary: {
+//         count:             successful.length,
+//         totalGross:        successful.reduce((s, d: any) => s + d.grossSalary, 0),
+//         totalNet:          successful.reduce((s, d: any) => s + d.netSalary, 0),
+//         totalEmployerCost: successful.reduce((s, d: any) => s + d.totalEmployerCost, 0),
+//         totalCnss:         successful.reduce((s, d: any) => s + d.cnssSalarial, 0),
+//         totalIts:          successful.reduce((s, d: any) => s + d.its, 0),
+//       }
+//     };
+//   }
+
+//   // ============================================================================
+//   // SIMULATE FREE — pas de company réelle → taxes custom vides
+//   // ============================================================================
+//   async simulateFree(body: any) {
+//     const { firstName = 'Simulation', lastName = 'Libre', baseSalary, maritalStatus = 'SINGLE', numberOfChildren = 0, isSubjectToCnss = true, isSubjectToIrpp = true, fiscalMode = 'ITS_2026', forfaitItsRate = 0.08, month, year, workedDays, overtimeHours10 = 0, overtimeHours25 = 0, overtimeHours50 = 0, overtimeHours100 = 0, manualBonuses = [] } = body;
+//     if (!baseSalary || baseSalary < 70400) throw new Error('Salaire de base invalide (minimum SMIG : 70 400 FCFA)');
+
+//     const fakeEmployee = { id: `free-sim-${Date.now()}`, firstName, lastName, baseSalary, maritalStatus, numberOfChildren, isSubjectToCnss, isSubjectToIrpp, isSubjectToTus: true, taxExemptionReason: null };
+//     const fakeCompany  = { appliesCnssEmployer: true, cnssEmployerRate: 20.25, isSubjectToTus: true };
+//     const settings     = this.defaultFreeSettings(fiscalMode, forfaitItsRate);
+//     const daysToPay    = workedDays ?? settings.workDaysPerMonth;
+
+//     const calculatedBonuses = manualBonuses.filter((b: any) => b.bonusType && b.amount > 0).map((b: any, i: number) => ({ id: `free-bonus-${i}`, bonusType: b.bonusType, amount: Number(b.amount), isTaxable: b.isTaxable ?? true, isCnss: b.isCnss ?? true, source: 'MANUAL', isRecurring: true }));
+
+//     // ✅ Simulation libre = pas de company réelle → companyTaxes vide
+//     const calc = this.calculator.calculate(baseSalary, overtimeHours10, overtimeHours25, overtimeHours50, overtimeHours100, calculatedBonuses, [], settings, daysToPay, settings.workDaysPerMonth, fakeEmployee, fakeCompany, []);
+
+//     return {
+//       employee: { id: fakeEmployee.id, firstName, lastName, baseSalary, effectiveBaseSalary: baseSalary, isSubjectToCnss, isSubjectToIrpp, isSubjectToTus: true, taxExemptionReason: null },
+//       month, year, daysToPay, workDays: settings.workDaysPerMonth,
+//       overtime: { hours10: overtimeHours10, amount10: calc.overtimeAmount10, hours25: overtimeHours25, amount25: calc.overtimeAmount25, hours50: overtimeHours50, amount50: calc.overtimeAmount50, hours100: overtimeHours100, amount100: calc.overtimeAmount100, total: calc.totalOvertimeAmount },
+//       bonuses: calculatedBonuses, totalBonuses: calc.totalBonuses,
+//       adjustedBaseSalary: calc.adjustedBaseSalary, absenceDeduction: calc.absenceDeduction,
+//       grossSalary: calc.grossSalary, cnssSalarial: calc.cnssSalarial,
+//       cnssEmployer: calc.cnssEmployer, cnssEmployerPension: calc.cnssEmployerPension, cnssEmployerFamily: calc.cnssEmployerFamily, cnssEmployerAccident: calc.cnssEmployerAccident,
+//       tusDgiAmount: calc.tusDgiAmount, tusCnssAmount: calc.tusCnssAmount, tusTotal: calc.tusTotal,
+//       its: calc.its, irppDetails: calc.irppDetails,
+//       customTaxes: [], employeeCustomTaxTotal: 0, employerCustomTaxTotal: 0,
+//       loans: [], advances: [], totalLoanDeduction: 0, totalAdvanceDeduction: 0,
+//       totalDeductions: calc.totalDeductions, netSalary: calc.netSalary, totalEmployerCost: calc.totalEmployerCost,
+//       settings: { cnssSalarialRate: settings.cnssSalarialRate, cnssEmployerRate: settings.cnssEmployerRate, fiscalMode, forfaitItsRate },
+//       simulationMode: 'FREE_SIMULATION',
+//     };
+//   }
+
+//   async getAccountingJournal(userId: string, month: number, year: number) {
+//     const user = await this.prisma.user.findUnique({ where: { id: userId }, select: { companyId: true } });
+//     if (!user?.companyId) throw new CompanyNotFoundException();
+//     await this.subscriptionGuard.checkFeatureAccess(user.companyId, 'hasPayrollAccountingExport');
+//     const payrolls = await this.prisma.payroll.findMany({ where: { companyId: user.companyId, month, year }, include: { employee: { select: { employeeNumber: true, firstName: true, lastName: true } } } });
+//     const entries: any[] = [];
+//     for (const p of payrolls) {
+//       const name = `${p.employee.firstName} ${p.employee.lastName}`;
+//       const piece = `PAY-${p.employee.employeeNumber}-${month}-${year}`;
+//       entries.push(
+//         { date: p.periodEnd, journal: 'PAIE', piece, account: '661100', label: `Salaire brut - ${name}`, debit: Number(p.grossSalary), credit: 0 },
+//         { date: p.periodEnd, journal: 'PAIE', piece, account: '431300', label: `CNSS Salarié - ${name}`, debit: 0, credit: Number(p.cnssSalarial) },
+//         { date: p.periodEnd, journal: 'PAIE', piece, account: '447200', label: `ITS/IRPP - ${name}`, debit: 0, credit: Number(p.its) },
+//         { date: p.periodEnd, journal: 'PAIE', piece, account: '422000', label: `Rémunération due - ${name}`, debit: 0, credit: Number(p.netSalary) }
+//       );
+//     }
+//     return { month, year, totalEntries: entries.length, entries };
+//   }
+
+//   // ============================================================================
+//   // DECLARATIONS SUMMARY — Récapitulatif CNSS + TUS + ITS pour un mois
+//   // ============================================================================
+//   async getDeclarationsSummary(companyId: string, month: number, year: number) {
+//     const payrolls = await this.prisma.payroll.findMany({
+//       where: { companyId, month, year, status: { not: 'CANCELLED' } },
+//     });
+
+//     if (payrolls.length === 0) return null;
+
+//     const sum = (field: string) =>
+//       payrolls.reduce((acc, p) => acc + Number((p as any)[field] ?? 0), 0);
+
+//     const totalGrossSalary     = sum('grossSalary');
+//     const totalCnssSalarial    = sum('cnssSalarial');
+//     const cnssEmployerPension  = sum('cnssEmployerPension');
+//     const cnssEmployerFamily   = sum('cnssEmployerFamily');
+//     const cnssEmployerAccident = sum('cnssEmployerAccident');
+//     const totalCnssEmployer    = sum('cnssEmployer');
+//     const tusDgiAmount         = sum('tusDgiAmount');
+//     const tusCnssAmount        = sum('tusCnssAmount');
+//     const tusTotal             = sum('tusTotal');
+//     const totalIts             = sum('its');
+
+//     // Agréger les taxes custom (stockées en JSON dans customTaxDetails)
+//     const customMap: Record<string, { name: string; code: string; employeeTotal: number; employerTotal: number }> = {};
+//     for (const p of payrolls) {
+//       const details: any[] = (p as any).customTaxDetails ?? [];
+//       for (const t of details) {
+//         if (!customMap[t.code]) {
+//           customMap[t.code] = { name: t.name, code: t.code, employeeTotal: 0, employerTotal: 0 };
+//         }
+//         customMap[t.code].employeeTotal += Number(t.employeeAmount ?? 0);
+//         customMap[t.code].employerTotal += Number(t.employerAmount ?? 0);
+//       }
+//     }
+
+//     const totalSalarialDeductions = totalCnssSalarial + totalIts +
+//       Object.values(customMap).reduce((s, t) => s + t.employeeTotal, 0);
+//     const totalEmployerCharges = totalCnssEmployer + tusTotal +
+//       Object.values(customMap).reduce((s, t) => s + t.employerTotal, 0);
+
+//     return {
+//       month,
+//       year,
+//       employeeCount:          payrolls.length,
+//       totalGrossSalary,
+//       totalCnssSalarial,
+//       cnssEmployerPension,
+//       cnssEmployerFamily,
+//       cnssEmployerAccident,
+//       totalCnssEmployer,
+//       tusDgiAmount,
+//       tusCnssAmount,
+//       tusTotal,
+//       totalIts,
+//       customTaxDetails:       Object.values(customMap),
+//       totalSalarialDeductions,
+//       totalEmployerCharges,
+//       grandTotal:             totalSalarialDeductions + totalEmployerCharges,
+//     };
+//   }
+
+//   private defaultFreeSettings(fiscalMode: string, forfaitItsRate: number) {
+//     return { cnssSalarialRate: 4, cnssEmployerRate: 20.25, cnssCeiling: 1_200_000, workDaysPerMonth: 26, overtimeRate10: 10, overtimeRate25: 25, overtimeRate50: 50, overtimeRate100: 100, fiscalMode, forfaitItsRate };
+//   }
+// }
+
+// ============================================================================
+// 📁 payrolls.service.ts
+// ✅ Taxes custom chargées via CompanyTaxService.findActive() dans :
+//    - create()
+//    - simulatePayroll()
+//    - recalculatePayroll()
+//    - simulateFree() (taxes vides — pas de company réelle)
+// ============================================================================
+
+// import { Injectable, Logger, ForbiddenException } from '@nestjs/common';
+// import { PrismaService } from '../prisma/prisma.service';
+// import { Prisma } from '@prisma/client';
+
+// import { PayrollCalculatorService } from './services/payroll-calculator.service';
+// import { PayrollItemsService } from './services/payroll-items.service';
+// import { PayrollSmicProtectionService } from './services/payroll-smic-protection.service';
+// import { PayrollDeductionsService } from './services/payroll-deductions.service';
+// import { PayrollGeneratorService } from './services/payroll-generator.service';
+// import { SubscriptionGuard } from '../subscriptions/guards/subscription.guard';
+// import { PayrollBonusesService } from './services/payroll-bonuses.service';
+// import { CompanyTaxService } from '../company-taxes/company-tax.service'; // ✅
+
+// import { LoansService } from '../loans/loans.service';
+// import { AttendanceSummaryService } from '../attendance/attendance-summary.service';
+// import { PayrollSettingsService } from '../payroll/settings/settings.service';
+
+// import { CreatePayrollDto } from './dto/create-payroll.dto';
+// import { UpdatePayrollDto } from './dto/update-payroll.dto';
+// import {
+//   CompanyNotFoundException, EmployeeNotFoundException,
+//   PayrollAlreadyExistsException, PayrollNotFoundException, PayrollAlreadyPaidException
+// } from '../exceptions/business.exceptions';
+
+// export interface SimulatePayrollOverrides {
+//   baseSalary?:       number;
+//   workedDays?:       number;
+//   overtimeHours10?:  number;
+//   overtimeHours25?:  number;
+//   overtimeHours50?:  number;
+//   overtimeHours100?: number;
+//   manualBonuses?: Array<{ id?: string; bonusType: string; amount: number; isTaxable?: boolean; isCnss?: boolean }>;
+// }
+
+// @Injectable()
+// export class PayrollsService {
+//   private readonly logger = new Logger(PayrollsService.name);
+
+//   constructor(
+//     private prisma: PrismaService,
+//     private calculator: PayrollCalculatorService,
+//     private itemsService: PayrollItemsService,
+//     private smicProtection: PayrollSmicProtectionService,
+//     private deductionsService: PayrollDeductionsService,
+//     private generator: PayrollGeneratorService,
+//     private loansService: LoansService,
+//     private attendanceSummary: AttendanceSummaryService,
+//     private payrollSettingsService: PayrollSettingsService,
+//     private subscriptionGuard: SubscriptionGuard,
+//     private bonusesService: PayrollBonusesService,
+//     private companyTaxService: CompanyTaxService, // ✅
+//   ) {}
+
+//   private getMonthNumber(month: string): number {
+//     const months = ['janvier','février','mars','avril','mai','juin','juillet','août','septembre','octobre','novembre','décembre'];
+//     const index = months.indexOf(month.toLowerCase());
+//     if (index !== -1) return index + 1;
+//     const parsed = parseInt(month, 10);
+//     return isNaN(parsed) ? new Date().getMonth() + 1 : parsed;
+//   }
+
+//   private async shouldEmployeeBePaid(employeeId: string, companyId: string, month: number, year: number) {
+//     await this.attendanceSummary.generateAndStoreAllMonthlySummaries(companyId, month, year);
+//     const summaries = await this.attendanceSummary.getStoredSummaries(companyId, month, year, [employeeId]);
+//     if (summaries.length === 0) return { shouldPay: false, daysToPay: 0, summary: null, reason: 'Aucun pointage enregistré pour ce mois' };
+//     const summary = summaries[0];
+//     if (summary.daysToPay <= 0) return { shouldPay: false, daysToPay: 0, summary, reason: `Aucun jour travaillé` };
+//     return { shouldPay: true, daysToPay: summary.daysToPay, summary };
+//   }
+
+//   // ============================================================================
+//   // CREATE
+//   // ============================================================================
+//   async create(createPayrollDto: CreatePayrollDto, userId: string) {
+//     const user = await this.prisma.user.findUnique({ where: { id: userId }, select: { companyId: true } });
+//     if (!user?.companyId) throw new CompanyNotFoundException();
+//     await this.subscriptionGuard.checkFeatureAccess(user.companyId, 'hasPayrollIndividual');
+
+//     const { employeeId, month, year, overtime10, overtime25, overtime50, overtime100, workedDays } = createPayrollDto as any;
+//     const monthNum = this.getMonthNumber(month);
+
+//     const [employee, company] = await Promise.all([
+//       this.prisma.employee.findUnique({
+//         where: { id: employeeId },
+//         select: { id: true, firstName: true, lastName: true, baseSalary: true, maritalStatus: true, numberOfChildren: true, isSubjectToIrpp: true, isSubjectToCnss: true, isSubjectToTus: true, taxExemptionReason: true, tolZone: true, contractType: true, isResident: true }
+//       }),
+//       this.prisma.company.findUnique({ where: { id: user.companyId }, select: { appliesCnssEmployer: true, cnssEmployerRate: true, isSubjectToTus: true } })
+//     ]);
+
+//     if (!employee) throw new EmployeeNotFoundException(employeeId);
+
+//     const existing = await this.prisma.payroll.findFirst({ where: { employeeId, month: monthNum, year, companyId: user.companyId } });
+//     if (existing) throw new PayrollAlreadyExistsException(`${employee.firstName} ${employee.lastName}`, monthNum, year);
+
+//     const { shouldPay, daysToPay, summary, reason } = await this.shouldEmployeeBePaid(employeeId, user.companyId, monthNum, year);
+//     if (!shouldPay) throw new Error(`❌ Impossible de créer le bulletin : ${reason}`);
+
+//     const [settings, companyTaxes] = await Promise.all([
+//       this.payrollSettingsService.getSettingsByCompanyId(user.companyId),
+//       this.companyTaxService.findActive(user.companyId), // ✅ Charger les taxes actives
+//     ]);
+
+//     const eff10  = (overtime10  != null) ? Number(overtime10)  : Number((summary as any).overtime10Hours  ?? 0);
+//     const eff25  = (overtime25  != null) ? Number(overtime25)  : Number((summary as any).overtime25Hours  ?? 0);
+//     const eff50  = (overtime50  != null) ? Number(overtime50)  : Number((summary as any)?.overtime50Hours  ?? 0);
+//     const eff100 = (overtime100 != null) ? Number(overtime100) : Number((summary as any).overtime100Hours ?? 0);
+
+//     const calculatedBonuses = await this.bonusesService.calculateEmployeeBonuses(employeeId, Number(employee.baseSalary), monthNum, year);
+//     const [loans, advances] = await Promise.all([
+//       this.deductionsService.getActiveLoans(employeeId),
+//       this.deductionsService.getApprovedAdvances(employeeId, monthNum, year)
+//     ]);
+
+//     const hasVoluntaryDeductions = loans.length > 0 || advances.length > 0;
+//     const protectionMode = this.smicProtection.determineMode(Number(employee.baseSalary), hasVoluntaryDeductions);
+
+//     // ✅ Passer companyTaxes au calculateur
+//     const prelimCalc = this.calculator.calculate(
+//       Number(employee.baseSalary), eff10, eff25, eff50, eff100,
+//       calculatedBonuses, [], settings, daysToPay, settings.workDaysPerMonth, employee, company, companyTaxes
+//     );
+
+//     const { adjustedDeductions, loansToUpdate, advancesToDeduct, warnings } =
+//       this.smicProtection.handleDeductions(employee, prelimCalc, loans, advances, protectionMode);
+
+//     const calc = this.calculator.calculate(
+//       Number(employee.baseSalary), eff10, eff25, eff50, eff100,
+//       calculatedBonuses, adjustedDeductions, settings, daysToPay, settings.workDaysPerMonth, employee, company, companyTaxes
+//     );
+
+//     warnings.forEach(w => this.logger.warn(w));
+//     const absenceDays = Math.max(0, settings.workDaysPerMonth - daysToPay);
+
+//     return this.prisma.$transaction(async (tx) => {
+//       const payroll = await tx.payroll.create({
+//         data: {
+//           employeeId, companyId: user.companyId!,
+//           month: monthNum, year,
+//           periodStart: new Date(year, monthNum - 1, 1),
+//           periodEnd:   new Date(year, monthNum, 0),
+//           workDays: settings.workDaysPerMonth,
+//           workedDays: daysToPay, absenceDays,
+//           daysOnLeave: (summary as any)?.daysOnLeave ?? 0, daysRemote: (summary as any)?.daysRemote ?? 0, daysHoliday: (summary as any)?.daysHoliday ?? 0,
+//           overtimeHours10: eff10, overtimeHours25: eff25, overtimeHours50: eff50, overtimeHours100: eff100,
+//           baseSalary: Number(employee.baseSalary),
+//           adjustedBaseSalary: calc.adjustedBaseSalary,
+//           absenceDeduction:   calc.absenceDeduction,
+//           overtimeAmount10:   calc.overtimeAmount10,
+//           overtimeAmount25:   calc.overtimeAmount25,
+//           overtimeAmount50:   calc.overtimeAmount50,
+//           overtimeAmount100:  calc.overtimeAmount100,
+//           totalOvertimeAmount: calc.totalOvertimeAmount,
+//           totalBonuses:       calc.totalBonuses,
+//           grossSalary:        calc.grossSalary,
+//           netSalary:          calc.netSalary,
+//           cnssSalarial:       calc.cnssSalarial,
+//           cnssEmployer:       calc.cnssEmployer,
+//           its:                calc.its,
+//           totalDeductions:    calc.totalDeductions,
+//           totalEmployerCost:  calc.totalEmployerCost,
+//           irppAbattement:    calc.irppDetails?.abattement    || 0,
+//           irppFiscalParts:   calc.irppDetails?.fiscalParts   || 1,
+//           irppEffectiveRate: calc.irppDetails?.effectiveRate || 0,
+//           cnssEmployerPension:  calc.cnssEmployerPension,
+//           cnssEmployerFamily:   calc.cnssEmployerFamily,
+//           cnssEmployerAccident: calc.cnssEmployerAccident,
+//           tusDgiAmount:  calc.tusDgiAmount,
+//           tusCnssAmount: calc.tusCnssAmount,
+//           tusTotal:      calc.tusTotal,
+//           // ✅ Stocker les totaux taxes custom
+//           employeeCustomTaxTotal: calc.employeeCustomTaxTotal,
+//           employerCustomTaxTotal: calc.employerCustomTaxTotal,
+//           status: 'DRAFT', createdById: userId,
+//         } as any
+//       });
+
+//       await this.itemsService.create(
+//         tx, payroll.id, employee, calc,
+//         { ...summary, overtime10Hours: eff10, overtime25Hours: eff25, overtime50Hours: eff50, overtime100Hours: eff100 },
+//         loans, advances, settings, calculatedBonuses
+//       );
+
+//       for (const loanUpdate of loansToUpdate) {
+//         const loan = loans.find(l => l.id === loanUpdate.id);
+//         if (loan) {
+//           const isPartial = loanUpdate.deduction < Number(loan.monthlyRepayment);
+//           await this.deductionsService.updateLoan(tx, loanUpdate.id, loanUpdate.deduction, Number(loan.remainingBalance), monthNum, year, isPartial);
+//         }
+//       }
+
+//       await this.deductionsService.markAdvancesAsDeducted(tx, advancesToDeduct);
+//       return payroll;
+//     }, { maxWait: 10000, timeout: 30000, isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
+//   }
+
+//   async generateMonthlyPayrolls(userId: string, month: number, year: number, employeeIds?: string[], customWorkDays?: number) {
+//     return this.generator.generate(userId, month, year, employeeIds, customWorkDays);
+//   }
+
+//   // ============================================================================
+//   // FIND ALL / FIND ONE / UPDATE / REMOVE — inchangés
+//   // ============================================================================
+//   async findAll(userId: string, employeeId?: string) {
+//     const user = await this.prisma.user.findUnique({ where: { id: userId }, select: { companyId: true, role: true, employeeId: true, email: true } });
+//     if (!user?.companyId) return [];
+//     const whereClause: any = { companyId: user.companyId };
+//     if (user.role === 'EMPLOYEE') {
+//       if (user.employeeId) { whereClause.employeeId = user.employeeId; }
+//       else {
+//         const employee = await this.prisma.employee.findFirst({ where: { email: user.email, companyId: user.companyId } });
+//         if (!employee) return [];
+//         whereClause.employeeId = employee.id;
+//       }
+//       whereClause.status = 'PAID';
+//     } else if (employeeId) { whereClause.employeeId = employeeId; }
+//     return this.prisma.payroll.findMany({ where: whereClause, include: { employee: { select: { firstName: true, lastName: true, employeeNumber: true, position: true } } }, orderBy: [{ year: 'desc' }, { month: 'desc' }, { createdAt: 'desc' }] });
+//   }
+
+//   async findOne(id: string, userId: string) {
+//     const payroll = await this.prisma.payroll.findUnique({ where: { id }, include: { employee: { select: { id: true, firstName: true, lastName: true, employeeNumber: true, position: true, baseSalary: true, maritalStatus: true, numberOfChildren: true, cnssNumber: true, paymentMethod: true, department: { select: { id: true, name: true, code: true } } } }, items: { orderBy: { order: 'asc' } }, company: true } });
+//     if (!payroll) throw new PayrollNotFoundException(id);
+//     const user = await this.prisma.user.findUnique({ where: { id: userId }, select: { role: true, employeeId: true, companyId: true, email: true } });
+//     if (!user) throw new ForbiddenException('Utilisateur non trouvé');
+//     if (user.companyId !== payroll.companyId) throw new ForbiddenException('Accès refusé');
+//     if (user.role === 'EMPLOYEE') {
+//       const isOwner = user.employeeId === payroll.employeeId;
+//       if (!isOwner) {
+//         const emp = await this.prisma.employee.findFirst({ where: { email: user.email, companyId: user.companyId } });
+//         if (!emp || emp.id !== payroll.employeeId) throw new ForbiddenException('Accès à vos bulletins uniquement');
+//       }
+//       if (payroll.status !== 'PAID') throw new ForbiddenException('Bulletin non encore disponible');
+//     }
+//     return payroll;
+//   }
+
+//   async update(id: string, updatePayrollDto: UpdatePayrollDto, userId?: string) {
+//     const payroll = await this.prisma.payroll.findUnique({ where: { id } });
+//     if (!payroll) throw new PayrollNotFoundException(id);
+//     if (payroll.status === 'PAID') throw new PayrollAlreadyPaidException();
+//     if (userId) {
+//       const user = await this.prisma.user.findUnique({ where: { id: userId }, select: { role: true, companyId: true } });
+//       if (user?.role === 'EMPLOYEE') throw new ForbiddenException('Modification réservée aux admins/RH');
+//       if (user?.companyId !== payroll.companyId) throw new ForbiddenException('Accès refusé');
+//     }
+//     return this.prisma.payroll.update({ where: { id }, data: { ...updatePayrollDto, updatedAt: new Date() } });
+//   }
+
+//   async remove(id: string) {
+//     const payroll = await this.prisma.payroll.findUnique({ where: { id } });
+//     if (!payroll) throw new PayrollNotFoundException(id);
+//     if (payroll.status === 'PAID') throw new PayrollAlreadyPaidException();
+//     await this.prisma.payroll.delete({ where: { id } });
+//     return { success: true, message: 'Bulletin supprimé avec succès' };
+//   }
+
+//   // ============================================================================
+//   // RECALCULATE
+//   // ============================================================================
+//   async recalculatePayroll(id: string, userId: string, overrides?: any) {
+//     const payroll = await this.prisma.payroll.findUnique({ where: { id }, include: { employee: true } });
+//     if (!payroll) throw new PayrollNotFoundException(id);
+//     if (payroll.status === 'PAID') throw new PayrollAlreadyPaidException();
+//     const user = await this.prisma.user.findUnique({ where: { id: userId }, select: { role: true, companyId: true } });
+//     if (user?.role === 'EMPLOYEE') throw new ForbiddenException('Recalcul réservé aux admins/RH');
+//     if (user?.companyId !== payroll.companyId) throw new ForbiddenException('Accès refusé');
+
+//     const [employee, company, settings, companyTaxes] = await Promise.all([
+//       this.prisma.employee.findUnique({ where: { id: payroll.employeeId }, select: { id: true, firstName: true, lastName: true, baseSalary: true, maritalStatus: true, numberOfChildren: true, isSubjectToIrpp: true, isSubjectToCnss: true, isSubjectToTus: true, taxExemptionReason: true, tolZone: true, contractType: true, isResident: true } }),
+//       this.prisma.company.findUnique({ where: { id: payroll.companyId }, select: { appliesCnssEmployer: true, cnssEmployerRate: true, isSubjectToTus: true } }),
+//       this.payrollSettingsService.getSettingsByCompanyId(payroll.companyId),
+//       this.companyTaxService.findActive(payroll.companyId), // ✅
+//     ]);
+
+//     if (!employee) throw new EmployeeNotFoundException(payroll.employeeId);
+
+//     const effectiveBaseSalary = overrides?.baseSalary ?? Number(payroll.baseSalary);
+//     const effectiveDays       = overrides?.workedDays ?? Number(payroll.workedDays);
+//     const eff10  = overrides?.overtimeHours10  ?? Number((payroll as any).overtimeHours10  || 0);
+//     const eff25  = overrides?.overtimeHours25  ?? Number((payroll as any).overtimeHours25  || 0);
+//     const eff50  = overrides?.overtimeHours50  ?? Number((payroll as any).overtimeHours50  || 0);
+//     const eff100 = overrides?.overtimeHours100 ?? Number((payroll as any).overtimeHours100 || 0);
+
+//     let calculatedBonuses: any[];
+//     if (overrides?.manualBonuses && overrides.manualBonuses.length > 0) {
+//       calculatedBonuses = overrides.manualBonuses.map((b: any, i: number) => ({ id: `manual-recalc-${i}`, bonusType: b.bonusType, amount: Number(b.amount), isTaxable: b.isTaxable ?? true, isCnss: b.isCnss ?? true, source: 'MANUAL', isRecurring: true }));
+//     } else {
+//       calculatedBonuses = await this.bonusesService.calculateEmployeeBonuses(payroll.employeeId, effectiveBaseSalary, payroll.month, payroll.year);
+//     }
+
+//     const [loans, advances] = await Promise.all([
+//       this.deductionsService.getActiveLoans(payroll.employeeId),
+//       this.deductionsService.getApprovedAdvances(payroll.employeeId, payroll.month, payroll.year)
+//     ]);
+
+//     const protectionMode = this.smicProtection.determineMode(effectiveBaseSalary, loans.length > 0 || advances.length > 0);
+//     const prelimCalc = this.calculator.calculate(effectiveBaseSalary, eff10, eff25, eff50, eff100, calculatedBonuses, [], settings, effectiveDays, settings.workDaysPerMonth, employee, company, companyTaxes);
+//     const { adjustedDeductions } = this.smicProtection.handleDeductions(employee, prelimCalc, loans, advances, protectionMode);
+//     const calc = this.calculator.calculate(effectiveBaseSalary, eff10, eff25, eff50, eff100, calculatedBonuses, adjustedDeductions, settings, effectiveDays, settings.workDaysPerMonth, employee, company, companyTaxes);
+
+//     const updated = await this.prisma.payroll.update({
+//       where: { id },
+//       data: {
+//         baseSalary: effectiveBaseSalary, workedDays: effectiveDays,
+//         absenceDays: Math.max(0, settings.workDaysPerMonth - effectiveDays),
+//         overtimeHours10: eff10, overtimeHours25: eff25, overtimeHours50: eff50, overtimeHours100: eff100,
+//         adjustedBaseSalary: calc.adjustedBaseSalary, absenceDeduction: calc.absenceDeduction,
+//         overtimeAmount10: calc.overtimeAmount10, overtimeAmount25: calc.overtimeAmount25,
+//         overtimeAmount50: calc.overtimeAmount50, overtimeAmount100: calc.overtimeAmount100,
+//         totalOvertimeAmount: calc.totalOvertimeAmount, totalBonuses: calc.totalBonuses,
+//         grossSalary: calc.grossSalary, netSalary: calc.netSalary,
+//         cnssSalarial: calc.cnssSalarial, cnssEmployer: calc.cnssEmployer, its: calc.its,
+//         totalDeductions: calc.totalDeductions, totalEmployerCost: calc.totalEmployerCost,
+//         irppAbattement: calc.irppDetails?.abattement || 0, irppFiscalParts: calc.irppDetails?.fiscalParts || 1, irppEffectiveRate: calc.irppDetails?.effectiveRate || 0,
+//         cnssEmployerPension: calc.cnssEmployerPension, cnssEmployerFamily: calc.cnssEmployerFamily, cnssEmployerAccident: calc.cnssEmployerAccident,
+//         tusDgiAmount: calc.tusDgiAmount, tusCnssAmount: calc.tusCnssAmount, tusTotal: calc.tusTotal,
+//         employeeCustomTaxTotal: calc.employeeCustomTaxTotal, // ✅
+//         employerCustomTaxTotal: calc.employerCustomTaxTotal, // ✅
+//         updatedAt: new Date(),
+//       } as any
+//     });
+
+//     return { ...updated, recalculated: true, calc };
+//   }
+
+//   // ============================================================================
+//   // SIMULATE
+//   // ============================================================================
+//   async simulatePayroll(employeeId: string, month: string | number, year: number, userId: string, overrides?: SimulatePayrollOverrides) {
+//     const user = await this.prisma.user.findUnique({ where: { id: userId }, select: { companyId: true } });
+//     if (!user?.companyId) throw new CompanyNotFoundException();
+
+//     const monthNum = typeof month === 'string' ? this.getMonthNumber(month) : month;
+
+//     const [employee, company] = await Promise.all([
+//       this.prisma.employee.findUnique({ where: { id: employeeId }, select: { id: true, firstName: true, lastName: true, baseSalary: true, maritalStatus: true, numberOfChildren: true, isSubjectToIrpp: true, isSubjectToCnss: true, isSubjectToTus: true, taxExemptionReason: true, tolZone: true, contractType: true, isResident: true } }),
+//       this.prisma.company.findUnique({ where: { id: user.companyId }, select: { appliesCnssEmployer: true, cnssEmployerRate: true, isSubjectToTus: true } })
+//     ]);
+//     if (!employee) throw new EmployeeNotFoundException(employeeId);
+
+//     const [settings, companyTaxes] = await Promise.all([
+//       this.payrollSettingsService.getSettingsByCompanyId(user.companyId),
+//       this.companyTaxService.findActive(user.companyId), // ✅
+//     ]);
+
+//     let daysToPay = settings.workDaysPerMonth;
+//     let att10 = 0, att25 = 0, att50 = 0, att100 = 0;
+
+//     const hasWorkedDaysOverride = overrides?.workedDays != null;
+//     const hasOvertimeOverride   = overrides?.overtimeHours10 != null || overrides?.overtimeHours25 != null || overrides?.overtimeHours50 != null || overrides?.overtimeHours100 != null;
+
+//     if (!hasWorkedDaysOverride || !hasOvertimeOverride) {
+//       try {
+//         await this.attendanceSummary.generateAndStoreAllMonthlySummaries(user.companyId, monthNum, year);
+//         const summaries = await this.attendanceSummary.getStoredSummaries(user.companyId, monthNum, year, [employeeId]);
+//         if (summaries.length > 0) {
+//           const s = summaries[0];
+//           if (!hasWorkedDaysOverride && s.daysToPay > 0) daysToPay = s.daysToPay;
+//           if (!hasOvertimeOverride) {
+//             att10  = Number((s as any).overtime10Hours  ?? 0);
+//             att25  = Number((s as any).overtime25Hours  ?? 0);
+//             att50  = Number(s.overtime50Hours  ?? 0);
+//             att100 = Number((s as any).overtime100Hours ?? 0);
+//           }
+//         }
+//       } catch { this.logger.warn(`⚠️ Pointage indisponible pour ${employeeId}`); }
+//     }
+
+//     if (hasWorkedDaysOverride) daysToPay = overrides!.workedDays!;
+//     const eff10  = overrides?.overtimeHours10  != null ? overrides.overtimeHours10  : att10;
+//     const eff25  = overrides?.overtimeHours25  != null ? overrides.overtimeHours25  : att25;
+//     const eff50  = overrides?.overtimeHours50  != null ? overrides.overtimeHours50  : att50;
+//     const eff100 = overrides?.overtimeHours100 != null ? overrides.overtimeHours100 : att100;
+//     const effectiveBaseSalary = (overrides?.baseSalary != null && overrides.baseSalary > 0) ? overrides.baseSalary : Number(employee.baseSalary);
+
+//     let calculatedBonuses: any[], simulationMode: string;
+//     if (overrides?.manualBonuses && overrides.manualBonuses.length > 0) {
+//       calculatedBonuses = (overrides!.manualBonuses as any[]).map(b => ({ id: b.id ?? `manual-${Date.now()}`, bonusType: b.bonusType, amount: Number(b.amount), isTaxable: b.isTaxable ?? true, isCnss: b.isCnss ?? true, source: 'MANUAL', isRecurring: true }));
+//       simulationMode = 'MANUAL_OVERRIDE';
+//     } else {
+//       calculatedBonuses = await this.bonusesService.calculateEmployeeBonuses(employeeId, effectiveBaseSalary, monthNum, year);
+//       simulationMode = (overrides && Object.keys(overrides).length > 0) ? 'MANUAL_OVERRIDE' : 'FROM_ATTENDANCE';
+//     }
+
+//     const [loans, advances] = await Promise.all([
+//       this.deductionsService.getActiveLoans(employeeId),
+//       this.deductionsService.getApprovedAdvances(employeeId, monthNum, year)
+//     ]);
+
+//     const protectionMode = this.smicProtection.determineMode(effectiveBaseSalary, loans.length > 0 || advances.length > 0);
+//     const prelimCalc = this.calculator.calculate(effectiveBaseSalary, eff10, eff25, eff50, eff100, calculatedBonuses, [], settings, daysToPay, settings.workDaysPerMonth, employee, company, companyTaxes);
+//     const { adjustedDeductions } = this.smicProtection.handleDeductions(employee, prelimCalc, loans, advances, protectionMode);
+//     const calc = this.calculator.calculate(effectiveBaseSalary, eff10, eff25, eff50, eff100, calculatedBonuses, adjustedDeductions, settings, daysToPay, settings.workDaysPerMonth, employee, company, companyTaxes);
+
+//     const totalLoanDeduction    = loans.reduce((s, l) => s + Number(l.monthlyRepayment), 0);
+//     const totalAdvanceDeduction = advances.reduce((s, a) => s + Number(a.amount), 0);
+
+//     return {
+//       employee: { id: employee.id, firstName: employee.firstName, lastName: employee.lastName, baseSalary: Number(employee.baseSalary), effectiveBaseSalary, isSubjectToCnss: employee.isSubjectToCnss, isSubjectToIrpp: employee.isSubjectToIrpp, isSubjectToTus: employee.isSubjectToTus, taxExemptionReason: employee.taxExemptionReason },
+//       month: monthNum, year, daysToPay, workDays: settings.workDaysPerMonth,
+//       overtime: { hours10: eff10, amount10: calc.overtimeAmount10, hours25: eff25, amount25: calc.overtimeAmount25, hours50: eff50, amount50: calc.overtimeAmount50, hours100: eff100, amount100: calc.overtimeAmount100, total: calc.totalOvertimeAmount },
+//       bonuses: calculatedBonuses, totalBonuses: calc.totalBonuses,
+//       adjustedBaseSalary: calc.adjustedBaseSalary, absenceDeduction: calc.absenceDeduction,
+//       grossSalary: calc.grossSalary, cnssSalarial: calc.cnssSalarial,
+//       cnssEmployer: calc.cnssEmployer, cnssEmployerPension: calc.cnssEmployerPension, cnssEmployerFamily: calc.cnssEmployerFamily, cnssEmployerAccident: calc.cnssEmployerAccident,
+//       tusDgiAmount: calc.tusDgiAmount, tusCnssAmount: calc.tusCnssAmount, tusTotal: calc.tusTotal,
+//       its: calc.its, irppDetails: calc.irppDetails,
+//       // ✅ Taxes custom dans la réponse simulation
+//       customTaxes:            calc.customTaxDetails,
+//       employeeCustomTaxTotal: calc.employeeCustomTaxTotal,
+//       employerCustomTaxTotal: calc.employerCustomTaxTotal,
+//       loans:    loans.map(l => ({ id: l.id, monthlyRepayment: Number(l.monthlyRepayment), remainingBalance: Number(l.remainingBalance) })),
+//       advances: advances.map(a => ({ id: a.id, amount: Number(a.amount), createdAt: a.createdAt })),
+//       totalLoanDeduction, totalAdvanceDeduction,
+//       totalDeductions: calc.totalDeductions, netSalary: calc.netSalary, totalEmployerCost: calc.totalEmployerCost,
+//       settings: { cnssSalarialRate: settings.cnssSalarialRate, cnssEmployerRate: settings.cnssEmployerRate, cnssCeiling: settings.cnssCeiling, overtimeRate10: settings.overtimeRate10 ?? 10, overtimeRate25: settings.overtimeRate25 ?? 25, overtimeRate50: settings.overtimeRate50 ?? 50, overtimeRate100: settings.overtimeRate100 ?? 100 },
+//       simulationMode,
+//     };
+//   }
+
+//   // ============================================================================
+//   // SIMULATE BATCH
+//   // ============================================================================
+//   async simulateBatchPayroll(employeeIds: string[], month: number, year: number, userId: string) {
+//     const simulations = await Promise.allSettled(employeeIds.map(id => this.simulatePayroll(id, month, year, userId)));
+//     const results = simulations.map((result, index) => {
+//       if (result.status === 'fulfilled') return { employeeId: employeeIds[index], success: true, data: result.value };
+//       return { employeeId: employeeIds[index], success: false, error: (result.reason as Error).message };
+//     });
+//     const successful = results.filter(r => r.success).map(r => r.data!);
+//     return {
+//       results,
+//       summary: {
+//         count:             successful.length,
+//         totalGross:        successful.reduce((s, d: any) => s + d.grossSalary, 0),
+//         totalNet:          successful.reduce((s, d: any) => s + d.netSalary, 0),
+//         totalEmployerCost: successful.reduce((s, d: any) => s + d.totalEmployerCost, 0),
+//         totalCnss:         successful.reduce((s, d: any) => s + d.cnssSalarial, 0),
+//         totalIts:          successful.reduce((s, d: any) => s + d.its, 0),
+//       }
+//     };
+//   }
+
+//   // ============================================================================
+//   // SIMULATE FREE — pas de company réelle → taxes custom vides
+//   // ============================================================================
+//   async simulateFree(body: any) {
+//     const { firstName = 'Simulation', lastName = 'Libre', baseSalary, maritalStatus = 'SINGLE', numberOfChildren = 0, isSubjectToCnss = true, isSubjectToIrpp = true, fiscalMode = 'ITS_2026', forfaitItsRate = 0.08, month, year, workedDays, overtimeHours10 = 0, overtimeHours25 = 0, overtimeHours50 = 0, overtimeHours100 = 0, manualBonuses = [] } = body;
+//     if (!baseSalary || baseSalary < 70400) throw new Error('Salaire de base invalide (minimum SMIG : 70 400 FCFA)');
+
+//     const fakeEmployee = { id: `free-sim-${Date.now()}`, firstName, lastName, baseSalary, maritalStatus, numberOfChildren, isSubjectToCnss, isSubjectToIrpp, isSubjectToTus: true, taxExemptionReason: null };
+//     const fakeCompany  = { appliesCnssEmployer: true, cnssEmployerRate: 20.25, isSubjectToTus: true };
+//     const settings     = this.defaultFreeSettings(fiscalMode, forfaitItsRate);
+//     const daysToPay    = workedDays ?? settings.workDaysPerMonth;
+
+//     const calculatedBonuses = manualBonuses.filter((b: any) => b.bonusType && b.amount > 0).map((b: any, i: number) => ({ id: `free-bonus-${i}`, bonusType: b.bonusType, amount: Number(b.amount), isTaxable: b.isTaxable ?? true, isCnss: b.isCnss ?? true, source: 'MANUAL', isRecurring: true }));
+
+//     // ✅ Simulation libre = pas de company réelle → companyTaxes vide
+//     const calc = this.calculator.calculate(baseSalary, overtimeHours10, overtimeHours25, overtimeHours50, overtimeHours100, calculatedBonuses, [], settings, daysToPay, settings.workDaysPerMonth, fakeEmployee, fakeCompany, []);
+
+//     return {
+//       employee: { id: fakeEmployee.id, firstName, lastName, baseSalary, effectiveBaseSalary: baseSalary, isSubjectToCnss, isSubjectToIrpp, isSubjectToTus: true, taxExemptionReason: null },
+//       month, year, daysToPay, workDays: settings.workDaysPerMonth,
+//       overtime: { hours10: overtimeHours10, amount10: calc.overtimeAmount10, hours25: overtimeHours25, amount25: calc.overtimeAmount25, hours50: overtimeHours50, amount50: calc.overtimeAmount50, hours100: overtimeHours100, amount100: calc.overtimeAmount100, total: calc.totalOvertimeAmount },
+//       bonuses: calculatedBonuses, totalBonuses: calc.totalBonuses,
+//       adjustedBaseSalary: calc.adjustedBaseSalary, absenceDeduction: calc.absenceDeduction,
+//       grossSalary: calc.grossSalary, cnssSalarial: calc.cnssSalarial,
+//       cnssEmployer: calc.cnssEmployer, cnssEmployerPension: calc.cnssEmployerPension, cnssEmployerFamily: calc.cnssEmployerFamily, cnssEmployerAccident: calc.cnssEmployerAccident,
+//       tusDgiAmount: calc.tusDgiAmount, tusCnssAmount: calc.tusCnssAmount, tusTotal: calc.tusTotal,
+//       its: calc.its, irppDetails: calc.irppDetails,
+//       customTaxes: [], employeeCustomTaxTotal: 0, employerCustomTaxTotal: 0,
+//       loans: [], advances: [], totalLoanDeduction: 0, totalAdvanceDeduction: 0,
+//       totalDeductions: calc.totalDeductions, netSalary: calc.netSalary, totalEmployerCost: calc.totalEmployerCost,
+//       settings: { cnssSalarialRate: settings.cnssSalarialRate, cnssEmployerRate: settings.cnssEmployerRate, fiscalMode, forfaitItsRate },
+//       simulationMode: 'FREE_SIMULATION',
+//     };
+//   }
+
+//   async getAccountingJournal(userId: string, month: number, year: number) {
+//     const user = await this.prisma.user.findUnique({ where: { id: userId }, select: { companyId: true } });
+//     if (!user?.companyId) throw new CompanyNotFoundException();
+//     await this.subscriptionGuard.checkFeatureAccess(user.companyId, 'hasPayrollAccountingExport');
+//     const payrolls = await this.prisma.payroll.findMany({ where: { companyId: user.companyId, month, year }, include: { employee: { select: { employeeNumber: true, firstName: true, lastName: true } } } });
+//     const entries: any[] = [];
+//     for (const p of payrolls) {
+//       const name = `${p.employee.firstName} ${p.employee.lastName}`;
+//       const piece = `PAY-${p.employee.employeeNumber}-${month}-${year}`;
+//       entries.push(
+//         { date: p.periodEnd, journal: 'PAIE', piece, account: '661100', label: `Salaire brut - ${name}`, debit: Number(p.grossSalary), credit: 0 },
+//         { date: p.periodEnd, journal: 'PAIE', piece, account: '431100', label: `CNSS salarié - ${name}`, debit: 0, credit: Number(p.cnssSalarial) },
+//         { date: p.periodEnd, journal: 'PAIE', piece, account: '447200', label: `ITS/IRPP - ${name}`, debit: 0, credit: Number(p.its) },
+//         { date: p.periodEnd, journal: 'PAIE', piece, account: '422100', label: `Rémunération due - ${name}`, debit: 0, credit: Number(p.netSalary) }
+//       );
+//     }
+//     return { month, year, totalEntries: entries.length, entries };
+//   }
+
+//   private defaultFreeSettings(fiscalMode: string, forfaitItsRate: number) {
+//     return { cnssSalarialRate: 4, cnssEmployerRate: 20.25, cnssCeiling: 1_200_000, workDaysPerMonth: 26, overtimeRate10: 10, overtimeRate25: 25, overtimeRate50: 50, overtimeRate100: 100, fiscalMode, forfaitItsRate };
+//   }
+// }
+
+import {
+  Injectable,
+  Logger,
+  ForbiddenException,
+  BadRequestException,
+} from '@nestjs/common';
+import { PrismaService } from '../prisma/prisma.service';
+import { Prisma } from '@prisma/client';
+
+import { PayrollCalculatorService } from './services/payroll-calculator.service';
+import { PayrollItemsService } from './services/payroll-items.service';
+import { PayrollSmicProtectionService } from './services/payroll-smic-protection.service';
+import { PayrollDeductionsService } from './services/payroll-deductions.service';
+import { PayrollGeneratorService } from './services/payroll-generator.service';
+import { SubscriptionGuard } from '../subscriptions/guards/subscription.guard';
+import { PayrollBonusesService } from './services/payroll-bonuses.service';
+import { CompanyTaxService } from '../company-taxes/company-tax.service'; // ✅
+import { LeavesService } from '../leaves/leaves.service';
+import { resolveCycleWindow } from '../leaves/leaves-common.util';
+import { LoansService } from '../loans/loans.service';
+import { AttendanceSummaryService } from '../attendance/attendance-summary.service';
+import { PayrollSettingsService } from '../payroll/settings/settings.service';
+import { YtdCheckpointService } from './services/ytd-checkpoint.service';
+import { AuditGateService } from '../audit-engine/audit-gate.service';
+// ✅ Réutilise la même classification ITS/BNC10/BNC20 que les rapports —
+// jamais recalculée différemment d'un endroit à l'autre.
+import { classifyFiscalCategory } from '../reports/payroll-recap.service';
+import {
+  resolveVerifiedCompanyId,
+  assertCompanyAccess,
+} from '../common/resolve-verified-company.util';
+
+import { CreatePayrollDto } from './dto/create-payroll.dto';
+import { UpdatePayrollDto } from './dto/update-payroll.dto';
+import {
+  CompanyNotFoundException,
+  EmployeeNotFoundException,
+  PayrollAlreadyExistsException,
+  PayrollNotFoundException,
+  PayrollAlreadyPaidException,
+} from '../exceptions/business.exceptions';
+
+import { validateSimulationInput } from './payroll-simulation-validation';
+
+export interface SimulatePayrollOverrides {
+  baseSalary?: number;
+  workedDays?: number;
+  absentDays?: number;
+  // ✅ Jours théoriques du mois (ex: 24 saisi à l'étape période de la paie en masse)
+  workDays?: number;
+  overtimeHours10?: number;
+  overtimeHours25?: number;
+  overtimeHours50?: number;
+  overtimeHours100?: number;
+  manualBonuses?: Array<{
+    id?: string;
+    bonusType: string;
+    amount: number;
+    isTaxable?: boolean;
+    isCnss?: boolean;
+    fiscalType?: string | null;
+  }>;
+  // 🆕 Retenues libres saisies à la main (paie manuelle) — déduites du net
+  manualDeductions?: Array<{ label?: string; amount: number }>;
+}
+
+// 🛡️ Exécute `fn` sur chaque élément avec au plus `limit` appels simultanés.
+// Utilisé par l'estimation en masse : avant, Promise.allSettled lançait les
+// simulations de TOUS les employés en même temps (500 employés = 500 jeux de
+// requêtes d'un coup) et saturait le pool de connexions de la base.
+async function runWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let cursor = 0;
+  const worker = async () => {
+    while (cursor < items.length) {
+      const i = cursor++;
+      results[i] = await fn(items[i]);
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, worker),
+  );
+  return results;
+}
+
+// Réglable via SIMULATE_BATCH_CONCURRENCY (défaut 4, max 8).
+const SIMULATE_BATCH_CONCURRENCY = Math.min(
+  Math.max(Number(process.env.SIMULATE_BATCH_CONCURRENCY) || 4, 1),
+  8,
+);
+
+@Injectable()
+export class PayrollsService {
+  private readonly logger = new Logger(PayrollsService.name);
+
+  constructor(
+    private prisma: PrismaService,
+    private calculator: PayrollCalculatorService,
+    private itemsService: PayrollItemsService,
+    private smicProtection: PayrollSmicProtectionService,
+    private deductionsService: PayrollDeductionsService,
+    private generator: PayrollGeneratorService,
+    private loansService: LoansService,
+    private leavesService: LeavesService, // ← ajouter cette ligne
+    private attendanceSummary: AttendanceSummaryService,
+    private payrollSettingsService: PayrollSettingsService,
+    private subscriptionGuard: SubscriptionGuard,
+    private bonusesService: PayrollBonusesService,
+    private companyTaxService: CompanyTaxService, // ✅
+    private ytdCheckpointService: YtdCheckpointService,
+    private auditGate: AuditGateService,
+  ) {}
+
+  private getMonthNumber(month: string): number {
+    const months = [
+      'janvier',
+      'février',
+      'mars',
+      'avril',
+      'mai',
+      'juin',
+      'juillet',
+      'août',
+      'septembre',
+      'octobre',
+      'novembre',
+      'décembre',
+    ];
+    const index = months.indexOf(month.toLowerCase());
+    if (index !== -1) return index + 1;
+    const parsed = /^\d+$/.test(month.trim()) ? Number(month) : NaN;
+    if (!Number.isInteger(parsed) || parsed < 1 || parsed > 12) {
+      throw new BadRequestException('Le mois doit être compris entre 1 et 12.');
+    }
+    return parsed;
+  }
+
+  private async shouldEmployeeBePaid(
+    employeeId: string,
+    companyId: string,
+    month: number,
+    year: number,
+    // ✅ CORRECTIF (bug confirmé) : quand l'admin saisit les jours travaillés
+    // à la main (ex : oubli de pointage, employé qui se souvient de ses
+    // jours a posteriori), cette fonction rejetait quand même le bulletin
+    // avec "Aucun jour travaillé" car elle ne regardait QUE le pointage en
+    // BDD, sans jamais recevoir la saisie manuelle du front. La saisie
+    // manuelle prime désormais sur le pointage — comme déjà le cas côté
+    // paie en masse / bulletin manuel (resolveDaysToPay).
+    workedDaysOverride?: number | null,
+  ) {
+    await this.attendanceSummary.generateAndStoreAllMonthlySummaries(
+      companyId,
+      month,
+      year,
+    );
+    const summaries = await this.attendanceSummary.getStoredSummaries(
+      companyId,
+      month,
+      year,
+      [employeeId],
+    );
+    const summary = summaries.length > 0 ? summaries[0] : null;
+
+    if (workedDaysOverride != null) {
+      const days = Math.max(0, Number(workedDaysOverride));
+      return {
+        shouldPay: days > 0,
+        daysToPay: days,
+        summary,
+        reason: days > 0 ? undefined : `Aucun jour travaillé (saisi manuellement)`,
+      };
+    }
+
+    if (!summary)
+      return {
+        shouldPay: false,
+        daysToPay: 0,
+        summary: null,
+        reason: 'Aucun pointage enregistré pour ce mois',
+      };
+    if (summary.daysToPay <= 0)
+      return {
+        shouldPay: false,
+        daysToPay: 0,
+        summary,
+        reason: `Aucun jour travaillé`,
+      };
+    return { shouldPay: true, daysToPay: summary.daysToPay, summary };
+  }
+
+  // ============================================================================
+  // ✅ YTD CARRYOVER — point de départ du cumul annuel pour une période donnée
+  // ============================================================================
+  // Cherche le checkpoint YtdCheckpoint le plus récent dont effectiveDate <= la
+  // date du bulletin demandé. S'il en existe un, il prime — c'est lui qui porte
+  // le reset post-congé (valeurs à 0, effectif à partir du mois de retour).
+  // S'il n'en existe AUCUN (employé jamais parti en congé, ou pas encore migré),
+  // on retombe exactement sur l'ancien comportement : ytdCarryOverBrut/Date sur
+  // l'Employee, appliqué si son année <= l'année du bulletin, fenêtre = année en cours.
+  // ➜ Ne change RIEN pour les bulletins/employés qui marchaient déjà bien.
+  private async getYtdWindow(employeeId: string, year: number, month: number) {
+    const targetDate = new Date(`${year}-${String(month).padStart(2, '0')}-01`);
+
+    const checkpoint = await this.prisma.ytdCheckpoint.findFirst({
+      where: { employeeId, effectiveDate: { lte: targetDate } },
+      orderBy: { effectiveDate: 'desc' },
+    });
+
+    if (checkpoint) {
+      const d = checkpoint.effectiveDate;
+      return {
+        startYear: d.getFullYear(),
+        startMonth: d.getMonth() + 1,
+        carryOver: {
+          brut: Number(checkpoint.brut),
+          netImp: Number(checkpoint.netImp),
+          netSalary: Number(checkpoint.netSalary),
+          chargesSal: Number(checkpoint.chargesSal),
+          chargesPat: Number(checkpoint.chargesPat),
+        },
+      };
+    }
+
+    // ── Fallback legacy — comportement IDENTIQUE à l'ancien code ──────────
+    const emp = await this.prisma.employee.findUnique({
+      where: { id: employeeId },
+      select: {
+        ytdCarryOverBrut: true,
+        ytdCarryOverNetImp: true,
+        ytdCarryOverNetSalary: true,
+        ytdCarryOverChargesSal: true,
+        ytdCarryOverChargesPat: true,
+        ytdCarryOverDate: true,
+      },
+    });
+    const coDate = emp?.ytdCarryOverDate;
+    const applies = coDate ? new Date(coDate).getFullYear() <= year : false;
+
+    return {
+      startYear: year,
+      startMonth: 1,
+      carryOver: applies
+        ? {
+            brut: Number(emp?.ytdCarryOverBrut ?? 0),
+            netImp: Number(emp?.ytdCarryOverNetImp ?? 0),
+            netSalary: Number(emp?.ytdCarryOverNetSalary ?? 0),
+            chargesSal: Number(emp?.ytdCarryOverChargesSal ?? 0),
+            chargesPat: Number(emp?.ytdCarryOverChargesPat ?? 0),
+          }
+        : { brut: 0, netImp: 0, netSalary: 0, chargesSal: 0, chargesPat: 0 },
+    };
+  }
+
+  // Somme les bulletins entre [startYear/startMonth] et [endYear/endMonth] inclus.
+  // Gère le passage d'année (utile si un checkpoint de juillet 2026 doit encore
+  // s'appliquer à un bulletin de janvier 2027, par ex.).
+  private async sumPayrollsInWindow(
+    employeeId: string,
+    startYear: number,
+    startMonth: number,
+    endYear: number,
+    endMonth: number,
+  ) {
+    const where: any =
+      startYear === endYear
+        ? {
+            employeeId,
+            status: { notIn: ['CANCELLED'] },
+            year: startYear,
+            month: { gte: startMonth, lte: endMonth },
+          }
+        : {
+            employeeId,
+            status: { notIn: ['CANCELLED'] },
+            OR: [
+              { year: startYear, month: { gte: startMonth } },
+              { year: { gt: startYear, lt: endYear } },
+              { year: endYear, month: { lte: endMonth } },
+            ],
+          };
+
+    return this.prisma.payroll.aggregate({
+      where,
+      _sum: {
+        grossSalary: true,
+        cnssSalarial: true,
+        cnssEmployer: true,
+        its: true,
+        tusCnssAmount: true,
+        workedDays: true,
+        totalOvertimeAmount: true,
+        baseSalary: true,
+        netSalary: true,
+        // ⚠️ CORRECTIF — totalDeductions inclut aussi les dettes du salarié
+        // (prêts, avances, retenues diverses) et totalEmployerCost est en
+        // réalité un COÛT (grossSalary + charges, voir
+        // payroll-calculator.service.ts ligne ~457 : "totalEmployerCost =
+        // grossSalary + cnssEmployer + tusTotal + employerCustomTaxTotal").
+        // Aucun des deux ne correspond à "Charges salariales/patronales".
+        // On cumule à la place les briques exactes qui composent les vraies
+        // charges (hors dettes, hors salaire) : CNSS + ITS + taxes custom
+        // salariales d'un côté, CNSS employeur + TUS + taxes custom
+        // patronales de l'autre — mêmes champs que le calculateur utilise
+        // lui-même pour construire totalDeductions/totalEmployerCost, mais
+        // sans y mélanger salaire ou dettes.
+        employeeCustomTaxTotal: true,
+        employerCustomTaxTotal: true,
+        tusTotal: true,
+      },
+    });
+  }
+
+  // ============================================================================
+  // CREATE
+  // ============================================================================
+  async create(createPayrollDto: CreatePayrollDto, userId: string) {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { id: true, companyId: true, role: true, manageMultipleCompanies: true },
+    });
+
+    // ✅ FIX BUG 6: CABINET_ADMIN n'a pas de companyId sur son User
+    // Il fournit le companyId directement dans le DTO (front l'envoie déjà)
+    // ✅ CORRECTIF (bug confirmé) : l'admin multi-entreprises (manageMultipleCompanies)
+    // a bien un user.companyId valide (son entreprise "active"). L'ancienne
+    // condition (`canOverride ? dto.companyId : user.companyId`) l'ignorait
+    // dès que canOverride était vrai, MÊME quand le DTO n'envoyait aucun
+    // companyId (cas de la paie individuelle classique, qui n'a jamais
+    // connu la notion de portefeuille) → effectiveCompanyId devenait
+    // undefined → "Entreprise introuvable ou accès refusé". Le DTO ne
+    // prime désormais que s'il fournit réellement un companyId (appel venant
+    // du portefeuille) ; sinon on retombe sur user.companyId, comme
+    // n'importe quel admin. Un vrai CABINET_ADMIN (user.companyId toujours
+    // null) garde le même comportement qu'avant.
+    // 🔒 CORRECTIF SÉCURITÉ (audit) : ce companyId du DTO n'était jamais
+    // vérifié contre userCompany/cabinetCompany — un compte cabinet ou
+    // multi-entreprises pouvait créer une paie dans n'importe quelle
+    // entreprise en changeant l'UUID. Rebranché sur la fonction centrale.
+    const isCabinet =
+      user?.role === 'CABINET_ADMIN' || user?.role === 'CABINET_GESTIONNAIRE';
+    const dtoCompanyId = (createPayrollDto as any).companyId;
+    if (!user) throw new CompanyNotFoundException();
+    const effectiveCompanyId = await resolveVerifiedCompanyId(
+      this.prisma,
+      user,
+      dtoCompanyId,
+    );
+
+    if (!effectiveCompanyId) throw new CompanyNotFoundException();
+
+    // Vérification abonnement : uniquement pour les entreprises directes (pas cabinet)
+    if (!isCabinet) {
+      await this.subscriptionGuard.checkFeatureAccess(
+        effectiveCompanyId,
+        'hasPayrollIndividual',
+      );
+    }
+
+    const {
+      employeeId,
+      month,
+      year,
+      overtime10,
+      overtime25,
+      overtime50,
+      overtime100,
+      workedDays,
+    } = createPayrollDto as any;
+    const monthNum = this.getMonthNumber(month);
+
+    const [employee, company] = await Promise.all([
+      this.prisma.employee.findUnique({
+        where: { id: employeeId },
+        select: {
+          id: true,
+          firstName: true,
+          lastName: true,
+          baseSalary: true,
+          maritalStatus: true,
+          numberOfChildren: true,
+          isSubjectToIrpp: true,
+          isSubjectToCnss: true,
+          isSubjectToTus: true,
+          taxExemptionReason: true,
+          tolZone: true,
+          contractType: true, // ← détermine CNSS/ITS/TUS/BNC
+          isResident: true, // ← taux BNC 10% ou 20%
+          hireDate: true, // 🆕 ancienneté auto
+        },
+      }),
+      this.prisma.company.findUnique({
+        where: { id: effectiveCompanyId },
+        select: {
+          appliesCnssEmployer: true,
+          cnssEmployerRate: true,
+          isSubjectToTus: true,
+          seniorityMode: true,
+        },
+      }),
+    ]);
+
+    if (!employee) throw new EmployeeNotFoundException(employeeId);
+
+    // Bloquer la génération de bulletin pour INTERIM (géré par l'agence)
+    if ((employee as any).contractType === 'INTERIM') {
+      throw new BadRequestException(
+        'Les intérimaires sont gérés par leur agence. Aucun bulletin ne peut être généré côté entreprise.',
+      );
+    }
+
+    const existing = await this.prisma.payroll.findFirst({
+      where: {
+        employeeId,
+        month: monthNum,
+        year,
+        companyId: effectiveCompanyId,
+      },
+    });
+    if (existing)
+      throw new PayrollAlreadyExistsException(
+        `${employee.firstName} ${employee.lastName}`,
+        monthNum,
+        year,
+      );
+
+    const { shouldPay, daysToPay, summary, reason } =
+      await this.shouldEmployeeBePaid(
+        employeeId,
+        effectiveCompanyId,
+        monthNum,
+        year,
+        // ✅ jours saisis à la main par l'admin (voir shouldEmployeeBePaid)
+        workedDays,
+      );
+    if (!shouldPay)
+      throw new Error(`❌ Impossible de créer le bulletin : ${reason}`);
+
+    const [settings, companyTaxes] = await Promise.all([
+      this.payrollSettingsService.getSettingsByCompanyId(effectiveCompanyId),
+      this.companyTaxService.findActive(effectiveCompanyId, { month: monthNum, year }), // ✅ taxes actives du mois
+    ]);
+
+    // 🔒 Même règle que la génération en masse : HS désactivées → aucune HS issue du pointage
+    const otAllowedCreate = (settings as any)?.overtimeEnabled !== false;
+    const eff10 =
+      overtime10 != null
+        ? Number(overtime10)
+        : otAllowedCreate ? Number((summary as any)?.overtime10Hours ?? 0) : 0;
+    const eff25 =
+      overtime25 != null
+        ? Number(overtime25)
+        : otAllowedCreate ? Number((summary as any)?.overtime25Hours ?? 0) : 0;
+    const eff50 =
+      overtime50 != null
+        ? Number(overtime50)
+        : otAllowedCreate ? Number((summary as any)?.overtime50Hours ?? 0) : 0;
+    const eff100 =
+      overtime100 != null
+        ? Number(overtime100)
+        : otAllowedCreate ? Number((summary as any)?.overtime100Hours ?? 0) : 0;
+
+    const seniorityMode = (company as any).seniorityMode ?? 'AUTO';
+    const calculatedBonuses =
+      await this.bonusesService.calculateEmployeeBonuses(
+        employeeId,
+        Number(employee.baseSalary),
+        monthNum,
+        year,
+        effectiveCompanyId,
+        daysToPay,
+        settings.workDaysPerMonth,
+        (employee as any).hireDate ?? null,
+        seniorityMode,
+      );
+
+    // ✅ CORRECTIF ("le trou") : brut de TRAVAIL de ce mois (sans indemnité
+    // congé, calculé AVANT de charger leaveImpact) — sert à compléter la
+    // moyenne 12 mois quand ce mois est justement celui où l'indemnité doit
+    // être payée (son propre bulletin n'existe pas encore en base).
+    const prelimCalc = this.calculator.calculate(
+      Number(employee.baseSalary),
+      eff10,
+      eff25,
+      eff50,
+      eff100,
+      calculatedBonuses,
+      [],
+      settings,
+      daysToPay,
+      settings.workDaysPerMonth,
+      { ...employee, _payrollYear: year, _payrollMonth: monthNum }, // ✅ barème fiscal selon l'année du bulletin
+      company,
+      companyTaxes,
+    );
+
+    const [loans, advances, companyDeductions, leaveImpact, leaveBalanceSnap] = await Promise.all([
+      // ✅ month/year : même règle que la génération en masse (prêts déjà
+      // remboursés en espèces ce mois-ci exclus)
+      this.deductionsService.getActiveLoans(employeeId, monthNum, year),
+      this.deductionsService.getApprovedAdvances(employeeId, monthNum, year),
+      this.deductionsService.getPendingCompanyDeductionsForEmployee(employeeId),
+      // ✅ Charger l'impact congé — cohérence avec la génération batch
+      this.leavesService
+        .getLeaveImpactForPayroll(employeeId, monthNum, year, prelimCalc.grossSalary),
+      // ✅ CORRECTIF (bug trouvé) : snapshot solde congés AU MOMENT de la
+      // génération — lisait seulement le cycle le PLUS RÉCENT
+      // (findFirst orderBy desc), donc sous-évalué pour un employé avec
+      // plusieurs cycles non soldés (même correctif que Provision). Solde
+      // TOTAL réel désormais (somme de tous les cycles).
+      this.leavesService.getTotalLeaveBalanceSummary(employeeId).catch(() => null),
+    ]);
+
+    const leaveIndemnity = leaveImpact?.leaveIndemnity ?? 0;
+    const leaveIndemnityBase = leaveImpact?.leaveIndemnityBase ?? leaveIndemnity;
+    const leaveIndemnitySeniority = leaveImpact?.leaveIndemnitySeniority ?? 0;
+    const leaveAbsenceDeduction = leaveImpact?.absenceDeduction ?? 0;
+    const isPaidLeave = leaveImpact?.isPaid ?? false;
+    const leaveDays = leaveImpact?.leaveDays ?? 0;
+    const leaveLabel = isPaidLeave ? 'Indemnité de congé' : 'Congé sans solde';
+
+    const hasVoluntaryDeductions = loans.length > 0 || advances.length > 0;
+    const protectionMode = this.smicProtection.determineMode(
+      Number(employee.baseSalary),
+      hasVoluntaryDeductions,
+    );
+
+    // ℹ️ prelimCalc déjà calculé plus haut (avant l'appel à getLeaveImpactForPayroll)
+
+    const { adjustedDeductions, loansToUpdate, advancesToDeduct, warnings } =
+      this.smicProtection.handleDeductions(
+        employee,
+        prelimCalc,
+        loans,
+        advances,
+        protectionMode,
+      );
+
+    // ✅ Retenues diverses (pharmacie, cantine, casse matériel...) — ne passe
+    // pas par smicProtection (qui ne connaît que prêts/avances) : le montant
+    // mensuel est fixé par le RH/Admin à la création (monthlyDeduction), qui
+    // reste seul responsable de la décision finale.
+    const { calcEntries: companyDeductionEntries, toApply: companyDeductionsToApply } =
+      this.deductionsService.prepareCompanyDeductionsForCalc(companyDeductions);
+    const deductionsForCalc = [...adjustedDeductions, ...companyDeductionEntries];
+
+    // ✅ CORRECTIF (câblage) : le calcul final ignorait toujours l'indemnité
+    // de congé — elle n'existait qu'en ligne d'affichage sur le bulletin,
+    // jamais dans grossSalary/netSalary/its/cnssSalarial réellement stockés.
+    // On la transmet maintenant au moteur, qui sait déjà l'intégrer (voir
+    // payroll-calculator.service.ts, leaveOptions).
+    const calc = this.calculator.calculate(
+      Number(employee.baseSalary),
+      eff10,
+      eff25,
+      eff50,
+      eff100,
+      calculatedBonuses,
+      deductionsForCalc,
+      settings,
+      daysToPay,
+      settings.workDaysPerMonth,
+      { ...employee, _payrollYear: year, _payrollMonth: monthNum }, // ✅ barème fiscal selon l'année du bulletin
+      company,
+      companyTaxes,
+      { leaveIndemnity, isPaidLeave },
+    );
+
+    warnings.forEach((w) => this.logger.warn(w));
+    const absenceDays = Math.max(0, settings.workDaysPerMonth - daysToPay);
+
+    const createdPayroll = await this.prisma.$transaction(
+      async (tx) => {
+        const payroll = await tx.payroll.create({
+          data: {
+            employeeId,
+            companyId: effectiveCompanyId,
+            month: monthNum,
+            year,
+            periodStart: new Date(year, monthNum - 1, 1),
+            periodEnd: new Date(year, monthNum, 0),
+            workDays: settings.workDaysPerMonth,
+            workedDays: daysToPay,
+            absenceDays,
+            daysOnLeave: (summary as any)?.daysOnLeave ?? 0,
+            daysRemote: (summary as any)?.daysRemote ?? 0,
+            daysHoliday: (summary as any)?.daysHoliday ?? 0,
+            overtimeHours10: eff10,
+            overtimeHours25: eff25,
+            overtimeHours50: eff50,
+            overtimeHours100: eff100,
+            baseSalary: Number(employee.baseSalary),
+            adjustedBaseSalary: calc.adjustedBaseSalary,
+            absenceDeduction: calc.absenceDeduction,
+            overtimeAmount10: calc.overtimeAmount10,
+            overtimeAmount25: calc.overtimeAmount25,
+            overtimeAmount50: calc.overtimeAmount50,
+            overtimeAmount100: calc.overtimeAmount100,
+            totalOvertimeAmount: calc.totalOvertimeAmount,
+            totalBonuses: calc.totalBonuses,
+            grossSalary: calc.grossSalary,
+            netSalary: calc.netSalary,
+            cnssSalarial: calc.cnssSalarial,
+            cnssEmployer: calc.cnssEmployer,
+            its: calc.its,
+            totalDeductions: calc.totalDeductions,
+            totalEmployerCost: calc.totalEmployerCost,
+            irppAbattement: calc.irppDetails?.abattement || 0,
+            irppFiscalParts: calc.irppDetails?.fiscalParts || 1,
+            irppEffectiveRate: calc.irppDetails?.effectiveRate || 0,
+            cnssEmployerPension: calc.cnssEmployerPension,
+            cnssEmployerFamily: calc.cnssEmployerFamily,
+            cnssEmployerAccident: calc.cnssEmployerAccident,
+            tusDgiAmount: calc.tusDgiAmount,
+            tusCnssAmount: calc.tusCnssAmount,
+            tusTotal: calc.tusTotal,
+            // ✅ Stocker les totaux taxes custom
+            employeeCustomTaxTotal: calc.employeeCustomTaxTotal,
+            employerCustomTaxTotal: calc.employerCustomTaxTotal,
+            status: 'DRAFT',
+            createdById: userId,
+          } as any,
+        });
+
+        await this.itemsService.create(
+          tx,
+          payroll.id,
+          employee,
+          calc,
+          {
+            ...summary,
+            overtime10Hours: eff10,
+            overtime25Hours: eff25,
+            overtime50Hours: eff50,
+            overtime100Hours: eff100,
+          },
+          loans,
+          advances,
+          settings,
+          calculatedBonuses,
+          // ✅ Cohérence avec le batch — congés pris en compte en paie unique aussi.
+          // Ne JAMAIS gater sur leaveDays>0 seul : le mois où l'indemnité
+          // ANNUAL est payée (mois précédent le départ) n'a souvent aucune
+          // absence physique (leaveDays=0) — sinon l'indemnité disparaît
+          // du bulletin précisément quand elle est due.
+          leaveDays > 0 || leaveIndemnity > 0
+            ? {
+                leaveIndemnity,
+                leaveIndemnityBase,
+                leaveIndemnitySeniority,
+                absenceDeduction: leaveAbsenceDeduction,
+                isPaidLeave,
+                leaveDays,
+                leaveLabel,
+                indemnifiedDays: leaveImpact?.indemnifiedDays,
+                indemnifiedSeniorityDays: leaveImpact?.indemnifiedSeniorityDays,
+              }
+            : undefined,
+          // ✅ Snapshot solde congés — figé sur ce bulletin, indépendant des mois suivants
+          leaveBalanceSnap
+            ? {
+                droits: Number(leaveBalanceSnap.annualEntitled),
+                pris: Number(leaveBalanceSnap.annualTaken),
+                solde: Number(leaveBalanceSnap.annualRemaining),
+              }
+            : undefined,
+          companyDeductionsToApply,
+        );
+
+        for (const loanUpdate of loansToUpdate) {
+          const loan = loans.find((l) => l.id === loanUpdate.id);
+          if (loan) {
+            const isPartial =
+              loanUpdate.deduction < Number(loan.monthlyRepayment);
+            await this.deductionsService.updateLoan(
+              tx,
+              loanUpdate.id,
+              loanUpdate.deduction,
+              Number(loan.remainingBalance),
+              monthNum,
+              year,
+              isPartial,
+            );
+          }
+        }
+
+        await this.deductionsService.markAdvancesAsDeducted(
+          tx,
+          advancesToDeduct,
+          monthNum,
+          year,
+        );
+
+        // Retenues diverses (pharmacie, cantine, casse matériel...) — même
+        // principe que prêts/avances : décrémente remainingBalance et
+        // journalise dans CompanyDeductionRepaymentLog (méthode PAYROLL).
+        for (const entry of companyDeductionsToApply) {
+          const deduction = companyDeductions.find((d: any) => d.id === entry.id);
+          if (deduction) {
+            await this.deductionsService.applyCompanyDeduction(
+              tx,
+              entry.id,
+              Number(deduction.remainingBalance),
+              deduction.monthlyDeduction != null ? Number(deduction.monthlyDeduction) : null,
+              monthNum,
+              year,
+            );
+          }
+        }
+        return payroll;
+      },
+      {
+        maxWait: 10000,
+        timeout: 30000,
+        isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted,
+      },
+    );
+
+    // ✅ Même règle que la génération batch (payroll-generator.service.ts) :
+    // on ne vide le cumul d'onboarding qu'APRÈS la création réussie du
+    // bulletin qui l'a réellement consommé — jamais avant.
+    if ((leaveImpact as any)?.shouldClearOpeningCumulative) {
+      await this.leavesService.clearOpeningCumulativeAfterUse(employeeId);
+    }
+
+    // 🆕 Mode ANNIVERSARY — même règle que payroll-generator.service.ts :
+    // on fige le montant réellement versé sur le Leave lui-même, il servira
+    // de substitut au brut du mois de départ pour la moyenne 12 mois du
+    // PROCHAIN cycle (voir leaves-indemnity.service.ts).
+    if ((leaveImpact as any)?.leaveId && leaveIndemnity > 0) {
+      await this.prisma.leave
+        .update({
+          where: { id: (leaveImpact as any).leaveId },
+          data: { paidIndemnityAmount: leaveIndemnity, payrollIndemnityDays: leaveImpact?.indemnifiedDays, payrollSeniorityDays: leaveImpact?.indemnifiedSeniorityDays },
+        })
+        .catch((err: any) =>
+          this.logger.warn(
+            `⚠️ paidIndemnityAmount non enregistré pour le congé ${(leaveImpact as any).leaveId}: ${err?.message ?? err}`,
+          ),
+        );
+
+      // ✅ CORRECTIF (bug cumuls confirmé) : même raisonnement que le batch
+      // — poser le YtdCheckpoint ici aussi, pas seulement depuis la paie
+      // manuelle, pour que `getYtdWindow` reset bien au retour de congé au
+      // lieu de retomber sur le 1er janvier par défaut.
+      await this.ytdCheckpointService
+        .reconcile(this.prisma, employeeId, monthNum, year, true)
+        .catch((err: any) =>
+          this.logger.warn(
+            `⚠️ YtdCheckpoint non posé pour ${employeeId}: ${err?.message ?? err}`,
+          ),
+        );
+    }
+
+    return createdPayroll;
+  }
+
+  async generateMonthlyPayrolls(
+    userId: string,
+    month: number,
+    year: number,
+    employeeIds?: string[],
+    customWorkDays?: number,
+    onProgress?: (detail: any) => void,
+    overrideCompanyId?: string,
+    // ✅ Jours travaillés ajustés à la main par employé { employeeId: jours },
+    // saisis avant le lancement de la paie en masse.
+    daysOverrides?: Record<string, number>,
+  ) {
+    return this.generator.generate(
+      userId,
+      month,
+      year,
+      employeeIds,
+      customWorkDays,
+      onProgress,
+      overrideCompanyId,
+      daysOverrides,
+    );
+  }
+
+  // ============================================================================
+  // FIND ALL — avec filtres companyId / month / year / limit
+  // ✅ Remplace l'ancienne méthode findAll
+  // ============================================================================
+  async findAll(
+    userId: string,
+    employeeId?: string,
+    filters?: {
+      companyId?: string;
+      month?: number;
+      year?: number;
+      limit?: number;
+      skip?: number;
+    },
+  ) {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: {
+        id: true,
+        companyId: true,
+        role: true,
+        employeeId: true,
+        email: true,
+        manageMultipleCompanies: true,
+      },
+    });
+    if (!user) return [];
+
+    // 🔒 CORRECTIF SÉCURITÉ (audit) : filters.companyId était accepté tel
+    // quel dès que canOverride était vrai — jamais vérifié contre
+    // userCompany/cabinetCompany, malgré le commentaire affirmant une
+    // vérification "en amont par PortfolioPayrollService". Rebranché sur
+    // la même fonction centrale que employees/leaves.
+    const effectiveCompanyId = await resolveVerifiedCompanyId(
+      this.prisma,
+      user,
+      filters?.companyId,
+    );
+
+    if (!effectiveCompanyId) return [];
+
+    const whereClause: any = { companyId: effectiveCompanyId };
+
+    if (user?.role === 'EMPLOYEE') {
+      whereClause.employeeId =
+        user.employeeId ??
+        (
+          await this.prisma.employee.findFirst({
+            where: { email: user.email, companyId: effectiveCompanyId },
+          })
+        )?.id;
+      if (!whereClause.employeeId) return [];
+      whereClause.status = 'PAID';
+    } else if (employeeId) {
+      whereClause.employeeId = employeeId;
+    }
+
+    if (filters?.month) whereClause.month = filters.month;
+    if (filters?.year) whereClause.year = filters.year;
+
+    // Taille de bloc bornée : défaut 200 (comportement historique), max 1000.
+    // `skip` permet au front de paginer (500 par 500) un mois de 500+ bulletins.
+    const take = Math.min(Math.max(Math.floor(filters?.limit ?? 200), 1), 1000);
+    const skip = Math.max(Math.floor(filters?.skip ?? 0), 0);
+
+    return this.prisma.payroll.findMany({
+      where: whereClause,
+      include: {
+        employee: {
+          select: {
+            firstName: true,
+            lastName: true,
+            employeeNumber: true,
+            position: true,
+            department: { select: { name: true } },
+          },
+        },
+      },
+      // `id` en dernier : ordre stable, indispensable pour paginer sans doublon
+      orderBy: [
+        { year: 'desc' },
+        { month: 'desc' },
+        { createdAt: 'desc' },
+        { id: 'asc' },
+      ],
+      take,
+      skip,
+    });
+  }
+
+  async findOne(id: string, userId: string, overrideCompanyId?: string) {
+    const payroll = await this.prisma.payroll.findUnique({
+      where: { id },
+      include: {
+        employee: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            email: true,
+            employeeNumber: true,
+            position: true,
+            baseSalary: true,
+            maritalStatus: true,
+            numberOfChildren: true,
+            cnssNumber: true,
+            nationalIdNumber: true,
+            paymentMethod: true,
+            contractType: true,
+            hireDate: true,
+            professionalCategory: true,
+            echelon: true,
+            isSubjectToCnss: true,
+            isSubjectToIrpp: true,
+            bankName: true,
+            bankAccountNumber: true,
+            ytdCarryOverBrut: true,
+            ytdCarryOverChargesSal: true,
+            ytdCarryOverChargesPat: true,
+            ytdCarryOverDate: true,
+            department: { select: { id: true, name: true, code: true } },
+          },
+        },
+        items: { orderBy: { order: 'asc' } },
+        company: true,
+      },
+    });
+    if (!payroll) throw new PayrollNotFoundException(id);
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: {
+        role: true,
+        employeeId: true,
+        companyId: true,
+        email: true,
+        manageMultipleCompanies: true,
+      },
+    });
+    if (!user) throw new ForbiddenException('Utilisateur non trouvé');
+    if (overrideCompanyId && overrideCompanyId !== payroll.companyId)
+      throw new ForbiddenException('Accès refusé');
+    await assertCompanyAccess(this.prisma, userId, payroll.companyId);
+    if (user.role === 'EMPLOYEE') {
+      const isOwner = user.employeeId === payroll.employeeId;
+      if (!isOwner) {
+        const emp = await this.prisma.employee.findFirst({
+          where: { email: user.email, companyId: user.companyId ?? undefined },
+        });
+        if (!emp || emp.id !== payroll.employeeId)
+          throw new ForbiddenException('Accès à vos bulletins uniquement');
+      }
+      if (payroll.status !== 'PAID')
+        throw new ForbiddenException('Bulletin non encore disponible');
+    }
+    // ── YTD : cumul annuel réel depuis le dernier checkpoint (ou Jan si aucun) ──
+    // ✅ Inclut TOUS les statuts (DRAFT inclus) — pas besoin de valider pour afficher
+    // ✅ getYtdWindow gère le carryOver historique ET le reset post-congé (YtdCheckpoint)
+    const { startYear, startMonth, carryOver } = await this.getYtdWindow(
+      payroll.employeeId,
+      payroll.year,
+      payroll.month,
+    );
+    const ytdAgg = await this.sumPayrollsInWindow(
+      payroll.employeeId,
+      startYear,
+      startMonth,
+      payroll.year,
+      payroll.month,
+    );
+
+    const carryOverBrut = carryOver.brut;
+    const carryOverNetImp = carryOver.netImp;
+    const carryOverNetSalary = carryOver.netSalary;
+    const carryOverChargesSal = carryOver.chargesSal;
+    const carryOverChargesPat = carryOver.chargesPat;
+    const applyCarryOver =
+      carryOverBrut !== 0 ||
+      carryOverNetImp !== 0 ||
+      carryOverNetSalary !== 0 ||
+      carryOverChargesSal !== 0 ||
+      carryOverChargesPat !== 0;
+
+    const ytdGross = Number(ytdAgg._sum.grossSalary ?? 0) + carryOverBrut;
+    // ✅ Net imposable = (brut bulletins - CNSS bulletins) + (carryOverNetImp)
+    // carryOverNetImp est saisi directement par l'admin — on ne le recalcule pas
+    const ytdNetImpos =
+      Number(ytdAgg._sum.grossSalary ?? 0) -
+      Number(ytdAgg._sum.cnssSalarial ?? 0) +
+      carryOverNetImp;
+
+    // ✅ Net à payer = somme nets bulletins + carryOverNetSalary
+    const ytdNetSalary =
+      Number(ytdAgg._sum.netSalary ?? 0) + carryOverNetSalary;
+    const ytdCnssSal =
+      Number(ytdAgg._sum.cnssSalarial ?? 0) + carryOverChargesSal;
+    const ytdTusCnss = Number(ytdAgg._sum.tusCnssAmount ?? 0);
+    const ytdCnssEmp =
+      Number(ytdAgg._sum.cnssEmployer ?? 0) + ytdTusCnss + carryOverChargesPat;
+    const ytdIts = Number(ytdAgg._sum.its ?? 0);
+
+    // ✅ CORRIGÉ — cumul annuel COMPLET des vraies charges (CNSS + ITS + TUS
+    // + toutes les taxes custom CTAX_*/TOL/CAMU/CTAX_EMP_*), à partir des
+    // briques exactes du calculateur (employeeCustomTaxTotal,
+    // employerCustomTaxTotal, tusTotal) — PAS de totalDeductions (inclut les
+    // dettes : prêts/avances/retenues diverses) ni de totalEmployerCost
+    // (qui est en réalité un COÛT = grossSalary + charges, pas les charges
+    // seules). Coexiste avec cnssSalarial/cnssEmployer ci-dessus (gardés
+    // pour rétrocompatibilité et pour le calcul de netImposable).
+    const ytdTotalChargesSal =
+      Number(ytdAgg._sum.cnssSalarial ?? 0) +
+      Number(ytdAgg._sum.its ?? 0) +
+      Number(ytdAgg._sum.employeeCustomTaxTotal ?? 0) +
+      carryOverChargesSal;
+    const ytdTotalChargesPat =
+      Number(ytdAgg._sum.cnssEmployer ?? 0) +
+      Number(ytdAgg._sum.tusTotal ?? 0) +
+      Number(ytdAgg._sum.employerCustomTaxTotal ?? 0) +
+      carryOverChargesPat;
+
+    // ── Base congé ────────────────────────────────────────────────────────
+    // ✅ CORRECTIF (demande explicite) : sur le bulletin du mois où l'indemnité
+    // de congé est PAYÉE, la base congé est exactement le montant de
+    // l'indemnité versée (lignes "Indemnité de congé" + "Congé supplémentaire"
+    // du bulletin) — plus le brut cumulé ÷ 12, qui n'a aucun rapport avec ce
+    // qui a réellement été payé. Les autres mois gardent le repère 1/12e du
+    // cumul (méthode Congo).
+    const indemnityPaidOnPayslip = (payroll.items ?? [])
+      .filter((i: any) => ['INDEM_CONGE', 'CONGE_SUPP'].includes(i.code))
+      .reduce((sum: number, i: any) => sum + Number(i.amount ?? 0), 0);
+    const paysLeaveIndemnity = indemnityPaidOnPayslip > 0;
+    const baseConge = paysLeaveIndemnity
+      ? Math.round(indemnityPaidOnPayslip)
+      : ytdGross > 0
+        ? Math.round(ytdGross / 12)
+        : 0;
+
+    // ── Droits congés — SNAPSHOT depuis les PayrollItems (immuable) ──────────
+    // ✅ On lit d'abord les items INFO LEAVE_* créés à la génération du bulletin.
+    // Ces items sont un snapshot figé au moment de la paie — ils ne changent jamais.
+    // Fallback : LeaveBalance live (bulletins générés avant ce fix, sans snapshot).
+    const leaveInfoItems = (payroll.items ?? []).filter((i: any) =>
+      ['LEAVE_DROITS', 'LEAVE_PRIS', 'LEAVE_SOLDE'].includes(i.code),
+    );
+    let droitsConge: number;
+    let priseConge: number;
+    let soldeConge: number;
+
+    if (leaveInfoItems.length > 0) {
+      // ✅ Snapshot présent → données figées au moment de la génération
+      droitsConge = Number(
+        leaveInfoItems.find((i: any) => i.code === 'LEAVE_DROITS')?.amount ?? 0,
+      );
+      priseConge = Number(
+        leaveInfoItems.find((i: any) => i.code === 'LEAVE_PRIS')?.amount ?? 0,
+      );
+      soldeConge = Number(
+        leaveInfoItems.find((i: any) => i.code === 'LEAVE_SOLDE')?.amount ?? 0,
+      );
+    } else {
+      // ✅ CORRECTIF (bug trouvé) : fallback pour bulletins anciens sans
+      // snapshot — lisait seulement le cycle le PLUS RÉCENT (findFirst
+      // orderBy desc), sous-évalué pour un employé avec plusieurs cycles
+      // non soldés (même correctif que Provision). Solde TOTAL réel désormais.
+      const leaveBalanceTotal = await this.leavesService
+        .getTotalLeaveBalanceSummary(payroll.employeeId)
+        .catch(() => null);
+      droitsConge = Number(leaveBalanceTotal?.annualEntitled ?? 0);
+      priseConge = Number(leaveBalanceTotal?.annualTaken ?? 0);
+      soldeConge = Number(leaveBalanceTotal?.annualRemaining ?? 0);
+    }
+
+    return {
+      ...payroll,
+      // ✅ Mois où l'indemnité de congé est payée : la case « Base Congé »
+      // (ligne Mensuel) affiche aussi le montant exact de l'indemnité versée.
+      ...(paysLeaveIndemnity ? { baseConge } : {}),
+      ytd: {
+        grossSalary: ytdGross,
+        netImposable: ytdNetImpos,
+        netSalaryAnnual: ytdNetSalary,
+        cnssSalarial: ytdCnssSal,
+        cnssEmployer: ytdCnssEmp,
+        its: ytdIts,
+        // ✅ NOUVEAU — cumuls complets pour les bulletins qui affichent
+        // "Charges salariales"/"Charges patronales" comme un TOTAL (CNSS +
+        // ITS + TUS + taxes custom), cohérents avec le mensuel.
+        totalChargesSalariales: ytdTotalChargesSal,
+        totalChargesPatronales: ytdTotalChargesPat,
+        workedDays: Number(ytdAgg._sum.workedDays ?? 0),
+        totalOvertimeAmount: Number(ytdAgg._sum.totalOvertimeAmount ?? 0),
+        baseSalary: Number(ytdAgg._sum.baseSalary ?? 0),
+        netSalary: Number(ytdAgg._sum.netSalary ?? 0),
+        // ✅ Base congé calculée automatiquement
+        baseConge,
+        // ✅ Droits congés — snapshot figé au moment de la génération
+        droitsConge,
+        priseConge,
+        soldeConge,
+        // ✅ Info carryOver pour le front
+        hasCarryOver: applyCarryOver,
+        carryOverDate: new Date(
+          `${startYear}-${String(startMonth).padStart(2, '0')}-01`,
+        ).toISOString(),
+      },
+    };
+  }
+
+  private async assertScheduledLeaveIncluded(payroll: {
+    id: string; employeeId: string; month: number; year: number; grossSalary: unknown;
+  }) {
+    const gains = await this.prisma.payrollItem.findMany({
+      where: { payrollId: payroll.id, type: 'GAIN' },
+      select: { code: true, label: true, amount: true },
+    });
+    const includesLeave = gains.some(item => Number(item.amount) > 0 && (
+      ['INDEM_CONGE', 'CONGE_SUPP'].includes(item.code ?? '') || /cong[eé]/i.test(item.label ?? '')
+    ));
+    if (includesLeave) return;
+    const impact = await this.leavesService.getLeaveImpactForPayroll(
+      payroll.employeeId, payroll.month, payroll.year, Number(payroll.grossSalary),
+    );
+    if (impact?.leaveId && impact.leaveIndemnity > 0) {
+      throw new BadRequestException(
+        `Une indemnité de congé est prévue pour ${payroll.month}/${payroll.year} mais manque sur ce bulletin. Recalculez le brouillon avant de le valider ou de le payer.`,
+      );
+    }
+  }
+
+  async update(
+    id: string,
+    updatePayrollDto: UpdatePayrollDto,
+    userId?: string,
+    overrideCompanyId?: string,
+  ) {
+    const payroll = await this.prisma.payroll.findUnique({ where: { id } });
+    if (!payroll) throw new PayrollNotFoundException(id);
+    if (payroll.status === 'PAID') throw new PayrollAlreadyPaidException();
+    const updateKeys = Object.keys(updatePayrollDto);
+    if (payroll.status === 'TO_PAY' && updateKeys.some(key => key !== 'notes' && !(key === 'status' && updatePayrollDto.status === 'CANCELLED')))
+      throw new ForbiddenException('Bulletin à payer verrouillé : annulez la demande avant toute correction.');
+    if (updatePayrollDto.status === 'TO_PAY' && payroll.status !== 'VALIDATED')
+      throw new ForbiddenException('Seul un bulletin validé peut passer au statut À payer.');
+    if (updatePayrollDto.status === 'PAID' && await this.prisma.comptaConnector.findFirst({where:{companyId:payroll.companyId,enabled:true},select:{id:true}}))
+      throw new ForbiddenException('Le paiement de cette entreprise doit être enregistré dans Compta.');
+    if (userId) {
+      const user = await this.prisma.user.findUnique({
+        where: { id: userId },
+        select: { role: true, companyId: true, manageMultipleCompanies: true },
+      });
+      if (user?.role === 'EMPLOYEE')
+        throw new ForbiddenException('Modification réservée aux admins/RH');
+      // 🆕 Admin multi-entreprises : autorisé si le companyId fourni par
+      // l'appelant (déjà vérifié en amont par PortfolioPayrollService)
+      // correspond bien à l'entreprise du bulletin.
+      if (overrideCompanyId && overrideCompanyId !== payroll.companyId)
+        throw new ForbiddenException('Accès refusé');
+      await assertCompanyAccess(this.prisma, userId, payroll.companyId, { write: true });
+    }
+
+    const exported=await this.prisma.comptaDelivery.findFirst({where:{payrollId:id},select:{id:true}});
+    if(exported){
+      const keys=Object.keys(updatePayrollDto).filter(key=>key!=='notes');
+      if(keys.length && !(keys.length===1 && keys[0]==='status' && updatePayrollDto.status==='CANCELLED'))throw new ForbiddenException('Bulletin transmis à Compta : paiement dans Compta, correction par annulation puis nouvelle écriture.');
+    }
+    // ✅ Si manualBonuses ou manualDeductions présents → recalcul complet via recalculatePayroll()
+    // Ces champs ne vont pas en DB directement — ils servent à recalculer tout le bulletin.
+    const hasRecalc =
+      (updatePayrollDto as any).manualBonuses != null ||
+      (updatePayrollDto as any).manualDeductions != null;
+
+    if (hasRecalc) {
+      const overrides = {
+        baseSalary: (updatePayrollDto as any).baseSalary,
+        workedDays: (updatePayrollDto as any).workedDays,
+        overtimeHours10: (updatePayrollDto as any).overtimeHours10,
+        overtimeHours25: (updatePayrollDto as any).overtimeHours25,
+        overtimeHours50: (updatePayrollDto as any).overtimeHours50,
+        overtimeHours100: (updatePayrollDto as any).overtimeHours100,
+        manualBonuses: (updatePayrollDto as any).manualBonuses ?? [],
+        manualDeductions: (updatePayrollDto as any).manualDeductions ?? [],
+        congesDroits: (updatePayrollDto as any).congesDroits,
+        congesPris: (updatePayrollDto as any).congesPris,
+        congesSolde: (updatePayrollDto as any).congesSolde,
+        joursCongesPris: (updatePayrollDto as any).joursCongesPris,
+        cumulBrutOverride: (updatePayrollDto as any).cumulBrutOverride,
+      };
+      return this.recalculatePayroll(id, userId!, overrides);
+    }
+
+    // Un brouillon créé avant la planification doit être recalculé : relancer
+    // la génération en masse ignore les bulletins qui existent déjà.
+    if (updatePayrollDto.status && updatePayrollDto.status !== payroll.status &&
+        ['VALIDATED', 'TO_PAY', 'PAID'].includes(updatePayrollDto.status)) {
+      await this.assertScheduledLeaveIncluded(payroll);
+    }
+
+    // 🛡️ Barrière d'audit : contrôle avant de passer un bulletin en VALIDATED.
+    // Mode `observe` (défaut) : on enregistre les écarts mais on laisse valider.
+    // Mode `enforce` : 422 AUDIT_BLOCKED si un écart bloquant reste ouvert.
+    if ((updatePayrollDto as any).status === 'VALIDATED' && payroll.status !== 'VALIDATED') {
+      const actorUser = userId
+        ? await this.prisma.user.findUnique({
+            where: { id: userId },
+            select: { role: true, firstName: true, lastName: true },
+          })
+        : null;
+      await this.auditGate.assertCanValidate({
+        companyId: payroll.companyId,
+        payrollIds: [id],
+        actor: userId
+          ? {
+              id: userId,
+              role: actorUser?.role ?? null,
+              label: actorUser ? `${actorUser.firstName} ${actorUser.lastName}` : null,
+            }
+          : null,
+      });
+    }
+
+    // Sinon → mise à jour simple des champs workflow (status, notes, paymentReference…)
+    const {
+      manualBonuses,
+      manualDeductions,
+      month,
+      year,
+      congesDroits,
+      congesPris,
+      congesSolde,
+      joursCongesPris,
+      ...dbFields
+    } = updatePayrollDto as any;
+    return this.prisma.payroll.update({
+      where: { id },
+      data: { ...dbFields, updatedAt: new Date() },
+    });
+  }
+
+  async remove(id: string, userId: string) {
+    const payroll = await this.prisma.payroll.findUnique({ where: { id } });
+    if (!payroll) throw new PayrollNotFoundException(id);
+    // 🔒 CORRECTIF SÉCURITÉ (audit) : remove(id) ne recevait aucun
+    // utilisateur — tout ADMIN/RH pouvait supprimer un bulletin non payé
+    // d'une autre entreprise. Le rôle reste vérifié par @Roles côté route.
+    await assertCompanyAccess(this.prisma, userId, payroll.companyId);
+    if (await this.prisma.comptaDelivery.findFirst({where:{payrollId:id},select:{id:true}})) throw new ForbiddenException('Bulletin transmis à Compta : conservez l’historique et utilisez une annulation.');
+    if (payroll.status === 'PAID') throw new PayrollAlreadyPaidException();
+    if (payroll.status === 'TO_PAY') throw new ForbiddenException('Bulletin à payer verrouillé : annulez la demande avant toute correction.');
+
+    // ♻️ Supprimer un bulletin ANNULE ses déductions : prêts, avances et
+    // retenues diverses prélevés sur ce bulletin sont remis (solde + statut)
+    // dans la même transaction que la suppression. Sans ça, la régénération
+    // prélevait la mensualité suivante au lieu de celle du mois supprimé.
+    const restored = await this.prisma.$transaction(
+      async (tx) => {
+        const r = await this.deductionsService.restoreDebtsForDeletedPayroll(
+          tx,
+          payroll.employeeId,
+          payroll.month,
+          payroll.year,
+        );
+        await tx.payroll.delete({ where: { id } });
+        return r;
+      },
+      { timeout: 30000 },
+    );
+    return {
+      success: true,
+      message: 'Bulletin supprimé avec succès',
+      restoredDebts: restored,
+    };
+  }
+
+  // ============================================================================
+  // RECALCULATE
+  // ============================================================================
+  async recalculatePayroll(id: string, userId: string, overrides?: any) {
+    const payroll = await this.prisma.payroll.findUnique({
+      where: { id },
+      include: { employee: true },
+    });
+    if (!payroll) throw new PayrollNotFoundException(id);
+    if (payroll.status === 'PAID') throw new PayrollAlreadyPaidException();
+    if (payroll.status === 'TO_PAY') throw new ForbiddenException('Bulletin à payer verrouillé : annulez la demande avant tout recalcul.');
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { role: true, companyId: true },
+    });
+    if (user?.role === 'EMPLOYEE')
+      throw new ForbiddenException('Recalcul réservé aux admins/RH');
+    if (user?.companyId !== payroll.companyId)
+      throw new ForbiddenException('Accès refusé');
+
+    if (await this.prisma.comptaDelivery.findFirst({where:{payrollId:id},select:{id:true}})) throw new ForbiddenException('Bulletin transmis à Compta : conservez l’historique et utilisez une annulation.');
+    const [employee, company, settings, companyTaxes] = await Promise.all([
+      this.prisma.employee.findUnique({
+        where: { id: payroll.employeeId },
+        select: {
+          id: true,
+          firstName: true,
+          lastName: true,
+          baseSalary: true,
+          maritalStatus: true,
+          numberOfChildren: true,
+          isSubjectToIrpp: true,
+          isSubjectToCnss: true,
+          isSubjectToTus: true,
+          taxExemptionReason: true,
+          tolZone: true,
+          contractType: true,
+          isResident: true,
+          hireDate: true,
+        },
+      }), // 🆕 hireDate
+      this.prisma.company.findUnique({
+        where: { id: payroll.companyId },
+        select: {
+          appliesCnssEmployer: true,
+          cnssEmployerRate: true,
+          isSubjectToTus: true,
+          seniorityMode: true,
+        },
+      }), // 🆕 seniorityMode
+      this.payrollSettingsService.getSettingsByCompanyId(payroll.companyId),
+      this.companyTaxService.findActive(payroll.companyId, {
+        month: payroll.month,
+        year: payroll.year,
+      }), // ✅ taxes du mois
+    ]);
+
+    if (!employee) throw new EmployeeNotFoundException(payroll.employeeId);
+
+    const effectiveBaseSalary =
+      overrides?.baseSalary ?? Number(payroll.baseSalary);
+    const effectiveDays = overrides?.workedDays ?? Number(payroll.workedDays);
+    const eff10 =
+      overrides?.overtimeHours10 ??
+      Number((payroll as any).overtimeHours10 || 0);
+    const eff25 =
+      overrides?.overtimeHours25 ??
+      Number((payroll as any).overtimeHours25 || 0);
+    const eff50 =
+      overrides?.overtimeHours50 ??
+      Number((payroll as any).overtimeHours50 || 0);
+    const eff100 =
+      overrides?.overtimeHours100 ??
+      Number((payroll as any).overtimeHours100 || 0);
+
+    let calculatedBonuses: any[];
+    if (overrides?.manualBonuses && overrides.manualBonuses.length > 0) {
+      // ✅ Primes depuis la page modifier — base et rate transmis pour affichage bulletin
+      calculatedBonuses = overrides.manualBonuses.map((b: any, i: number) => ({
+        id: `manual-recalc-${i}`,
+        bonusType: b.bonusType,
+        amount: Number(b.amount),
+        base: b.base != null ? Number(b.base) : null,
+        rate: b.rate != null ? Number(b.rate) : null,
+        isTaxable: b.isTaxable ?? true,
+        isCnss: b.isCnss ?? true,
+        fiscalType:
+          b.fiscalType ?? (b.isTaxable ? 'TAXABLE_CNSS' : 'NON_TAXABLE'),
+        source: 'MANUAL',
+        isRecurring: true,
+      }));
+    } else {
+      const seniorityModeR = (company as any).seniorityMode ?? 'AUTO';
+      calculatedBonuses = await this.bonusesService.calculateEmployeeBonuses(
+        payroll.employeeId,
+        effectiveBaseSalary,
+        payroll.month,
+        payroll.year,
+        payroll.companyId,
+        effectiveDays,
+        settings.workDaysPerMonth,
+        (employee as any).hireDate ?? null,
+        seniorityModeR,
+      );
+    }
+
+    // ✅ Retenues libres depuis la page modifier
+    const manualDeductionTotal = (overrides?.manualDeductions ?? []).reduce(
+      (s: number, d: any) => s + (Number(d.amount) || 0),
+      0,
+    );
+
+    // ✅ FIX : "modifier ≠ rembourser" — même principe que pour les
+    // retenues diverses (getAppliedCompanyDeductionsForEmployee). On ne
+    // relit plus les prêts/avances "actifs/approuvés" (getActiveLoans /
+    // getApprovedAdvances), qui reflètent l'état ACTUEL et non celui du
+    // mois édité :
+    //  - un prêt soldé entre-temps n'est plus ACTIVE → sa ligne
+    //    disparaîtrait entièrement du bulletin réédité
+    //  - une avance, dès sa première déduction, passe à DEDUCTED (jamais
+    //    plus APPROVED) → sa ligne disparaîtrait à CHAQUE réédition
+    //  - même quand l'entité existe encore, son solde a pu bouger
+    //    (paies suivantes, remboursement cash), donc handleDeductions()
+    //    recalculerait un nouveau montant au lieu de rejouer celui déjà
+    //    prélevé ce mois-là
+    // On relit donc directement LoanRepaymentLog / AdvanceRepaymentLog
+    // (méthode PAYROLL) pour CE mois précis, sans jamais rappeler
+    // smicProtection.handleDeductions() (logique de génération, pas
+    // d'édition) ni ré-décrémenter quoi que ce soit.
+    const [loanDeductionsApplied, advanceDeductionsApplied, companyDeductionsToApply] =
+      await Promise.all([
+        this.deductionsService.getAppliedLoanDeductionsForEmployee(
+          payroll.employeeId,
+          payroll.month,
+          payroll.year,
+        ),
+        this.deductionsService.getAppliedAdvanceDeductionsForEmployee(
+          payroll.employeeId,
+          payroll.month,
+          payroll.year,
+        ),
+        this.deductionsService.getAppliedCompanyDeductionsForEmployee(
+          payroll.employeeId,
+          payroll.month,
+          payroll.year,
+        ),
+      ]);
+
+    // Objets minimalistes pour itemsService.create — seul `_deduction`
+    // compte pour l'affichage de la ligne (voir payroll-items.service.ts,
+    // sections "Prêts"/"Avances" : `loan._deduction ?? loan.monthlyRepayment`
+    // / `adv._deduction ?? adv.amount`).
+    const loans = loanDeductionsApplied.map((e) => ({
+      id: e.id,
+      _deduction: e.amount,
+      monthlyRepayment: e.amount,
+    }));
+    const advances = advanceDeductionsApplied.map((e) => ({
+      id: e.id,
+      _deduction: e.amount,
+      amount: e.amount,
+    }));
+
+    const adjustedDeductions = [
+      ...loanDeductionsApplied.map((e) => ({
+        amount: e.amount,
+        label: 'Remboursement prêt',
+        type: 'LOAN',
+      })),
+      ...advanceDeductionsApplied.map((e) => ({
+        amount: e.amount,
+        label: 'Récupération avance',
+        type: 'ADVANCE',
+      })),
+    ];
+    const companyDeductionEntries = companyDeductionsToApply.map((e) => ({
+      amount: e.amount,
+      label: e.label,
+      type: 'COMPANY_DEDUCTION',
+    }));
+    const deductionsForCalc = [...adjustedDeductions, ...companyDeductionEntries];
+    const workCalc = this.calculator.calculate(
+      effectiveBaseSalary, eff10, eff25, eff50, eff100,
+      calculatedBonuses, deductionsForCalc, settings, effectiveDays,
+      settings.workDaysPerMonth, { ...employee, _payrollYear: payroll.year, _payrollMonth: payroll.month },
+      company, companyTaxes,
+    );
+    // Explicit manual leave bonuses already carry the indemnity in gross pay.
+    const hasManualLeaveBonus = calculatedBonuses.some((b: any) =>
+      /cong[eé]/i.test(b.bonusType ?? ''),
+    );
+    const leaveImpact = hasManualLeaveBonus ? null :
+      await this.leavesService.getLeaveImpactForPayroll(
+        payroll.employeeId, payroll.month, payroll.year, workCalc.grossSalary,
+      );
+    const calc = this.calculator.calculate(
+      effectiveBaseSalary,
+      eff10,
+      eff25,
+      eff50,
+      eff100,
+      calculatedBonuses,
+      deductionsForCalc,
+      settings,
+      effectiveDays,
+      settings.workDaysPerMonth,
+      { ...employee, _payrollYear: payroll.year, _payrollMonth: payroll.month }, // ✅ barème fiscal selon l'année du bulletin
+      company,
+      companyTaxes,
+      { leaveIndemnity: leaveImpact?.leaveIndemnity ?? 0, isPaidLeave: leaveImpact?.isPaid ?? false },
+    );
+
+    return this.prisma.$transaction(
+      async (tx) => {
+        // ✅ Mettre à jour le bulletin avec les nouvelles valeurs calculées
+        const updated = await tx.payroll.update({
+          where: { id },
+          data: {
+            baseSalary: effectiveBaseSalary,
+            workedDays: effectiveDays,
+            absenceDays: Math.max(0, settings.workDaysPerMonth - effectiveDays),
+            overtimeHours10: eff10,
+            overtimeHours25: eff25,
+            overtimeHours50: eff50,
+            overtimeHours100: eff100,
+            adjustedBaseSalary: calc.adjustedBaseSalary,
+            absenceDeduction: calc.absenceDeduction,
+            overtimeAmount10: calc.overtimeAmount10,
+            overtimeAmount25: calc.overtimeAmount25,
+            overtimeAmount50: calc.overtimeAmount50,
+            overtimeAmount100: calc.overtimeAmount100,
+            totalOvertimeAmount: calc.totalOvertimeAmount,
+            totalBonuses: calc.totalBonuses,
+            grossSalary: calc.grossSalary,
+            netSalary: calc.netSalary - manualDeductionTotal,
+            cnssSalarial: calc.cnssSalarial,
+            cnssEmployer: calc.cnssEmployer,
+            its: calc.its,
+            totalDeductions: calc.totalDeductions + manualDeductionTotal,
+            totalEmployerCost: calc.totalEmployerCost,
+            irppAbattement: calc.irppDetails?.abattement || 0,
+            irppFiscalParts: calc.irppDetails?.fiscalParts || 1,
+            irppEffectiveRate: calc.irppDetails?.effectiveRate || 0,
+            cnssEmployerPension: calc.cnssEmployerPension,
+            cnssEmployerFamily: calc.cnssEmployerFamily,
+            cnssEmployerAccident: calc.cnssEmployerAccident,
+            tusDgiAmount: calc.tusDgiAmount,
+            tusCnssAmount: calc.tusCnssAmount,
+            tusTotal: calc.tusTotal,
+            employeeCustomTaxTotal: calc.employeeCustomTaxTotal,
+            employerCustomTaxTotal: calc.employerCustomTaxTotal,
+            updatedAt: new Date(),
+          } as any,
+        });
+
+        // ✅ Regénérer les items — supprimer les anciens et recréer
+        await tx.payrollItem.deleteMany({ where: { payrollId: id } });
+
+        const fakeSummary = {
+          daysToPay: effectiveDays,
+          overtime10Hours: eff10,
+          overtime25Hours: eff25,
+          overtime50Hours: eff50,
+          overtime100Hours: eff100,
+          daysOnLeave: 0,
+          daysRemote: 0,
+          daysHoliday: 0,
+        };
+
+        const lbSnap = await tx.leaveBalance
+          .findFirst({
+            where: { employeeId: payroll.employeeId },
+            orderBy: { cycleStartDate: 'desc' },
+          })
+          .catch(() => null);
+        const leaveSnapshot = {
+          droits:
+            overrides?.congesDroits ?? Number(lbSnap?.annualEntitled ?? 0),
+          pris: overrides?.congesPris ?? Number(lbSnap?.annualTaken ?? 0),
+          solde: overrides?.congesSolde ?? Number(lbSnap?.annualRemaining ?? 0),
+        };
+
+        const employeeForItems = {
+          ...employee,
+          baseSalary: effectiveBaseSalary,
+        };
+        await this.itemsService.create(
+          tx,
+          id,
+          employeeForItems,
+          calc,
+          fakeSummary,
+          loans,
+          advances,
+          settings,
+          calculatedBonuses,
+          leaveImpact ? {
+            leaveIndemnity: leaveImpact.leaveIndemnity,
+            leaveIndemnityBase: leaveImpact.leaveIndemnityBase,
+            leaveIndemnitySeniority: leaveImpact.leaveIndemnitySeniority,
+            absenceDeduction: leaveImpact.absenceDeduction,
+            isPaidLeave: leaveImpact.isPaid,
+            leaveDays: leaveImpact.leaveDays,
+            leaveLabel: 'Indemnité de congé',
+            indemnifiedDays: leaveImpact.indemnifiedDays,
+            indemnifiedSeniorityDays: leaveImpact.indemnifiedSeniorityDays,
+          } : undefined,
+          leaveSnapshot,
+          companyDeductionsToApply,
+        );
+
+        // ✅ Retenues libres → items DEDUCTION
+        if (overrides?.manualDeductions?.length > 0) {
+          for (const ded of overrides.manualDeductions.filter(
+            (d: any) => Number(d.amount) > 0,
+          )) {
+            await tx.payrollItem.create({
+              data: {
+                payrollId: id,
+                code: 'MANUAL_DEDUCTION',
+                label: ded.label || 'Retenue',
+                type: 'DEDUCTION',
+                amount: Number(ded.amount),
+                base: null,
+                rate: null,
+                isTaxable: false,
+                isCnss: false,
+                order: 900,
+              } as any,
+            });
+          }
+        }
+
+        // ✅ Congés — mettre à jour LeaveBalance si saisi
+        if (overrides?.congesDroits != null || overrides?.congesPris != null) {
+          const droits = overrides?.congesDroits ?? 0;
+          const pris = overrides?.congesPris ?? 0;
+          const solde = overrides?.congesSolde ?? droits - pris;
+
+          // ✅ Résoudre le cycle en cours de l'employé (dans la même transaction)
+          // plutôt que l'année calendaire du bulletin — c'est le cycle qui fait foi.
+          // 🆕 CORRECTIF : lit désormais company.leaveCycleMode (au lieu d'un
+          // calcul ROLLING codé en dur qui ignorait le mode ANNIVERSARY —
+          // même bug que celui déjà corrigé dans manual-payroll.service.ts).
+          const empForCycle = await tx.employee.findUnique({
+            where: { id: payroll.employeeId },
+            select: {
+              hireDate: true,
+              leaveCycleStartDate: true,
+              company: { select: { leaveCycleMode: true } },
+            },
+          });
+          const { cycleStartDate, cycleEndDate } = resolveCycleWindow(
+            new Date(empForCycle!.hireDate),
+            empForCycle!.leaveCycleStartDate
+              ? new Date(empForCycle!.leaveCycleStartDate)
+              : null,
+            undefined,
+            ((empForCycle as any)?.company?.leaveCycleMode as
+              | 'ROLLING'
+              | 'ANNIVERSARY') ?? 'ROLLING',
+          );
+          const cyclesCount = await tx.leaveBalance.count({
+            where: { employeeId: payroll.employeeId },
+          });
+
+          await tx.leaveBalance.upsert({
+            where: {
+              employeeId_cycleStartDate: {
+                employeeId: payroll.employeeId,
+                cycleStartDate,
+              },
+            },
+            create: {
+              employeeId: payroll.employeeId,
+              year: cycleStartDate.getFullYear(),
+              cycleNumber: cyclesCount + 1,
+              cycleStartDate,
+              cycleEndDate,
+              annualEntitled: droits,
+              annualTaken: pris,
+              annualRemaining: solde,
+            },
+            update: {
+              annualEntitled: droits,
+              annualTaken: pris,
+              annualRemaining: solde,
+              lastCalculated: new Date(),
+            },
+          });
+        }
+
+        // ✅ Réconcilie le YtdCheckpoint — pose-le si le bulletin (après
+        // édition) contient une prime congé, le retire s'il en existait un
+        // orphelin d'une version précédente qui n'a plus de congé.
+        // ✅ CORRECTIF (même bug que manual-payroll.service.ts) : flag
+        // explicite `overrides.isLeaveDeparture` plutôt que deviner depuis
+        // le texte d'une prime — repli sur l'ancienne détection tant que
+        // l'appelant ne fournit pas encore ce champ.
+        const hasCongesPaies = (leaveImpact?.leaveIndemnity ?? 0) > 0 || (
+          overrides?.isLeaveDeparture ??
+          calculatedBonuses.some((b: any) =>
+            /cong[eé]/i.test(b.bonusType ?? ''),
+          )
+        );
+        if (leaveImpact?.leaveId && leaveImpact.leaveIndemnity > 0) {
+          await tx.leave.update({ where: { id: leaveImpact.leaveId }, data: { paidIndemnityAmount: leaveImpact.leaveIndemnity, payrollIndemnityDays: leaveImpact.indemnifiedDays, payrollSeniorityDays: leaveImpact.indemnifiedSeniorityDays } });
+          if (leaveImpact.shouldClearOpeningCumulative) {
+            await tx.employee.update({ where: { id: payroll.employeeId }, data: { openingCumulativeGross: null, openingCumulativeMonths: null } });
+          }
+        }
+        await this.ytdCheckpointService.reconcile(
+          tx,
+          payroll.employeeId,
+          payroll.month,
+          payroll.year,
+          hasCongesPaies,
+        );
+
+        // ✅ Correction manuelle du cumul brut (page "Modifier") — pose un
+        // checkpoint daté du MOIS MÊME du bulletin (pas M+1, contrairement au
+        // reset post-congé) : le cumul de CE bulletin devient exactement
+        // cumulBrutOverride, sans toucher aux bulletins précédents. Net
+        // imposable / charges sal / charges pat de la part "carry" sont
+        // dérivés proportionnellement aux taux de CE bulletin recalculé —
+        // seul le brut est saisi à la main.
+        if (overrides?.cumulBrutOverride != null) {
+          const ownGross = Number(calc.grossSalary);
+          const brutCarry = Number(overrides.cumulBrutOverride) - ownGross;
+          const ratioCnssSal =
+            ownGross > 0 ? Number(calc.cnssSalarial) / ownGross : 0;
+          const ratioChargesPat =
+            ownGross > 0
+              ? (Number(calc.cnssEmployer) +
+                  Number(calc.tusCnssAmount ?? 0) +
+                  Number(calc.tusDgiAmount ?? 0)) /
+                ownGross
+              : 0;
+          const netImpCarry = brutCarry - brutCarry * ratioCnssSal;
+          const chargesSalCarry = brutCarry * ratioCnssSal;
+          const chargesPatCarry = brutCarry * ratioChargesPat;
+
+          const ownEffectiveDate = new Date(
+            payroll.year,
+            payroll.month - 1,
+            1,
+          );
+          await tx.ytdCheckpoint.deleteMany({
+            where: {
+              employeeId: payroll.employeeId,
+              effectiveDate: ownEffectiveDate,
+            },
+          });
+          await tx.ytdCheckpoint.create({
+            data: {
+              employeeId: payroll.employeeId,
+              effectiveDate: ownEffectiveDate,
+              brut: brutCarry,
+              netImp: netImpCarry,
+              // ⚠️ Approximation — netSalary carry non affiné, reprend netImpCarry.
+              // Ajuste ici si tu veux un net à payer cumulé précis.
+              netSalary: netImpCarry,
+              chargesSal: chargesSalCarry,
+              chargesPat: chargesPatCarry,
+            },
+          });
+          this.logger.log(
+            `✅ Cumul brut corrigé manuellement → ${overrides.cumulBrutOverride} F ` +
+              `(carry: ${brutCarry} F) pour bulletin ${payroll.month}/${payroll.year} (${payroll.employeeId})`,
+          );
+        }
+
+        // ✅ Cumul annuel frais — recalculé APRÈS la réconciliation ci-dessus,
+        // pour que la page "Modifier" affiche immédiatement le bon cumul
+        // plutôt qu'une valeur figée depuis le chargement initial.
+        // ⚠️ On repasse par `tx` (pas this.prisma / getYtdWindow) pour voir
+        // les valeurs du bulletin qu'on vient tout juste de mettre à jour
+        // ci-dessus, encore non commitées hors de cette transaction.
+        const checkpointTx = await tx.ytdCheckpoint.findFirst({
+          where: {
+            employeeId: payroll.employeeId,
+            effectiveDate: {
+              lte: new Date(payroll.year, payroll.month - 1, 1),
+            },
+          },
+          orderBy: { effectiveDate: 'desc' },
+        });
+        const empCarry = checkpointTx
+          ? null
+          : await tx.employee.findUnique({
+              where: { id: payroll.employeeId },
+              select: {
+                ytdCarryOverBrut: true,
+                ytdCarryOverNetImp: true,
+                ytdCarryOverChargesSal: true,
+                ytdCarryOverChargesPat: true,
+                ytdCarryOverDate: true,
+              },
+            });
+        const startYear = checkpointTx
+          ? checkpointTx.effectiveDate.getFullYear()
+          : payroll.year;
+        const startMonth = checkpointTx
+          ? checkpointTx.effectiveDate.getMonth() + 1
+          : 1;
+        const carryOverApplies =
+          !checkpointTx &&
+          empCarry?.ytdCarryOverDate &&
+          new Date(empCarry.ytdCarryOverDate).getFullYear() <= payroll.year;
+        const carryOver = checkpointTx
+          ? {
+              brut: Number(checkpointTx.brut),
+              netImp: Number(checkpointTx.netImp),
+              chargesSal: Number(checkpointTx.chargesSal),
+              chargesPat: Number(checkpointTx.chargesPat),
+            }
+          : carryOverApplies
+            ? {
+                brut: Number(empCarry?.ytdCarryOverBrut ?? 0),
+                netImp: Number(empCarry?.ytdCarryOverNetImp ?? 0),
+                chargesSal: Number(empCarry?.ytdCarryOverChargesSal ?? 0),
+                chargesPat: Number(empCarry?.ytdCarryOverChargesPat ?? 0),
+              }
+            : { brut: 0, netImp: 0, chargesSal: 0, chargesPat: 0 };
+
+        const ytdWhere: Prisma.PayrollWhereInput =
+          startYear === payroll.year
+            ? {
+                employeeId: payroll.employeeId,
+                status: { notIn: ['CANCELLED'] },
+                year: payroll.year,
+                month: { gte: startMonth, lte: payroll.month },
+              }
+            : {
+                employeeId: payroll.employeeId,
+                status: { notIn: ['CANCELLED'] },
+                OR: [
+                  { year: startYear, month: { gte: startMonth } },
+                  { year: { gt: startYear, lt: payroll.year } },
+                  { year: payroll.year, month: { lte: payroll.month } },
+                ],
+              };
+        const ytdAgg = await tx.payroll.aggregate({
+          where: ytdWhere,
+          _sum: {
+            grossSalary: true,
+            cnssSalarial: true,
+            cnssEmployer: true,
+            its: true,
+            tusCnssAmount: true,
+            // ⚠️ CORRECTIF — mêmes champs corrigés qu'à la lecture
+            // principale (voir sumPayrollsInWindow()) : on ne somme plus
+            // totalDeductions (inclut les dettes) ni totalEmployerCost
+            // (c'est un COÛT = brut + charges, pas la charge seule).
+            employeeCustomTaxTotal: true,
+            employerCustomTaxTotal: true,
+            tusTotal: true,
+          },
+        });
+        const ytdGross = Number(ytdAgg._sum?.grossSalary ?? 0) + carryOver.brut;
+        const ytdNetImpos =
+          Number(ytdAgg._sum?.grossSalary ?? 0) -
+          Number(ytdAgg._sum?.cnssSalarial ?? 0) +
+          carryOver.netImp;
+        const ytdChargesSal =
+          Number(ytdAgg._sum?.cnssSalarial ?? 0) + carryOver.chargesSal;
+        const ytdChargesPat =
+          Number(ytdAgg._sum?.cnssEmployer ?? 0) +
+          Number(ytdAgg._sum?.tusCnssAmount ?? 0) +
+          carryOver.chargesPat;
+        // ✅ CORRIGÉ — cumul complet des vraies charges (voir explication
+        // détaillée au point de lecture principal, plus haut).
+        const ytdTotalChargesSal =
+          Number(ytdAgg._sum?.cnssSalarial ?? 0) +
+          Number(ytdAgg._sum?.its ?? 0) +
+          Number(ytdAgg._sum?.employeeCustomTaxTotal ?? 0) +
+          carryOver.chargesSal;
+        const ytdTotalChargesPat =
+          Number(ytdAgg._sum?.cnssEmployer ?? 0) +
+          Number(ytdAgg._sum?.tusTotal ?? 0) +
+          Number(ytdAgg._sum?.employerCustomTaxTotal ?? 0) +
+          carryOver.chargesPat;
+
+        return {
+          ...updated,
+          recalculated: true,
+          calc,
+          ytd: {
+            grossSalary: ytdGross,
+            netImposable: ytdNetImpos,
+            chargesSal: ytdChargesSal,
+            chargesPat: ytdChargesPat,
+            totalChargesSalariales: ytdTotalChargesSal,
+            totalChargesPatronales: ytdTotalChargesPat,
+          },
+        };
+      },
+      { maxWait: 10_000, timeout: 30_000 },
+    );
+  }
+
+  // ============================================================================
+  // SIMULATE
+  // ============================================================================
+  async simulatePayroll(
+    employeeId: string,
+    month: string | number,
+    year: number,
+    userId: string,
+    overrides?: SimulatePayrollOverrides,
+    // ⚡ Option facultative (appelants en rafale, ex. suivi des impayés) : accepte des résumés de
+    // présence générés il y a moins de `summariesMaxAgeMs` au lieu de tout recalculer. Absent = comportement d'origine.
+    simOpts?: { summariesMaxAgeMs?: number },
+  ) {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { id: true, companyId: true, role: true, manageMultipleCompanies: true },
+    });
+    if (!user?.companyId) throw new CompanyNotFoundException();
+
+    const monthNum =
+      typeof month === 'string' ? this.getMonthNumber(month) : month;
+    validateSimulationInput(monthNum, year, overrides);
+    const companyId = await resolveVerifiedCompanyId(this.prisma, user, (overrides as any)?.companyId);
+    if (!companyId) throw new CompanyNotFoundException();
+
+    const ownedEmployee = await this.prisma.employee.findFirst({
+      where: { id: employeeId, companyId }, select: { id: true },
+    });
+    if (!ownedEmployee) throw new ForbiddenException('Salarié non autorisé.');
+    // All calculations below must use the same verified company as the employee.
+    user.companyId = companyId;
+
+    const [employee, company] = await Promise.all([
+      this.prisma.employee.findUnique({
+        where: { id: employeeId },
+        select: {
+          id: true,
+          firstName: true,
+          lastName: true,
+          baseSalary: true,
+          maritalStatus: true,
+          numberOfChildren: true,
+          isSubjectToIrpp: true,
+          isSubjectToCnss: true,
+          isSubjectToTus: true,
+          taxExemptionReason: true,
+          tolZone: true,
+          contractType: true,
+          isResident: true,
+          hireDate: true, // ✅ sinon l'ancienneté auto n'était jamais calculée dans la simulation
+        },
+      }),
+      this.prisma.company.findUnique({
+        where: { id: user.companyId },
+        select: {
+          appliesCnssEmployer: true,
+          cnssEmployerRate: true,
+          isSubjectToTus: true,
+          seniorityMode: true, // ✅ idem : lu plus bas mais jamais sélectionné
+        },
+      }),
+    ]);
+    if (!employee) throw new EmployeeNotFoundException(employeeId);
+
+    const [settingsBase, companyTaxes] = await Promise.all([
+      this.payrollSettingsService.getSettingsByCompanyId(user.companyId),
+      this.companyTaxService.findActive(user.companyId, { month: monthNum, year }), // ✅ taxes du mois
+    ]);
+    // ✅ Même base de jours que la génération réelle (customWorkDays)
+    const settings = overrides?.workDays
+      ? { ...settingsBase, workDaysPerMonth: overrides.workDays }
+      : settingsBase;
+
+    if (overrides?.workedDays != null && overrides.workedDays > settings.workDaysPerMonth) {
+      throw new BadRequestException('Les jours travaillés dépassent les jours théoriques.');
+    }
+    if (overrides?.absentDays != null && ((overrides.workedDays ?? 0) + overrides.absentDays > settings.workDaysPerMonth)) {
+      throw new BadRequestException('Jours travaillés et absences incompatibles avec la période.');
+    }
+
+    let daysToPay = settings.workDaysPerMonth;
+    let att10 = 0,
+      att25 = 0,
+      att50 = 0,
+      att100 = 0;
+
+    const hasWorkedDaysOverride = overrides?.workedDays != null || overrides?.absentDays != null;
+    const hasOvertimeOverride =
+      overrides?.overtimeHours10 != null ||
+      overrides?.overtimeHours25 != null ||
+      overrides?.overtimeHours50 != null ||
+      overrides?.overtimeHours100 != null;
+
+    if (!hasWorkedDaysOverride || !hasOvertimeOverride) {
+      try {
+        await this.attendanceSummary.generateAndStoreAllMonthlySummaries(
+          user.companyId,
+          monthNum,
+          year,
+          simOpts?.summariesMaxAgeMs
+            ? { maxAgeMs: simOpts.summariesMaxAgeMs }
+            : undefined,
+        );
+        const summaries = await this.attendanceSummary.getStoredSummaries(
+          user.companyId,
+          monthNum,
+          year,
+          [employeeId],
+        );
+        if (summaries.length > 0) {
+          const s = summaries[0];
+          // ✅ CORRECTIF : avant, un résumé à 0 jour (pointage non saisi,
+          // aucune présence enregistrée) gardait le fallback plein mois
+          // (26j) silencieusement. Résultat : l'estimation affichait 26j
+          // alors que la génération réelle, elle, lisait le vrai résumé
+          // (0j) et rejetait l'employé ("Aucun jour travaillé"). Décalage
+          // invisible tant qu'on ne cliquait pas "Lancer". Maintenant
+          // l'estimation reflète toujours le vrai chiffre en BDD, 0 inclus,
+          // pour que ça saute aux yeux avant de lancer, pas après.
+          if (!hasWorkedDaysOverride) daysToPay = s.daysToPay;
+          if (!hasOvertimeOverride) {
+            // 🔒 Même règle que la génération en masse : HS désactivées pour
+            // l'entreprise → aucune heure sup, même si un ancien résumé en contient.
+            const otAllowedSim = (settings as any)?.overtimeEnabled !== false;
+            att10 = otAllowedSim ? Number((s as any).overtime10Hours ?? 0) : 0;
+            att25 = otAllowedSim ? Number((s as any).overtime25Hours ?? 0) : 0;
+            att50 = otAllowedSim ? Number(s.overtime50Hours ?? 0) : 0;
+            att100 = otAllowedSim ? Number((s as any).overtime100Hours ?? 0) : 0;
+          }
+        }
+      } catch {
+        this.logger.warn(`⚠️ Pointage indisponible pour ${employeeId}`);
+      }
+    }
+
+    if (hasWorkedDaysOverride) daysToPay = overrides?.workedDays ?? (settings.workDaysPerMonth - overrides!.absentDays!);
+    const eff10 =
+      overrides?.overtimeHours10 != null ? overrides.overtimeHours10 : att10;
+    const eff25 =
+      overrides?.overtimeHours25 != null ? overrides.overtimeHours25 : att25;
+    const eff50 =
+      overrides?.overtimeHours50 != null ? overrides.overtimeHours50 : att50;
+    const eff100 =
+      overrides?.overtimeHours100 != null ? overrides.overtimeHours100 : att100;
+    const effectiveBaseSalary =
+      overrides?.baseSalary != null && overrides.baseSalary > 0
+        ? overrides.baseSalary
+        : Number(employee.baseSalary);
+
+    // ✅ CORRECTIF : avant, envoyer ne serait-ce qu'une seule prime manuelle
+    // (overrides.manualBonuses non vide) remplaçait ENTIÈREMENT les primes
+    // déjà configurées pour l'employé (convention, ancienneté, primes
+    // récurrentes) — elles disparaissaient du calcul dès qu'on touchait au
+    // formulaire. Désormais : les primes déjà en base sont TOUJOURS
+    // résolues, et "manualBonuses" ne fait qu'ajouter/remplacer par type de
+    // prime (bonusType) — une prime tapée à l'écran avec le même libellé
+    // qu'une prime BDD écrase son montant pour ce bulletin ; les autres
+    // primes BDD non touchées continuent de s'appliquer normalement.
+    const seniorityModeS = (company as any).seniorityMode ?? 'AUTO';
+    const dbResolvedBonuses = await this.bonusesService.calculateEmployeeBonuses(
+      employeeId,
+      effectiveBaseSalary,
+      monthNum,
+      year,
+      user.companyId,
+      daysToPay,
+      settings.workDaysPerMonth,
+      (employee as any).hireDate ?? null,
+      seniorityModeS,
+    );
+    let calculatedBonuses: any[], simulationMode: string;
+    if (overrides?.manualBonuses && overrides.manualBonuses.length > 0) {
+      const manualMapped = (overrides.manualBonuses as any[]).map((b) => ({
+        id: b.id ?? `manual-${Date.now()}`,
+        bonusType: b.bonusType,
+        amount: Number(b.amount),
+        isTaxable: b.isTaxable ?? true,
+        isCnss: b.isCnss ?? true,
+        source: 'MANUAL',
+        isRecurring: true,
+      }));
+      const manualTypes = new Set(
+        manualMapped.map((b) => String(b.bonusType).trim().toLowerCase()),
+      );
+      const dbNotOverridden = dbResolvedBonuses.filter(
+        (b: any) => !manualTypes.has(String(b.bonusType).trim().toLowerCase()),
+      );
+      calculatedBonuses = [...dbNotOverridden, ...manualMapped];
+      simulationMode = 'MANUAL_OVERRIDE';
+    } else {
+      calculatedBonuses = dbResolvedBonuses;
+      simulationMode =
+        overrides && Object.keys(overrides).length > 0
+          ? 'MANUAL_OVERRIDE'
+          : 'FROM_ATTENDANCE';
+    }
+
+    // ✅ CORRECTIF ("le trou") : brut de travail (sans indemnité) calculé
+    // AVANT le chargement de leaveImpact, pour compléter le 12e mois s'il
+    // manque (même logique que la génération réelle).
+    const prelimCalcForLeave = this.calculator.calculate(
+      effectiveBaseSalary,
+      eff10,
+      eff25,
+      eff50,
+      eff100,
+      calculatedBonuses,
+      [],
+      settings,
+      daysToPay,
+      settings.workDaysPerMonth,
+      { ...employee, _payrollYear: year, _payrollMonth: monthNum }, // ✅ barème fiscal selon l'année du bulletin
+      company,
+      companyTaxes,
+    );
+
+    const [loans, advances, companyDeductions, leaveImpact, leaveBalanceSummary] = await Promise.all([
+      // ✅ month/year : exclut les prêts déjà remboursés en espèces ce mois-ci
+      // (comme la génération en masse) — sinon l'aperçu déduisait un prêt que
+      // le bulletin réel ne déduit pas.
+      this.deductionsService.getActiveLoans(employeeId, monthNum, year),
+      this.deductionsService.getApprovedAdvances(employeeId, monthNum, year),
+      // ✅ Retenues diverses (pharmacie, cantine, casse…) : la création et la
+      // génération en masse les déduisent, l'aperçu les ignorait → net différent.
+      this.deductionsService.getPendingCompanyDeductionsForEmployee(employeeId),
+      // ✅ Charger l'impact congé — cohérence avec la génération batch
+      this.leavesService
+        .getLeaveImpactForPayroll(employeeId, monthNum, year, prelimCalcForLeave.grossSalary),
+      // ✅ CORRECTIF (bug trouvé) : cette simulation ne renvoyait jamais
+      // droitsConge/priseConge/soldeConge — la bannière congé de la paie
+      // manuelle (front) lisait sim.ytd.soldeConge, qui restait toujours
+      // undefined→0. Solde TOTAL réel (tous cycles non soldés, pas
+      // seulement le dernier — même correctif que Provision).
+      this.leavesService.getTotalLeaveBalanceSummary(employeeId).catch(() => null),
+    ]);
+
+    const leaveIndemnity = leaveImpact?.leaveIndemnity ?? 0;
+    const leaveAbsenceDeduction = leaveImpact?.absenceDeduction ?? 0;
+    const isPaidLeave = leaveImpact?.isPaid ?? false;
+    const leaveDays = leaveImpact?.leaveDays ?? 0;
+    const leaveLabel = isPaidLeave ? 'Indemnité de congé' : 'Congé sans solde';
+
+    // ✅ Base congé = brut annuel M-1 / 12 (méthode 1/12e Congo)
+    // getYtdWindow gère le carryOver historique ET le reset post-congé (YtdCheckpoint)
+    const prevMonth = monthNum === 1 ? 12 : monthNum - 1;
+    const prevYear = monthNum === 1 ? year - 1 : year;
+    const { startYear, startMonth, carryOver } = await this.getYtdWindow(
+      employeeId,
+      prevYear,
+      prevMonth,
+    );
+    const ytdPrevAgg = await this.sumPayrollsInWindow(
+      employeeId,
+      startYear,
+      startMonth,
+      prevYear,
+      prevMonth,
+    );
+    const ytdPrevGross =
+      Number(ytdPrevAgg._sum.grossSalary ?? 0) + carryOver.brut;
+    const baseConge = ytdPrevGross > 0 ? Math.round(ytdPrevGross / 12) : 0;
+
+    const protectionMode = this.smicProtection.determineMode(
+      effectiveBaseSalary,
+      loans.length > 0 || advances.length > 0,
+    );
+    // ℹ️ Réutilise prelimCalcForLeave (identique — mêmes arguments) plutôt
+    // que de refaire le même calcul une 2e fois.
+    const prelimCalc = prelimCalcForLeave;
+    const { adjustedDeductions } = this.smicProtection.handleDeductions(
+      employee,
+      prelimCalc,
+      loans,
+      advances,
+      protectionMode,
+    );
+    // ✅ Retenues diverses : même préparation que create() / generate()
+    const { calcEntries: companyDeductionEntries } =
+      this.deductionsService.prepareCompanyDeductionsForCalc(companyDeductions);
+    const deductionsForCalc = [...adjustedDeductions, ...companyDeductionEntries];
+    const totalCompanyDeduction = companyDeductionEntries.reduce(
+      (s, d) => s + Number(d.amount || 0),
+      0,
+    );
+
+    // ✅ CORRECTIF (câblage) : transmet l'indemnité au moteur de calcul —
+    // sinon jamais incluse dans grossSalary/netSalary/its/cnssSalarial.
+    const calc = this.calculator.calculate(
+      effectiveBaseSalary,
+      eff10,
+      eff25,
+      eff50,
+      eff100,
+      calculatedBonuses,
+      deductionsForCalc,
+      settings,
+      daysToPay,
+      settings.workDaysPerMonth,
+      { ...employee, _payrollYear: year, _payrollMonth: monthNum }, // ✅ barème fiscal selon l'année du bulletin
+      company,
+      companyTaxes,
+      { leaveIndemnity, isPaidLeave },
+    );
+
+    const totalLoanDeduction = loans.reduce(
+      (s, l) => s + Number(l.monthlyRepayment),
+      0,
+    );
+    const totalAdvanceDeduction = advances.reduce(
+      (s, a) => s + Number(a.amount),
+      0,
+    );
+
+    const simManualDeductions = (overrides?.manualDeductions ?? [])
+      .filter((d) => Number(d?.amount) > 0)
+      .map((d) => ({ label: d.label || 'Retenue', amount: Number(d.amount) }));
+    const simManualDeductionTotal = simManualDeductions.reduce(
+      (s, d) => s + d.amount,
+      0,
+    );
+
+    return {
+      employee: {
+        id: employee.id,
+        firstName: employee.firstName,
+        lastName: employee.lastName,
+        baseSalary: Number(employee.baseSalary),
+        effectiveBaseSalary,
+        isSubjectToCnss: employee.isSubjectToCnss,
+        isSubjectToIrpp: employee.isSubjectToIrpp,
+        isSubjectToTus: employee.isSubjectToTus,
+        taxExemptionReason: employee.taxExemptionReason,
+      },
+      month: monthNum,
+      year,
+      daysToPay,
+      workDays: settings.workDaysPerMonth,
+      overtime: {
+        hours10: eff10,
+        amount10: calc.overtimeAmount10,
+        hours25: eff25,
+        amount25: calc.overtimeAmount25,
+        hours50: eff50,
+        amount50: calc.overtimeAmount50,
+        hours100: eff100,
+        amount100: calc.overtimeAmount100,
+        total: calc.totalOvertimeAmount,
+      },
+      bonuses: calculatedBonuses,
+      totalBonuses: calc.totalBonuses,
+      adjustedBaseSalary: calc.adjustedBaseSalary,
+      absenceDeduction: calc.absenceDeduction,
+      grossSalary: calc.grossSalary,
+      cnssSalarial: calc.cnssSalarial,
+      cnssEmployer: calc.cnssEmployer,
+      cnssEmployerPension: calc.cnssEmployerPension,
+      cnssEmployerFamily: calc.cnssEmployerFamily,
+      cnssEmployerAccident: calc.cnssEmployerAccident,
+      tusDgiAmount: calc.tusDgiAmount,
+      tusCnssAmount: calc.tusCnssAmount,
+      tusTotal: calc.tusTotal,
+      its: calc.its,
+      irppDetails: calc.irppDetails,
+      // ✅ Taxes custom dans la réponse simulation
+      customTaxes: calc.customTaxDetails,
+      employeeCustomTaxTotal: calc.employeeCustomTaxTotal,
+      employerCustomTaxTotal: calc.employerCustomTaxTotal,
+      loans: loans.map((l) => ({
+        id: l.id,
+        monthlyRepayment: Number(l.monthlyRepayment),
+        remainingBalance: Number(l.remainingBalance),
+      })),
+      advances: advances.map((a) => ({
+        id: a.id,
+        amount: Number(a.amount),
+        createdAt: a.createdAt,
+      })),
+      totalLoanDeduction,
+      totalAdvanceDeduction,
+      // ✅ Retenues diverses (déjà comprises dans totalDeductions et netSalary)
+      companyDeductions: companyDeductionEntries.map((d: any) => ({
+        label: d.label,
+        amount: Number(d.amount),
+      })),
+      totalCompanyDeduction,
+      // 🆕 Retenues libres (paie manuelle) : comptées dans le total et le net
+      manualDeductions: simManualDeductions,
+      manualDeductionTotal: simManualDeductionTotal,
+      totalDeductions: calc.totalDeductions + simManualDeductionTotal,
+      netSalary: calc.netSalary - simManualDeductionTotal,
+      totalEmployerCost: calc.totalEmployerCost,
+      settings: {
+        cnssSalarialRate: settings.cnssSalarialRate,
+        cnssEmployerRate: settings.cnssEmployerRate,
+        cnssCeiling: settings.cnssCeiling,
+        overtimeRate10: settings.overtimeRate10 ?? 10,
+        overtimeRate25: settings.overtimeRate25 ?? 25,
+        overtimeRate50: settings.overtimeRate50 ?? 50,
+        overtimeRate100: settings.overtimeRate100 ?? 100,
+      },
+      simulationMode,
+      // ✅ Base congé = brut annuel M-1 / 12 (méthode 1/12e Congo)
+      // ✅ CORRECTIF (bug trouvé) : droitsConge/priseConge/soldeConge
+      // ajoutés — manquaient entièrement, la bannière congé de la paie
+      // manuelle ne se déclenchait donc jamais correctement.
+      ytd: {
+        baseConge,
+        grossSalary: ytdPrevGross,
+        droitsConge: leaveBalanceSummary?.annualEntitled ?? 0,
+        priseConge: leaveBalanceSummary?.annualTaken ?? 0,
+        soldeConge: leaveBalanceSummary?.annualRemaining ?? 0,
+      },
+    };
+  }
+
+  // ============================================================================
+  // SIMULATE BATCH
+  // ============================================================================
+  async simulateBatchPayroll(
+    employeeIds: string[],
+    month: number,
+    year: number,
+    userId: string,
+    opts?: {
+      workDays?: number;
+      daysOverrides?: Record<string, number>;
+      // ⚡ réutiliser des résumés de présence récents (voir simulatePayroll)
+      summariesMaxAgeMs?: number;
+    },
+  ) {
+    validateSimulationInput(month, year, { workDays: opts?.workDays });
+    if (!Array.isArray(employeeIds) || employeeIds.length === 0 ||
+        employeeIds.some(id => typeof id !== 'string' || !id)) {
+      throw new BadRequestException('La liste des employés est invalide.');
+    }
+    for (const id of employeeIds) {
+      validateSimulationInput(month, year, { workedDays: opts?.daysOverrides?.[id] });
+    }
+    const simulations = await runWithConcurrency(
+      employeeIds,
+      SIMULATE_BATCH_CONCURRENCY,
+      async (id) => {
+        const workedDays = opts?.daysOverrides?.[id];
+        const overrides: SimulatePayrollOverrides = {};
+        if (workedDays != null && Number.isFinite(Number(workedDays))) {
+          overrides.workedDays = Number(workedDays);
+        }
+        if (opts?.workDays) overrides.workDays = opts.workDays;
+        try {
+          const value = await this.simulatePayroll(
+            id,
+            month,
+            year,
+            userId,
+            Object.keys(overrides).length ? overrides : undefined,
+            opts?.summariesMaxAgeMs
+              ? { summariesMaxAgeMs: opts.summariesMaxAgeMs }
+              : undefined,
+          );
+          return { status: 'fulfilled' as const, value };
+        } catch (reason) {
+          return { status: 'rejected' as const, reason: reason as any };
+        }
+      },
+    );
+    const results = simulations.map((result, index) => {
+      if (result.status === 'fulfilled')
+        return {
+          employeeId: employeeIds[index],
+          success: true,
+          data: result.value,
+        };
+      return {
+        employeeId: employeeIds[index],
+        success: false,
+        error: (result.reason as Error).message,
+      };
+    });
+    const successful = results.filter((r) => r.success).map((r) => r.data!);
+    return {
+      results,
+      summary: {
+        count: successful.length,
+        totalGross: successful.reduce((s, d: any) => s + d.grossSalary, 0),
+        totalNet: successful.reduce((s, d: any) => s + d.netSalary, 0),
+        totalEmployerCost: successful.reduce(
+          (s, d: any) => s + d.totalEmployerCost,
+          0,
+        ),
+        totalCnss: successful.reduce((s, d: any) => s + d.cnssSalarial, 0),
+        totalIts: successful.reduce((s, d: any) => s + d.its, 0),
+        // ✅ Détail affiché dans l'estimation de la paie en masse
+        totalBonuses: successful.reduce((s, d: any) => s + Number(d.totalBonuses || 0), 0),
+        totalDeductions: successful.reduce((s, d: any) => s + Number(d.totalDeductions || 0), 0),
+        totalLoanAdvance: successful.reduce(
+          (s, d: any) => s + Number(d.totalLoanDeduction || 0) + Number(d.totalAdvanceDeduction || 0),
+          0,
+        ),
+        totalCompanyDeduction: successful.reduce(
+          (s, d: any) => s + Number(d.totalCompanyDeduction || 0),
+          0,
+        ),
+        totalOvertime: successful.reduce((s, d: any) => s + Number(d.overtime?.total || 0), 0),
+        failedCount: results.length - successful.length,
+      },
+    };
+  }
+
+  // ============================================================================
+  // SIMULATE FREE — pas de company réelle → taxes custom vides
+  // ============================================================================
+  async simulateFree(body: any, userId?: string) {
+    const {
+      firstName = 'Simulation',
+      lastName = 'Libre',
+      baseSalary,
+      maritalStatus = 'SINGLE',
+      numberOfChildren = 0,
+      isSubjectToCnss = true,
+      isSubjectToIrpp = true,
+      fiscalMode = 'ITS_2026',
+      forfaitItsRate = 0.08,
+      month,
+      year,
+      workedDays,
+      overtimeHours10 = 0,
+      overtimeHours25 = 0,
+      overtimeHours50 = 0,
+      overtimeHours100 = 0,
+      manualBonuses = [],
+      manualAdvances = [],
+      // 🆕 type de contrat / zone TOL / résidence (BNC) — mêmes règles que la paie réelle
+      contractType = 'CDI',
+      tolZone = null,
+      isResident = true,
+    } = body;
+    if (!baseSalary || baseSalary < 70400)
+      throw new Error('Salaire de base invalide (minimum SMIG : 70 400 FCFA)');
+
+    const fakeEmployee = {
+      id: `free-sim-${Date.now()}`,
+      firstName,
+      lastName,
+      baseSalary,
+      maritalStatus,
+      numberOfChildren,
+      isSubjectToCnss,
+      isSubjectToIrpp,
+      isSubjectToTus: true,
+      taxExemptionReason: null,
+      contractType,
+      tolZone,
+      isResident,
+      _payrollYear: year,
+      _payrollMonth: month ? Number(month) : undefined, // règles légales du mois simulé
+      // (mode fiscal AUTO : barème selon la période simulée)
+    };
+    const fakeCompany = {
+      appliesCnssEmployer: true,
+      cnssEmployerRate: 20.25,
+      isSubjectToTus: true,
+    };
+    const settings = this.defaultFreeSettings(fiscalMode, forfaitItsRate);
+    const daysToPay = workedDays ?? settings.workDaysPerMonth;
+
+    const calculatedBonuses = manualBonuses
+      .filter((b: any) => b.bonusType && b.amount > 0)
+      .map((b: any, i: number) => ({
+        id: `free-bonus-${i}`,
+        bonusType: b.bonusType,
+        amount: Number(b.amount),
+        isTaxable: b.isTaxable ?? true,
+        isCnss: b.isCnss ?? true,
+        fiscalType: b.fiscalType ?? null,
+        source: 'MANUAL',
+        isRecurring: true,
+      }));
+
+    // 🆕 Avances saisies à la main → déduites du net (comme une vraie avance)
+    const freeAdvances = (manualAdvances as any[])
+      .filter((a) => Number(a?.amount) > 0)
+      .map((a, i) => ({
+        id: `free-adv-${i}`,
+        label: a.label ?? 'Avance',
+        amount: Number(a.amount),
+      }));
+    const totalAdvanceDeduction = freeAdvances.reduce((s, a) => s + a.amount, 0);
+
+    // 🆕 Taxes configurées de l'entreprise de l'utilisateur connecté (CAMU, etc.),
+    // filtrées par mois/année. Sans entreprise (ou en cas d'erreur) → seule la TOL
+    // native s'applique, comme pour un employé sans taxe configurée.
+    let companyTaxes: any[] = [];
+    if (userId) {
+      try {
+        const u = await this.prisma.user.findUnique({
+          where: { id: userId },
+          select: { companyId: true },
+        });
+        if (u?.companyId) {
+          companyTaxes = await this.companyTaxService.findActive(
+            u.companyId,
+            month && year ? { month: Number(month), year: Number(year) } : undefined,
+          );
+        }
+      } catch {
+        companyTaxes = [];
+      }
+    }
+
+    const calc = this.calculator.calculate(
+      baseSalary,
+      overtimeHours10,
+      overtimeHours25,
+      overtimeHours50,
+      overtimeHours100,
+      calculatedBonuses,
+      freeAdvances.map((a) => ({ amount: a.amount })),
+      settings,
+      daysToPay,
+      settings.workDaysPerMonth,
+      fakeEmployee,
+      fakeCompany,
+      companyTaxes,
+    );
+
+    return {
+      employee: {
+        id: fakeEmployee.id,
+        firstName,
+        lastName,
+        baseSalary,
+        effectiveBaseSalary: baseSalary,
+        isSubjectToCnss,
+        isSubjectToIrpp,
+        isSubjectToTus: true,
+        taxExemptionReason: null,
+      },
+      month,
+      year,
+      daysToPay,
+      workDays: settings.workDaysPerMonth,
+      overtime: {
+        hours10: overtimeHours10,
+        amount10: calc.overtimeAmount10,
+        hours25: overtimeHours25,
+        amount25: calc.overtimeAmount25,
+        hours50: overtimeHours50,
+        amount50: calc.overtimeAmount50,
+        hours100: overtimeHours100,
+        amount100: calc.overtimeAmount100,
+        total: calc.totalOvertimeAmount,
+      },
+      bonuses: calculatedBonuses,
+      totalBonuses: calc.totalBonuses,
+      adjustedBaseSalary: calc.adjustedBaseSalary,
+      absenceDeduction: calc.absenceDeduction,
+      grossSalary: calc.grossSalary,
+      cnssSalarial: calc.cnssSalarial,
+      cnssEmployer: calc.cnssEmployer,
+      cnssEmployerPension: calc.cnssEmployerPension,
+      cnssEmployerFamily: calc.cnssEmployerFamily,
+      cnssEmployerAccident: calc.cnssEmployerAccident,
+      tusDgiAmount: calc.tusDgiAmount,
+      tusCnssAmount: calc.tusCnssAmount,
+      tusTotal: calc.tusTotal,
+      its: calc.its,
+      irppDetails: calc.irppDetails,
+      // 🆕 TOL + taxes configurées : avant, [] / 0 alors que le net les déduisait
+      customTaxes: calc.customTaxDetails,
+      employeeCustomTaxTotal: calc.employeeCustomTaxTotal,
+      employerCustomTaxTotal: calc.employerCustomTaxTotal,
+      contractType: calc.contractType,
+      isBncWorker: calc.isBncWorker,
+      bncAmount: calc.bncAmount,
+      bncTaux: calc.bncTaux,
+      bncLabel: calc.bncLabel,
+      loans: [],
+      advances: freeAdvances,
+      totalLoanDeduction: 0,
+      totalAdvanceDeduction,
+      totalDeductions: calc.totalDeductions,
+      netSalary: calc.netSalary,
+      totalEmployerCost: calc.totalEmployerCost,
+      settings: {
+        cnssSalarialRate: settings.cnssSalarialRate,
+        cnssEmployerRate: settings.cnssEmployerRate,
+        fiscalMode,
+        forfaitItsRate,
+      },
+      simulationMode: 'FREE_SIMULATION',
+    };
+  }
+
+  async getAccountingJournal(userId: string, month: number, year: number) {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { companyId: true },
+    });
+    if (!user?.companyId) throw new CompanyNotFoundException();
+    await this.subscriptionGuard.checkFeatureAccess(
+      user.companyId,
+      'hasPayrollAccountingExport',
+    );
+    const payrolls = await this.prisma.payroll.findMany({
+      where: { companyId: user.companyId, month, year },
+      include: {
+        employee: {
+          select: {
+            employeeNumber: true,
+            firstName: true,
+            lastName: true,
+            contractType: true,
+            isResident: true,
+          },
+        },
+      },
+    });
+    const entries: any[] = [];
+    for (const p of payrolls) {
+      const name = `${p.employee.firstName} ${p.employee.lastName}`;
+      const piece = `PAY-${p.employee.employeeNumber}-${month}-${year}`;
+      entries.push(
+        // ── Écriture 1 : Charge salariale (OHADA classe 6 & 4) ──────────────
+        {
+          date: p.periodEnd,
+          journal: 'PAIE',
+          piece,
+          account: '661100',
+          label: `Salaires bruts - ${name}`,
+          debit: Number(p.grossSalary),
+          credit: 0,
+        },
+        {
+          date: p.periodEnd,
+          journal: 'PAIE',
+          piece,
+          account: '431100',
+          label: `CNSS salarié - ${name}`,
+          debit: 0,
+          credit: Number(p.cnssSalarial),
+        },
+        {
+          date: p.periodEnd,
+          journal: 'PAIE',
+          piece,
+          account: '422100',
+          label: `Rémunération due - ${name}`,
+          debit: 0,
+          credit: Number(p.netSalary),
+        },
+      );
+
+      // ── ✅ ITS ou BNC — jamais le même compte, jamais le même libellé.
+      // p.its contient soit un vrai ITS (CDI/CDD), soit une retenue BNC
+      // 10%/20% (prestataires) selon payroll-calculator.service.ts — on
+      // reclasse ici pour ne jamais les confondre dans le journal.
+      const fiscalCategory = classifyFiscalCategory(
+        (p.employee as any).contractType,
+        (p.employee as any).isResident,
+      );
+      const itsOrBncAmount = Number(p.its);
+      if (itsOrBncAmount > 0) {
+        if (fiscalCategory === 'BNC_10' || fiscalCategory === 'BNC_20') {
+          const rate = fiscalCategory === 'BNC_10' ? '10%' : '20%';
+          entries.push({
+            date: p.periodEnd,
+            journal: 'PAIE',
+            piece,
+            // ⚠️ Compte distinct de l'ITS (447200) — à faire confirmer par
+            // votre comptable si vous avez déjà un compte BNC dédié dans
+            // votre plan comptable, sinon ce sous-compte convient.
+            account: '447450',
+            label: `Retenue BNC ${rate} (prestataire) - ${name}`,
+            debit: 0,
+            credit: itsOrBncAmount,
+          });
+        } else {
+          entries.push({
+            date: p.periodEnd,
+            journal: 'PAIE',
+            piece,
+            account: '447200',
+            label: `ITS/IRPP retenu - ${name}`,
+            debit: 0,
+            credit: itsOrBncAmount,
+          });
+        }
+      }
+      // ── Écriture 2 : Charges patronales (OHADA 664 & 641 & 431) ────────
+      if (Number(p.cnssEmployer) > 0) {
+        entries.push(
+          {
+            date: p.periodEnd,
+            journal: 'PAIE',
+            piece,
+            account: '664100',
+            label: `Charges patronales CNSS - ${name}`,
+            debit: Number(p.cnssEmployer),
+            credit: 0,
+          },
+          {
+            date: p.periodEnd,
+            journal: 'PAIE',
+            piece,
+            account: '431300',
+            label: `CNSS employeur à verser - ${name}`,
+            debit: 0,
+            credit: Number(p.cnssEmployer),
+          },
+        );
+      }
+      if (Number((p as any).tusTotal ?? 0) > 0) {
+        const tusDgi = Number((p as any).tusDgiAmount ?? 0);
+        const tusCnss = Number((p as any).tusCnssAmount ?? 0);
+        const tusTotal = Number((p as any).tusTotal ?? 0);
+        entries.push(
+          {
+            date: p.periodEnd,
+            journal: 'PAIE',
+            piece,
+            account: '641300',
+            label: `TUS (7,5%) - ${name}`,
+            debit: tusTotal,
+            credit: 0,
+          },
+          {
+            date: p.periodEnd,
+            journal: 'PAIE',
+            piece,
+            // ⚠️ Distinct de 447200 (ITS) — les deux étaient confondus sur
+            // le même compte avant, ce qui rendait le TUS-DGI impossible à
+            // isoler de l'ITS dans la balance.
+            account: '447500',
+            label: `TUS-DGI à reverser - ${name}`,
+            debit: 0,
+            credit: tusDgi,
+          },
+          {
+            date: p.periodEnd,
+            journal: 'PAIE',
+            piece,
+            // ⚠️ Distinct de 431300 (CNSS employeur) — même souci que
+            // ci-dessus, les deux passifs étaient mélangés sur un seul
+            // compte.
+            account: '431400',
+            label: `TUS-CNSS à reverser - ${name}`,
+            debit: 0,
+            credit: tusCnss,
+          },
+        );
+      }
+    }
+    return { month, year, totalEntries: entries.length, entries };
+  }
+
+  // ============================================================================
+  // DECLARATIONS SUMMARY — Récapitulatif CNSS + TUS + ITS pour un mois
+  // ============================================================================
+  async getDeclarationsSummary(
+    requestedCompanyId: string | undefined,
+    month: number,
+    year: number,
+    userId: string,
+  ) {
+    // 🔒 CORRECTIF SÉCURITÉ (audit) : le companyId de la query était utilisé
+    // tel quel, sans jamais être comparé à l'appelant — n'importe quel
+    // ADMIN/HR pouvait lire les totaux brut/CNSS/ITS/TUS d'une autre
+    // entreprise. Un utilisateur normal retombe sur sa propre entreprise ;
+    // un cabinet / admin portefeuille est vérifié contre
+    // cabinetCompany / userCompany.
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: {
+        id: true,
+        companyId: true,
+        role: true,
+        manageMultipleCompanies: true,
+      },
+    });
+    if (!user) return null;
+    const companyId = await resolveVerifiedCompanyId(
+      this.prisma,
+      user,
+      requestedCompanyId,
+    );
+    if (!companyId) return null;
+
+    const payrolls = await this.prisma.payroll.findMany({
+      where: { companyId, month, year, status: { not: 'CANCELLED' } },
+      include: {
+        employee: { select: { contractType: true, isResident: true } },
+      },
+    });
+
+    if (payrolls.length === 0) return null;
+
+    const sum = (field: string) =>
+      payrolls.reduce((acc, p) => acc + Number((p as any)[field] ?? 0), 0);
+
+    const totalGrossSalary = sum('grossSalary');
+    const totalCnssSalarial = sum('cnssSalarial');
+    const cnssEmployerPension = sum('cnssEmployerPension');
+    const cnssEmployerFamily = sum('cnssEmployerFamily');
+    const cnssEmployerAccident = sum('cnssEmployerAccident');
+    const totalCnssEmployer = sum('cnssEmployer');
+    const tusDgiAmount = sum('tusDgiAmount');
+    const tusCnssAmount = sum('tusCnssAmount');
+    const tusTotal = sum('tusTotal');
+    const totalIts = sum('its'); // ⚠️ mélange ITS + BNC — gardé pour compat, voir ventilation ci-dessous
+
+    // ✅ Ventilation réelle ITS / BNC 10% / BNC 20% — ne jamais lire
+    // totalIts seul pour représenter "l'ITS" si des prestataires existent.
+    let totalItsReel = 0;
+    let totalBnc10 = 0;
+    let totalBnc20 = 0;
+    for (const p of payrolls) {
+      const emp = (p as any).employee;
+      const amount = Number((p as any).its ?? 0);
+      if (!emp) { totalItsReel += amount; continue; }
+      const category = classifyFiscalCategory(emp.contractType, emp.isResident);
+      if (category === 'BNC_10') totalBnc10 += amount;
+      else if (category === 'BNC_20') totalBnc20 += amount;
+      else totalItsReel += amount;
+    }
+
+    // Agréger les taxes custom (stockées en JSON dans customTaxDetails)
+    const customMap: Record<
+      string,
+      {
+        name: string;
+        code: string;
+        employeeTotal: number;
+        employerTotal: number;
+      }
+    > = {};
+    for (const p of payrolls) {
+      const details: any[] = (p as any).customTaxDetails ?? [];
+      for (const t of details) {
+        if (!customMap[t.code]) {
+          customMap[t.code] = {
+            name: t.name,
+            code: t.code,
+            employeeTotal: 0,
+            employerTotal: 0,
+          };
+        }
+        customMap[t.code].employeeTotal += Number(t.employeeAmount ?? 0);
+        customMap[t.code].employerTotal += Number(t.employerAmount ?? 0);
+      }
+    }
+
+    const totalSalarialDeductions =
+      totalCnssSalarial +
+      totalIts +
+      Object.values(customMap).reduce((s, t) => s + t.employeeTotal, 0);
+    const totalEmployerCharges =
+      totalCnssEmployer +
+      tusTotal +
+      Object.values(customMap).reduce((s, t) => s + t.employerTotal, 0);
+
+    return {
+      month,
+      year,
+      employeeCount: payrolls.length,
+      totalGrossSalary,
+      totalCnssSalarial,
+      cnssEmployerPension,
+      cnssEmployerFamily,
+      cnssEmployerAccident,
+      totalCnssEmployer,
+      tusDgiAmount,
+      tusCnssAmount,
+      tusTotal,
+      totalIts,
+      totalItsReel,
+      totalBnc10,
+      totalBnc20,
+      customTaxDetails: Object.values(customMap),
+      totalSalarialDeductions,
+      totalEmployerCharges,
+      grandTotal: totalSalarialDeductions + totalEmployerCharges,
+    };
+  }
+
+  private defaultFreeSettings(fiscalMode: string, forfaitItsRate: number) {
+    return {
+      // Taux/plafond légaux en vigueur (référentiel du super administrateur)
+      cnssSalarialRate: +(legalNow().cnss.salarialRate * 100).toFixed(4),
+      cnssEmployerRate: +(
+        (legalNow().cnss.employerPensionRate +
+          legalNow().cnss.employerFamilyRate +
+          legalNow().cnss.employerAccidentRate) * 100
+      ).toFixed(4),
+      cnssCeiling: legalNow().cnss.pensionCeiling,
+      workDaysPerMonth: 26,
+      overtimeRate10: 10,
+      overtimeRate25: 25,
+      overtimeRate50: 50,
+      overtimeRate100: 100,
+      fiscalMode,
+      forfaitItsRate,
+    };
+  }
+}

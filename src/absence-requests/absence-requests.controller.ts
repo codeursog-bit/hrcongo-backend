@@ -1,0 +1,191 @@
+// ============================================================================
+// 📁 src/absence-requests/absence-requests.controller.ts
+// ============================================================================
+
+import {
+  Controller, Get, Post, Patch, Delete,
+  Body, Param, Query, Request, Res, UseGuards,
+} from '@nestjs/common';
+import type { Response } from 'express';
+import { AuthGuard } from '@nestjs/passport';
+import { AbsenceRequestsService } from './absence-requests.service';
+import { CreateAbsenceRequestDto } from './dto/create-absence-request.dto';
+import { Roles } from '../auth/decorators/roles.decorator';
+import { RolesGuard } from '../auth/guards/roles.guard';
+
+@Controller('absence-requests')
+@UseGuards(AuthGuard('jwt'))
+export class AbsenceRequestsController {
+  constructor(private readonly absenceRequestsService: AbsenceRequestsService) {}
+
+  /** Créer une demande d'absence (employé connecté) */
+  @Post()
+  create(@Body() dto: CreateAbsenceRequestDto, @Request() req) {
+    return this.absenceRequestsService.create(dto, req.user.userId);
+  }
+
+  /** Liste des demandes (RH / Manager / Admin — scope automatique) */
+  @Get()
+  findAll(
+    @Request() req,
+    @Query('employeeId') employeeId?: string,
+    @Query('status') status?: string,
+  ) {
+    return this.absenceRequestsService.findAll(req.user.userId, employeeId, status);
+  }
+
+  /** Mes demandes (employé connecté) */
+  @Get('me')
+  findMine(@Request() req) {
+    return this.absenceRequestsService.findMine(req.user.userId);
+  }
+
+  // ══════════════════════════════════════════════════════════════════════
+  // 📋 Catalogue de motifs "Modèle 2" — calculé depuis la convention
+  // collective de l'entreprise, aucune donnée à gérer. Route FIXE, doit
+  // rester avant ':id' sinon interprétée comme un id de demande.
+  // ══════════════════════════════════════════════════════════════════════
+
+  /** Catalogue de l'entreprise (tous les rôles — sert à peupler le formulaire de demande). */
+  @Get('motifs')
+  listMotifs(@Request() req) {
+    return this.absenceRequestsService.listMotifs(req.user.userId);
+  }
+
+  /**
+   * 🆕 Solde du plafond annuel de permissions exceptionnelles (année civile).
+   *  - employé : son propre solde (?year=2026)
+   *  - RH/Admin : ?employeeId=… pour consulter celui d'un employé
+   * ⚠️ Doit rester AVANT ':id'.
+   */
+  @Get('ceiling-balance')
+  getCeilingBalance(
+    @Request() req,
+    @Query('year') year?: string,
+    @Query('employeeId') employeeId?: string,
+  ) {
+    return this.absenceRequestsService.getCeilingBalance(
+      req.user.userId,
+      year ? parseInt(year, 10) : undefined,
+      employeeId || undefined,
+    );
+  }
+
+  /**
+   * Calcule automatiquement la date de retour à partir d'une date de départ
+   * et d'un nombre de jours ouvrables.
+   * ⚠️ Doit rester AVANT ':id' — sinon interprété comme un id.
+   */
+  @Get('calculate-return-date')
+  calculateReturnDate(
+    @Query('employeeId') employeeId: string,
+    @Query('startDate') startDate: string,
+    @Query('days') days: string,
+  ) {
+    return this.absenceRequestsService.calculateReturnDate(employeeId, new Date(startDate), parseFloat(days));
+  }
+
+  /**
+   * 🆕 Aperçu de couverture (jours justifiés / au-delà du droit) avant envoi.
+   * ⚠️ Doit rester AVANT ':id'.
+   */
+  @Get('coverage-preview')
+  previewCoverage(
+    @Request() req,
+    @Query('startDate') startDate: string,
+    @Query('returnDate') returnDate: string,
+    @Query('motifKey') motifKey?: string,
+  ) {
+    return this.absenceRequestsService.previewCoverage(req.user.userId, { startDate, returnDate, motifKey });
+  }
+
+  /** Détail d'une demande (utilisé pour l'impression) */
+  @Get(':id')
+  findOne(@Param('id') id: string, @Request() req) {
+    return this.absenceRequestsService.findOne(id, req.user.userId);
+  }
+
+  /** Approuver ou refuser — isPaid optionnel : permet à la RH de trancher/écraser la proposition de l'employé au moment de la validation */
+  @Patch(':id/status')
+  updateStatus(
+    @Param('id') id: string,
+    @Body('status') status: 'APPROVED' | 'REJECTED',
+    @Body('rejectionReason') rejectionReason: string,
+    @Body('isPaid') isPaid: boolean | undefined,
+    @Request() req,
+  ) {
+    return this.absenceRequestsService.updateStatus(id, status, req.user.userId, rejectionReason, isPaid);
+  }
+
+  /**
+   * Données résolues pour le rendu du document imprimable (générique ou Orca).
+   */
+  @Get(':id/document-data')
+  async getDocumentData(@Param('id') id: string, @Request() req) {
+    // 🔒 Même règle d'accès que la consultation d'une demande (employé concerné, Admin/RH, manager du département)
+    await this.absenceRequestsService.findOne(id, req.user.userId);
+    return this.absenceRequestsService.getDocumentData(id);
+  }
+
+  /**
+   * Télécharge le document Word Orca rempli (écriture directe dans leur
+   * fichier .docx original).
+   */
+  @Get(':id/document.docx')
+  async downloadOrcaDocument(@Param('id') id: string, @Request() req, @Res() res: Response) {
+    // 🔒 Même règle d'accès que la consultation d'une demande
+    await this.absenceRequestsService.findOne(id, req.user.userId);
+    const buffer = await this.absenceRequestsService.generateOrcaDocument(id);
+    res.set({
+      'Content-Type': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      'Content-Disposition': `attachment; filename="demande-absence-${id.slice(0, 8)}.docx"`,
+    });
+    res.send(buffer);
+  }
+
+  /** Annuler ma demande (tant qu'elle est en attente) */
+  @Patch(':id/cancel')
+  cancel(@Param('id') id: string, @Body('reason') reason: string, @Request() req) {
+    return this.absenceRequestsService.cancel(id, req.user.userId, reason);
+  }
+
+  /** Supprimer définitivement une demande — réservé RH/Admin. */
+  @Delete(':id')
+  @UseGuards(RolesGuard)
+  @Roles('ADMIN', 'HR_MANAGER', 'SUPER_ADMIN')
+  remove(@Param('id') id: string, @Request() req) {
+    return this.absenceRequestsService.remove(id, req.user.userId);
+  }
+
+  /**
+   * Change le statut payé / non payé — réservé RH/Admin, modifiable à tout
+   * moment (avant ou après validation), jamais accessible à l'employé.
+   * L'employé ne fait que PROPOSER isPaid à la création (voir DTO) ; seule
+   * la RH tranche, et peut changer d'avis plus tard via cet endpoint.
+   */
+  @Patch(':id/paid-status')
+  @UseGuards(RolesGuard)
+  @Roles('ADMIN', 'HR_MANAGER', 'SUPER_ADMIN')
+  setPaidStatus(
+    @Param('id') id: string,
+    @Body('isPaid') isPaid: boolean,
+    @Request() req,
+  ) {
+    return this.absenceRequestsService.setPaidStatus(id, isPaid, req.user.userId);
+  }
+
+  /**
+   * Autoriser (ou retirer l'autorisation) l'impression du document pour l'employé.
+   * Réservé RH/Admin — la demande doit déjà être APPROVED.
+   */
+  @Patch(':id/print-authorization')
+  @UseGuards(RolesGuard)
+  @Roles('ADMIN', 'HR_MANAGER', 'SUPER_ADMIN')
+  setPrintAuthorization(
+    @Param('id') id: string,
+    @Body('authorized') authorized: boolean,
+    @Request() req,
+  ) {
+    return this.absenceRequestsService.setPrintAuthorization(id, authorized, req.user.userId);
+  }
+}

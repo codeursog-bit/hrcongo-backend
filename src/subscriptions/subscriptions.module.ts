@@ -1,0 +1,106 @@
+// // ============================================================================
+// // 📦 SUBSCRIPTIONS MODULE
+// // ============================================================================
+// // Fichier: src/subscriptions/subscriptions.module.ts
+
+// import { Module } from '@nestjs/common';
+// import { ConfigModule } from '@nestjs/config';
+// import { ScheduleModule } from '@nestjs/schedule';
+// import { SubscriptionsService } from './subscriptions.service';
+// import { SubscriptionsController } from './subscriptions.controller';
+// import { WebhooksController } from './webhooks.controller';
+// import { SubscriptionGuard } from './guards/subscription.guard';
+// import { AdminGuard } from '../auth/guards/admin.guard';
+// import { SubscriptionCronService } from './cron/subscription.cron';
+// import { PrismaModule } from '../prisma/prisma.module';
+// import { PaymentsModule } from '../payments/payments.module';
+// import { AffiliateModule } from '../affiliate/affiliate.module'; // ← AJOUT
+
+// @Module({
+//   imports: [
+//     ConfigModule,         // ✅ Pour accéder aux variables d'environnement
+//     PrismaModule,         // ✅ Pour accéder à la base de données
+//     PaymentsModule,       // ✅ Fournit YabetooPayService
+//     AffiliateModule,      // ✅ Fournit AffiliateService pour les commissions
+//     ScheduleModule.forRoot(), // ✅ Active les CRON jobs
+//   ],
+//   controllers: [
+//     SubscriptionsController, // ✅ Routes /subscriptions
+//     WebhooksController,      // ✅ Route /webhooks/yabetoopay
+//   ],
+//   providers: [
+//     SubscriptionsService,    // ✅ Logique métier des abonnements
+//     SubscriptionGuard,       // ✅ Guard pour vérifier les limites du plan
+//     AdminGuard,              // ✅ Guard pour les routes admin
+//     SubscriptionCronService, // ✅ CRON pour downgrade automatique des trials expirés
+//   ],
+//   exports: [
+//     SubscriptionsService, // ✅ Export pour utilisation dans d'autres modules
+//     SubscriptionGuard,    // ✅ Export pour utilisation dans EmployeesModule, etc.
+//   ],
+// })
+// export class SubscriptionsModule {}
+
+// ============================================================================
+// src/subscriptions/subscriptions.module.ts
+// ============================================================================
+
+import { Module } from '@nestjs/common';
+import { ConfigModule } from '@nestjs/config';
+import { SubscriptionsService } from './subscriptions.service';
+import { SubscriptionsController } from './subscriptions.controller';
+import { WebhooksController } from './webhooks.controller';
+import { MotekiWebhooksController } from './moteki-webhooks.controller';
+import { ChariowWebhooksController } from './chariow-webhooks.controller';
+import { SubscriptionGuard } from './guards/subscription.guard';
+import { AdminGuard } from '../auth/guards/admin.guard';
+import { SubscriptionCronService } from './cron/subscription.cron';
+import { PrismaModule } from '../prisma/prisma.module';
+import { PaymentsModule } from '../payments/payments.module';
+import { AffiliateModule } from '../affiliate/affiliate.module';
+import { CabinetModule } from '../cabinet/cabinet.module';
+import { NotificationsModule } from '../notifications/notifications.module';
+import { PlatformSettingsModule } from '../platform-settings/platform-settings.module';
+import { BillingAdminController } from './billing-admin.controller';
+import { PricingService } from './pricing.service';
+import { PublicPlansController } from './public-plans.controller';
+import { DiscountCodesService } from './discount-codes.service';
+import { CustomQuotesService } from './custom-quotes.service';
+import { InvoicesService } from '../invoices/invoices.service';
+import { APP_INTERCEPTOR } from '@nestjs/core';
+import { SubscriptionAccessInterceptor } from './subscription-access.interceptor';
+import { EntitlementsService } from './entitlements.service';
+
+@Module({
+  imports: [
+    ConfigModule,
+    PrismaModule,
+    PaymentsModule,
+    AffiliateModule,
+    CabinetModule, // ← pour injecter CabinetSubscriptionService dans WebhooksController
+    NotificationsModule, // ← pour les rappels J-7/J-3/J-1 et l'alerte "abonnement expiré"
+    PlatformSettingsModule, // ← agrégateur de paiement choisi par le super admin
+  ],
+  controllers: [
+    SubscriptionsController,
+    PublicPlansController,
+    WebhooksController, // ← webhook YabetooPay : conservé pour l'historique + les versements affiliés (disbursement.completed)
+    MotekiWebhooksController, // ← webhook Moteki
+    ChariowWebhooksController, // ← webhook Chariow (Pulse) : 3e prestataire, redondance de Moteki
+    BillingAdminController, // ← super admin : prix, codes de réduction, devis, agrégateur, factures
+  ],
+  providers: [
+    EntitlementsService,
+    { provide: APP_INTERCEPTOR, useClass: SubscriptionAccessInterceptor },
+    SubscriptionsService,
+    SubscriptionGuard,
+    AdminGuard,
+    SubscriptionCronService,
+    PricingService,
+    DiscountCodesService,
+    CustomQuotesService,
+    InvoicesService,
+  ],
+  exports: [SubscriptionsService, SubscriptionGuard, PricingService, InvoicesService, EntitlementsService],
+})
+export class SubscriptionsModule {}

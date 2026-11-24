@@ -1,0 +1,283 @@
+// ============================================================================
+// 📁 src/leaves/leaves-common.util.ts
+// ✅ Helpers partagés entre les services du module congé (LeavesService,
+//    LeavesBalanceService, LeavesIndemnityService, LeavesDocumentsService) —
+//    extraits pour éviter la duplication lors du découpage de l'ancien
+//    leaves.service.ts monolithique.
+// ============================================================================
+
+import { PrismaService } from '../prisma/prisma.service';
+import { CONGO_LEAVE } from './leaves.constants';
+import { CompanyNotFoundException } from '../exceptions/business.exceptions';
+import { resolveVerifiedCompanyId } from '../common/resolve-verified-company.util';
+
+/**
+ * Résout le companyId effectif pour un utilisateur.
+ *
+ * Pour les users ENTREPRISE (ADMIN, HR_MANAGER, MANAGER, EMPLOYEE) :
+ *   → utilise user.companyId (comportement original inchangé)
+ *
+ * Pour les CABINET_ADMIN / CABINET_GESTIONNAIRE / manageMultipleCompanies :
+ *   → ils peuvent cibler une autre entreprise via overrideCompanyId
+ *   → 🔒 CORRECTIF SÉCURITÉ (audit) : cette appartenance est maintenant
+ *     RÉELLEMENT vérifiée ici (resolveVerifiedCompanyId, contre
+ *     userCompany/cabinetCompany) — avant, le commentaire prétendait que
+ *     CabinetCompanyIsolationGuard le faisait "en amont", mais ce guard
+ *     n'est branché sur aucune route de ce module : overrideCompanyId
+ *     était en réalité accepté tel quel.
+ *
+ * ⚠️  Si overrideCompanyId est absent ET que c'est un user cabinet
+ *      → on lève CompanyNotFoundException comme avant
+ */
+export async function getUserWithCompany(
+  prisma: PrismaService,
+  userId: string,
+  overrideCompanyId?: string,
+) {
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: {
+      id: true,
+      companyId: true,
+      role: true,
+      email: true,
+      manageMultipleCompanies: true,
+    },
+  });
+  if (!user) throw new CompanyNotFoundException();
+
+  const verifiedCompanyId = await resolveVerifiedCompanyId(
+    prisma,
+    user,
+    overrideCompanyId,
+  );
+
+  if (verifiedCompanyId) {
+    return {
+      id: user.id,
+      companyId: verifiedCompanyId,
+      role: user.role,
+      email: user.email,
+    };
+  }
+  throw new CompanyNotFoundException();
+}
+
+export async function getManagerDepartmentId(
+  prisma: PrismaService,
+  userId: string,
+  companyId: string,
+): Promise<string | null> {
+  const dept = await prisma.department.findFirst({
+    where: { managerId: userId, companyId },
+    select: { id: true },
+  });
+  if (dept) return dept.id;
+
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { email: true },
+  });
+  if (user?.email) {
+    const emp = await prisma.employee.findFirst({
+      where: { email: user.email, companyId },
+      select: { departmentId: true },
+    });
+    return emp?.departmentId ?? null;
+  }
+  return null;
+}
+
+/**
+ * Résout la fenêtre du cycle d'acquisition en cours pour un employé —
+ * démarre à l'embauche, redémarre à chaque retour de congé Annuel normal.
+ *
+ * ✅ CORRECTIF : fait avancer le cycle par tranches de 12 mois tant qu'il est
+ *    entièrement dans le passé par rapport à `referenceDate`, pour retomber
+ *    sur le cycle RÉELLEMENT ouvert aujourd'hui — au lieu de rester figée sur
+ *    le tout premier cycle calculé depuis `hireDate`. Sans ça, un employé
+ *    importé (hireDate ancienne, jamais eu de retour de congé validé dans
+ *    l'appli donc `leaveCycleStartDate` toujours null) restait bloqué sur un
+ *    `cycleEndDate` dans le passé pour toujours (ex: 2019), ce qui faussait à
+ *    la fois le solde affiché (toujours plafonné à 26j, "12 mois" étant
+ *    considérés comme déjà entièrement écoulés) et le faisait disparaître de
+ *    tout planning de départs théoriques.
+ *    ⚠️ Rétrocompatible : `referenceDate` est optionnel (défaut = maintenant)
+ *    et n'affecte QUE les employés dont le cycle calculé est déjà expiré —
+ *    ceux qui ont un `leaveCycleStartDate` à jour (mis à jour à chaque retour
+ *    de congé validé via `updateStatus()`) ont déjà un cycle courant ou futur,
+ *    donc la boucle ci-dessous ne s'exécute jamais pour eux.
+ *
+ * 🆕 `cycleMode` (Company.leaveCycleMode) :
+ *  - 'ROLLING' (défaut, comportement historique inchangé) : le cycle redémarre
+ *    à la date de RETOUR réelle du dernier congé (`leaveCycleStartDate`),
+ *    donc toujours 12 mois de présence réelle avant le prochain départ.
+ *  - 'ANNIVERSARY' : le cycle est TOUJOURS ancré sur le mois d'embauche
+ *    (`hireDate`), peu importe la date réelle de retour — `leaveCycleStartDate`
+ *    est ignoré. Un employé embauché en février part toujours en février,
+ *    chaque année, sans dérive. Voir la conversation produit : le cycle
+ *    suivant le premier ne totalise alors que 11 mois réels de présence (le
+ *    12e étant le mois de départ lui-même), compensé côté indemnité par la
+ *    substitution `paidIndemnityAmount` (voir leaves-indemnity.service.ts) —
+ *    jamais par un prorata du solde (26j+ancienneté restent pleins, décision
+ *    produit confirmée).
+ */
+export function resolveCycleWindow(
+  hireDate: Date,
+  leaveCycleStartDate: Date | null,
+  referenceDate: Date = new Date(),
+  cycleMode: 'ROLLING' | 'ANNIVERSARY' = 'ROLLING',
+) {
+  let cycleStartDate: Date;
+  if (cycleMode === 'ANNIVERSARY') {
+    // Toujours ancré sur hireDate — le retour réel n'a jamais d'influence.
+    cycleStartDate = new Date(hireDate);
+  } else {
+    cycleStartDate = new Date(leaveCycleStartDate ?? hireDate);
+  }
+  let cycleEndDate = new Date(cycleStartDate);
+  cycleEndDate.setMonth(cycleEndDate.getMonth() + 12);
+
+  while (cycleEndDate < referenceDate) {
+    cycleStartDate = new Date(cycleEndDate);
+    cycleEndDate = new Date(cycleStartDate);
+    cycleEndDate.setMonth(cycleEndDate.getMonth() + 12);
+  }
+
+  return { cycleStartDate, cycleEndDate };
+}
+// ============================================================================
+// 🧮 RÉPARTITION BASE / ANCIENNETÉ D'UN CONGÉ ANNUEL (planification RH)
+// Règle (identique à la lettre d'autorisation) : les jours de BASE (26j) sont
+// consommés en premier, l'ancienneté seulement ensuite. Les congés anticipés
+// déjà pris dans le cycle (`takenBefore`) consomment eux aussi la base d'abord.
+// Fonction pure — aucune dépendance, testable seule.
+// ============================================================================
+export interface LeaveDaysSplit {
+  /** Jours de base encore disponibles avant ce congé. */
+  availableBase: number;
+  /** Jours d'ancienneté encore disponibles avant ce congé. */
+  availableSeniority: number;
+  availableTotal: number;
+  /** Jours de ce congé imputés sur la base / sur l'ancienneté. */
+  usedBase: number;
+  usedSeniority: number;
+  /** Ce qu'il restera à prendre plus tard (jamais négatif). */
+  remainderBase: number;
+  remainderSeniority: number;
+  remainderTotal: number;
+  /** Jours demandés au-delà du droit disponible (0 si dans le droit). */
+  excessDays: number;
+}
+
+const round1 = (n: number) => Math.round(n * 10) / 10;
+
+export function splitLeaveDays(input: {
+  baseEntitled: number;
+  seniorityEntitled: number;
+  takenBefore: number;
+  requestedDays: number;
+}): LeaveDaysSplit {
+  const base = Math.max(0, input.baseEntitled);
+  const sen = Math.max(0, input.seniorityEntitled);
+  const taken = Math.max(0, input.takenBefore);
+  const requested = Math.max(0, input.requestedDays);
+
+  const availableBase = Math.max(0, base - taken);
+  const availableSeniority = Math.max(0, sen - Math.max(0, taken - base));
+
+  const usedBase = Math.min(requested, availableBase);
+  const usedSeniority = Math.min(requested - usedBase, availableSeniority);
+
+  const remainderBase = availableBase - usedBase;
+  const remainderSeniority = availableSeniority - usedSeniority;
+
+  return {
+    availableBase: round1(availableBase),
+    availableSeniority: round1(availableSeniority),
+    availableTotal: round1(availableBase + availableSeniority),
+    usedBase: round1(usedBase),
+    usedSeniority: round1(usedSeniority),
+    remainderBase: round1(remainderBase),
+    remainderSeniority: round1(remainderSeniority),
+    remainderTotal: round1(remainderBase + remainderSeniority),
+    excessDays: round1(requested - usedBase - usedSeniority),
+  };
+}
+
+/**
+ * Applique `consumedDays` (rattrapages déjà pris/en attente) sur un reliquat
+ * base+ancienneté : la base est consommée en premier, comme partout ailleurs.
+ */
+export function applyConsumedToRemainder(
+  remainderBase: number,
+  remainderSeniority: number,
+  consumedDays: number,
+): { base: number; seniority: number; total: number } {
+  const fromBase = Math.min(Math.max(0, consumedDays), remainderBase);
+  const fromSen = Math.min(
+    Math.max(0, consumedDays) - fromBase,
+    remainderSeniority,
+  );
+  const base = round1(remainderBase - fromBase);
+  const seniority = round1(remainderSeniority - fromSen);
+  return { base, seniority, total: round1(base + seniority) };
+}
+
+/**
+ * Nombre de jours à INDEMNISER pour un congé annuel planifié : le droit
+ * COMPLET du cycle (26j + jours d'ancienneté), quel que soit le nombre de
+ * jours réellement pris (les jours restants ne sont que du repos).
+ *
+ * ⚠️ Ne jamais copier tel quel `LeaveBalance.annualEntitled` : la ligne de
+ * solde du cycle qui s'ouvre (ex: cycle du 10/10 consulté le 02/11) s'accumule
+ * mois par mois et vaut ~0 au début — copier ce 0 faisait tomber l'indemnité
+ * à 0 F et disparaître la ligne du bulletin. On prend donc toujours le plus
+ * grand entre ce qui est inscrit au solde et le droit plein 26j + ancienneté.
+ */
+export function fullCycleIndemnityDays(
+  entitled: unknown,
+  seniorityDays?: unknown,
+): number {
+  const e = Number(entitled ?? 0);
+  const s = Math.max(0, Number(seniorityDays ?? 0) || 0);
+  return Math.max(Number.isFinite(e) ? e : 0, CONGO_LEAVE.ANNUAL_DAYS + s);
+}
+
+// ============================================================================
+// 🎫 ÉLIGIBILITÉ AUX CONGÉS PAR TYPE DE CONTRAT
+// - STAGE : jamais de congé.
+// - PRESTATAIRE / CONSULTANT (travailleurs BNC) : seulement si l'entreprise
+//   l'a activé dans ses paramètres (Company.leaveAppliesToContractors).
+// Un salarié inéligible n'apparaît NULLE PART côté congé : ni notification,
+// ni solde, ni planning, ni provision/indemnité.
+// ============================================================================
+export const LEAVE_NEVER_ELIGIBLE_CONTRACTS = ['STAGE'];
+export const LEAVE_CONTRACTOR_CONTRACTS = ['PRESTATAIRE', 'CONSULTANT'];
+
+export function isLeaveEligibleContract(
+  contractType: string | null | undefined,
+  contractorsEligible: boolean,
+): boolean {
+  if (!contractType) return true;
+  if (LEAVE_NEVER_ELIGIBLE_CONTRACTS.includes(contractType)) return false;
+  if (LEAVE_CONTRACTOR_CONTRACTS.includes(contractType))
+    return contractorsEligible;
+  return true;
+}
+
+/**
+ * Filtre Prisma (EmployeeWhereInput) réutilisable dans n'importe quelle
+ * requête d'employés — y compris en relation (`where: { employee: filter }`)
+ * — et valable multi-entreprises : le réglage est lu sur la company de
+ * chaque employé.
+ */
+export function leaveEligibleEmployeeFilter(): any {
+  return {
+    contractType: { notIn: LEAVE_NEVER_ELIGIBLE_CONTRACTS },
+    NOT: {
+      contractType: { in: LEAVE_CONTRACTOR_CONTRACTS },
+      company: { leaveAppliesToContractors: false },
+    },
+  };
+}

@@ -1,0 +1,582 @@
+// ============================================================================
+// 📁 chat/chat.service.ts
+// ----------------------------------------------------------------------------
+// Règles de sécurité appliquées ICI (pas seulement dans le contrôleur) :
+//   1. L'identité (id, rôle, companyId) vient du JWT. Jamais du client.
+//   2. Toute lecture/écriture de conversation passe par assertMember() :
+//      il faut être participant ET que la conversation soit de TA entreprise.
+//      Sinon → 404 (pas 403) : on ne révèle même pas l'existence d'un id.
+//   3. Aucun accès "admin" aux conversations des autres : un admin ne lit que
+//      les siennes, comme tout le monde.
+//   4. Chaque envoi re-vérifie la politique de contact (canMessage).
+//   5. Corps chiffré au repos (AES-256-GCM, AAD = conversationId).
+// ============================================================================
+import {
+  BadRequestException,
+  ForbiddenException,
+  HttpException,
+  Inject,
+  Injectable,
+  Logger,
+  NotFoundException,
+  Optional,
+  ServiceUnavailableException,
+} from '@nestjs/common';
+import { Prisma } from '@prisma/client';
+// ⚠️ ADAPTER le chemin si besoin
+import { PrismaService } from '../prisma/prisma.service';
+import { decryptChatText, encryptChatText, isChatCryptoReady } from './chat-crypto';
+import { ChatPolicyService, CONTACT_SELECT, toContactDto } from './chat-policy.service';
+import { ChatSignalService } from './chat-signal.service';
+import {
+  ChatActor,
+  ChatContactDto,
+  ChatConversationDto,
+  ChatMessageDto,
+  ChatPeerDto,
+  ChatPollDto,
+  ChatReceiptStatus,
+  MAX_BODY_LENGTH,
+} from './chat.types';
+
+export const CHAT_PUSH_SENDER = Symbol('CHAT_PUSH_SENDER');
+
+export interface ChatPushPayload {
+  title: string;
+  body: string;
+  url: string;
+  tag: string;
+}
+/** Adaptateur vers TON service de push existant — branché dans chat.module.ts */
+export interface ChatPushSender {
+  send(userId: string, payload: ChatPushPayload): Promise<unknown>;
+}
+
+const PREVIEW_LENGTH = 80;
+
+/** Accusés de l'autre personne. `deliveredAt` = max(reçu, lu) : un message lu a forcément été reçu. */
+function toPeer(p: { lastReadAt: Date | null; lastDeliveredAt: Date | null } | undefined): ChatPeerDto {
+  const read = p?.lastReadAt ?? null;
+  const del = p?.lastDeliveredAt ?? null;
+  const delivered = read && (!del || read > del) ? read : del;
+  return { deliveredAt: delivered?.toISOString() ?? null, readAt: read?.toISOString() ?? null };
+}
+
+function statusFor(createdAt: Date | null, peer: ChatPeerDto): ChatReceiptStatus {
+  if (!createdAt) return 'sent';
+  const t = createdAt.getTime();
+  if (peer.readAt && Date.parse(peer.readAt) >= t) return 'read';
+  if (peer.deliveredAt && Date.parse(peer.deliveredAt) >= t) return 'delivered';
+  return 'sent';
+}
+
+@Injectable()
+export class ChatService {
+  private readonly logger = new Logger(ChatService.name);
+
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly policy: ChatPolicyService,
+    private readonly signals: ChatSignalService,
+    @Optional() @Inject(CHAT_PUSH_SENDER) private readonly push?: ChatPushSender,
+  ) {
+    if (!isChatCryptoReady()) {
+      this.logger.error(
+        'CHAT_ENCRYPTION_KEY absente ou invalide : la messagerie est DÉSACTIVÉE (503) tant que la clé n’est pas définie.',
+      );
+    }
+  }
+
+  // ─── Contacts ──────────────────────────────────────────────────────────────
+  contacts(actor: ChatActor, q: string | undefined, limit = 30): Promise<ChatContactDto[]> {
+    this.assertReady();
+    return this.policy.listContacts(actor, q, limit);
+  }
+
+  // ─── Ouvrir (ou retrouver) une conversation ───────────────────────────────
+  async openConversation(actor: ChatActor, targetUserId: string) {
+    this.assertReady();
+    if (!this.signals.hit(`open:${actor.id}`, 20, 60_000)) this.tooMany();
+    if (targetUserId === actor.id) throw new BadRequestException('Conversation avec soi-même impossible.');
+
+    if (!(await this.policy.canMessage(actor, targetUserId))) {
+      // même réponse que "introuvable" : pas d'énumération des utilisateurs
+      throw new NotFoundException('Contact introuvable.');
+    }
+
+    const [a, b] = [actor.id, targetUserId].sort();
+    const directKey = `${a}:${b}`;
+
+    let conv = await this.prisma.chatConversation.findUnique({
+      where: { directKey },
+      select: { id: true, companyId: true },
+    });
+    if (!conv) {
+      try {
+        conv = await this.prisma.chatConversation.create({
+          data: {
+            companyId: actor.companyId,
+            directKey,
+            participants: { create: [{ userId: actor.id }, { userId: targetUserId }] },
+          },
+          select: { id: true, companyId: true },
+        });
+      } catch (e) {
+        // course : l'autre personne a ouvert la même conversation au même instant
+        if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
+          conv = await this.prisma.chatConversation.findUnique({
+            where: { directKey },
+            select: { id: true, companyId: true },
+          });
+        } else throw e;
+      }
+    }
+    if (!conv || conv.companyId !== actor.companyId) throw new NotFoundException('Conversation introuvable.');
+
+    const other = await this.prisma.user.findUnique({ where: { id: targetUserId }, select: CONTACT_SELECT });
+    if (!other) throw new NotFoundException('Contact introuvable.');
+    return { id: conv.id, other: toContactDto(other) };
+  }
+
+  // ─── Liste des conversations (uniquement celles qui contiennent des messages) ─
+  async listConversations(actor: ChatActor): Promise<ChatConversationDto[]> {
+    this.assertReady();
+    const rows = await this.prisma.chatParticipant.findMany({
+      where: {
+        userId: actor.id,
+        conversation: { companyId: actor.companyId, lastMessageAt: { not: null } },
+      },
+      orderBy: { conversation: { lastMessageAt: 'desc' } },
+      take: 100,
+      select: {
+        unreadCount: true,
+        conversation: {
+          select: {
+            id: true,
+            lastMessageAt: true,
+            lastPreviewEnc: true,
+            lastSenderId: true,
+            participants: {
+              where: { userId: { not: actor.id } },
+              select: { lastReadAt: true, lastDeliveredAt: true, user: { select: CONTACT_SELECT } },
+            },
+          },
+        },
+      },
+    });
+
+    const out: ChatConversationDto[] = [];
+    for (const r of rows) {
+      const c = r.conversation;
+      const otherUser = c.participants[0]?.user;
+      if (!otherUser) continue;
+      const fromMe = c.lastSenderId === actor.id;
+      out.push({
+        id: c.id,
+        other: toContactDto(otherUser),
+        lastMessageAt: c.lastMessageAt?.toISOString() ?? null,
+        lastPreview: c.lastPreviewEnc ? decryptChatText(c.lastPreviewEnc, c.id) : null,
+        lastFromMe: fromMe,
+        ...(fromMe ? { lastStatus: statusFor(c.lastMessageAt, toPeer(c.participants[0])) } : {}),
+        unreadCount: r.unreadCount,
+      });
+    }
+    return out;
+  }
+
+  /**
+   * 📬 Boîte de réception PORTEFEUILLE : conversations de TOUTES les entreprises de l admin
+   * (indépendamment de l entreprise active). Vide pour un compte mono-entreprise.
+   */
+  async listPortfolioConversations(actor: ChatActor): Promise<ChatConversationDto[]> {
+    this.assertReady();
+    const companyIds = await this.policy.companyScope(actor);
+    if (companyIds.length < 2) return [];
+    const rows = await this.prisma.chatParticipant.findMany({
+      where: {
+        userId: actor.id,
+        conversation: { companyId: { in: companyIds }, lastMessageAt: { not: null } },
+      },
+      orderBy: { conversation: { lastMessageAt: 'desc' } },
+      take: 200,
+      select: {
+        unreadCount: true,
+        conversation: {
+          select: {
+            id: true,
+            companyId: true,
+            company: { select: { legalName: true } },
+            lastMessageAt: true,
+            lastPreviewEnc: true,
+            lastSenderId: true,
+            participants: {
+              where: { userId: { not: actor.id } },
+              select: { lastReadAt: true, lastDeliveredAt: true, user: { select: CONTACT_SELECT } },
+            },
+          },
+        },
+      },
+    });
+
+    const out: ChatConversationDto[] = [];
+    for (const r of rows) {
+      const c = r.conversation;
+      const otherUser = c.participants[0]?.user;
+      if (!otherUser) continue;
+      const fromMe = c.lastSenderId === actor.id;
+      out.push({
+        id: c.id,
+        other: toContactDto(otherUser),
+        lastMessageAt: c.lastMessageAt?.toISOString() ?? null,
+        lastPreview: c.lastPreviewEnc ? decryptChatText(c.lastPreviewEnc, c.id) : null,
+        lastFromMe: fromMe,
+        ...(fromMe ? { lastStatus: statusFor(c.lastMessageAt, toPeer(c.participants[0])) } : {}),
+        unreadCount: r.unreadCount,
+        companyId: c.companyId,
+        companyName: c.company?.legalName ?? '',
+      });
+    }
+    return out;
+  }
+
+  // ─── Messages (historique par pages OU delta depuis un curseur) ───────────
+  async getMessages(
+    actor: ChatActor,
+    conversationId: string,
+    opts: { before?: number; after?: number; limit?: number },
+    portfolio = false,
+  ): Promise<{ messages: ChatMessageDto[]; hasMore: boolean; peer: ChatPeerDto }> {
+    this.assertReady();
+    const { otherId, peer } = await this.assertMemberWithPeer(actor, conversationId, portfolio);
+    // Je viens de récupérer les messages (ouverture ou delta) : ils sont « reçus » pour l'expéditeur.
+    // (pas pour l'historique plus ancien `before`, qui ne change rien à ce qu'il a déjà reçu)
+    if (opts.before === undefined) await this.markDelivered(actor, conversationId, otherId);
+    const limit = Math.min(Math.max(opts.limit ?? 30, 1), 100);
+
+    const select = { id: true, seq: true, senderId: true, bodyEnc: true, createdAt: true } as const;
+    const toDto = (m: { id: string; seq: bigint; senderId: string; bodyEnc: string; createdAt: Date }): ChatMessageDto => ({
+      id: m.id,
+      seq: Number(m.seq),
+      mine: m.senderId === actor.id,
+      body: decryptChatText(m.bodyEnc, conversationId),
+      createdAt: m.createdAt.toISOString(),
+    });
+
+    // Delta : tout ce qui est plus récent que le dernier message connu du client
+    if (opts.after !== undefined) {
+      const rows = await this.prisma.chatMessage.findMany({
+        where: { conversationId, seq: { gt: BigInt(opts.after) } },
+        orderBy: { seq: 'asc' },
+        take: limit,
+        select,
+      });
+      return { messages: rows.map(toDto), hasMore: rows.length === limit, peer };
+    }
+
+    // Historique : les N derniers (ou les N précédant `before`)
+    const rows = await this.prisma.chatMessage.findMany({
+      where: { conversationId, ...(opts.before !== undefined ? { seq: { lt: BigInt(opts.before) } } : {}) },
+      orderBy: { seq: 'desc' },
+      take: limit + 1,
+      select,
+    });
+    const hasMore = rows.length > limit;
+    return { messages: rows.slice(0, limit).reverse().map(toDto), hasMore, peer };
+  }
+
+  // ─── Envoi ─────────────────────────────────────────────────────────────────
+  async send(actor: ChatActor, conversationId: string, rawBody: string, clientId?: string, portfolio = false): Promise<ChatMessageDto> {
+    this.assertReady();
+    if (!this.signals.hit(`send:${actor.id}`, 30, 60_000)) this.tooMany();
+
+    const body = this.cleanBody(rawBody);
+    const recipientId = await this.assertMember(actor, conversationId, portfolio);
+
+    // Idempotence : renvoi réseau du même message → on renvoie l'existant
+    if (clientId) {
+      const existing = await this.prisma.chatMessage.findUnique({
+        where: { senderId_clientId: { senderId: actor.id, clientId } },
+        select: { id: true, seq: true, createdAt: true },
+      });
+      if (existing) {
+        return { id: existing.id, seq: Number(existing.seq), mine: true, body, createdAt: existing.createdAt.toISOString() };
+      }
+    }
+
+    // Le contexte de la règle de contact = l entreprise de LA CONVERSATION. Un admin multi-entreprises
+    // (portefeuille) a un seul users.companyId = entreprise ACTIVE : sans ça, l employé de l entreprise A
+    // ne pouvait plus lui écrire dès qu il avait basculé sur B.
+    const convCompanyId = await this.conversationCompanyId(conversationId, actor.companyId);
+    if (!(await this.policy.canMessage({ ...actor, companyId: convCompanyId }, recipientId))) {
+      throw new ForbiddenException({
+        statusCode: 403,
+        code: 'CHAT_PEER_UNAVAILABLE',
+        message: 'Vous ne pouvez plus écrire à cette personne.',
+      });
+    }
+
+    const now = new Date();
+    const preview = body.replace(/\s+/g, ' ').slice(0, PREVIEW_LENGTH);
+
+    let created: { id: string; seq: bigint };
+    try {
+      const [msg] = await this.prisma.$transaction([
+        this.prisma.chatMessage.create({
+          data: {
+            conversationId,
+            senderId: actor.id,
+            bodyEnc: encryptChatText(body, conversationId),
+            clientId: clientId ?? null,
+            createdAt: now,
+          },
+          select: { id: true, seq: true },
+        }),
+        this.prisma.chatConversation.update({
+          where: { id: conversationId },
+          data: {
+            lastMessageAt: now,
+            lastPreviewEnc: encryptChatText(preview, conversationId),
+            lastSenderId: actor.id,
+          },
+        }),
+        this.prisma.chatParticipant.updateMany({
+          where: { conversationId, userId: recipientId },
+          data: { unreadCount: { increment: 1 } },
+        }),
+        this.prisma.chatParticipant.updateMany({
+          where: { conversationId, userId: actor.id },
+          data: { unreadCount: 0, lastReadAt: now, lastDeliveredAt: now },
+        }),
+      ]);
+      created = msg;
+    } catch (e) {
+      if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002' && clientId) {
+        const dup = await this.prisma.chatMessage.findUnique({
+          where: { senderId_clientId: { senderId: actor.id, clientId } },
+          select: { id: true, seq: true, createdAt: true },
+        });
+        if (dup) return { id: dup.id, seq: Number(dup.seq), mine: true, body, createdAt: dup.createdAt.toISOString() };
+      }
+      throw e;
+    }
+
+    // Signal "il y a du nouveau" pour le DESTINATAIRE uniquement (zéro coût DB côté lecture).
+    // L'expéditeur n'est volontairement pas notifié : son écran est déjà à jour (envoi optimiste),
+    // ce qui lui évite 3 requêtes inutiles (poll + liste + delta) à chaque message envoyé.
+    this.signals.bump(recipientId);
+
+    // Push hors application — jamais bloquant, jamais d'erreur remontée à l'expéditeur
+    void this.pushToRecipient(actor, recipientId, conversationId, preview);
+
+    return { id: created.id, seq: Number(created.seq), mine: true, body, createdAt: now.toISOString() };
+  }
+
+  // ─── Marquer comme lu ──────────────────────────────────────────────────────
+  async markRead(actor: ChatActor, conversationId: string, portfolio = false): Promise<{ ok: true }> {
+    this.assertReady();
+    const otherId = await this.assertMember(actor, conversationId, portfolio);
+    const now = new Date();
+    const res = await this.prisma.chatParticipant.updateMany({
+      where: { conversationId, userId: actor.id, unreadCount: { gt: 0 } },
+      data: { unreadCount: 0, lastReadAt: now, lastDeliveredAt: now },
+    });
+    if (res.count > 0) {
+      this.signals.bump(actor.id); // synchronise le badge des autres onglets
+      this.signals.bump(otherId); // l'expéditeur voit passer son message en « lu »
+    }
+    return { ok: true };
+  }
+
+  // ─── Poll : le cœur de l'optimisation ─────────────────────────────────────
+  async poll(actor: ChatActor, clientVersion: string | undefined, sinceIso: string | undefined): Promise<ChatPollDto> {
+    if (!this.signals.hit(`poll:${actor.id}`, 120, 60_000)) this.tooMany();
+    this.signals.touch(actor.id);
+
+    const v = this.signals.version(actor.id);
+    const serverTime = new Date().toISOString();
+    if (clientVersion && clientVersion === v) return { v, changed: false, serverTime };
+
+    this.assertReady();
+    const sinceMs = sinceIso ? Date.parse(sinceIso) : NaN;
+    const since = Number.isFinite(sinceMs) ? new Date(sinceMs - 1000) : null; // marge d'1 s
+
+    // Du nouveau pour moi : tout message en attente est désormais « reçu » (app ouverte, même sur une autre page).
+    // Sans attendre : ça ne doit jamais ralentir la réponse du poll.
+    void this.deliverPending(actor).catch((e) => this.logger.warn(`Accusés de réception : ${(e as Error).message}`));
+
+    const [agg, rows, receipts] = await Promise.all([
+      this.prisma.chatParticipant.aggregate({
+        where: { userId: actor.id, conversation: { companyId: actor.companyId } },
+        _sum: { unreadCount: true },
+      }),
+      since
+        ? this.prisma.chatParticipant.findMany({
+            where: {
+              userId: actor.id,
+              conversation: { companyId: actor.companyId, lastMessageAt: { gt: since } },
+            },
+            select: { conversationId: true, unreadCount: true },
+            take: 50,
+          })
+        : Promise.resolve([] as { conversationId: string; unreadCount: number }[]),
+      since ? this.receiptsSince(actor, since) : Promise.resolve([]),
+    ]);
+
+    return {
+      v,
+      changed: true,
+      serverTime,
+      unreadTotal: agg._sum.unreadCount ?? 0,
+      conversations: rows.map((r) => ({ id: r.conversationId, unreadCount: r.unreadCount })),
+      receipts,
+    };
+  }
+
+  away(actor: ChatActor): { ok: true } {
+    this.signals.away(actor.id);
+    return { ok: true };
+  }
+
+  // ─── Internes ──────────────────────────────────────────────────────────────
+  /** Vérifie l'appartenance + l'entreprise. Retourne l'id de l'AUTRE participant. */
+  private async assertMember(actor: ChatActor, conversationId: string, portfolio = false): Promise<string> {
+    return (await this.assertMemberWithPeer(actor, conversationId, portfolio)).otherId;
+  }
+
+  /** Entreprise de la conversation (déjà vérifiée par assertMember). */
+  private async conversationCompanyId(conversationId: string, fallback: string): Promise<string> {
+    const c = await this.prisma.chatConversation.findUnique({ where: { id: conversationId }, select: { companyId: true } });
+    return c?.companyId ?? fallback;
+  }
+
+  /** Comme assertMember, + les accusés (reçu / lu) de l'autre personne. */
+  private async assertMemberWithPeer(
+    actor: ChatActor,
+    conversationId: string,
+    portfolio = false,
+  ): Promise<{ otherId: string; peer: ChatPeerDto }> {
+    const part = await this.prisma.chatParticipant.findUnique({
+      where: { conversationId_userId: { conversationId, userId: actor.id } },
+      select: {
+        conversation: {
+          select: {
+            companyId: true,
+            participants: {
+              where: { userId: { not: actor.id } },
+              select: { userId: true, lastReadAt: true, lastDeliveredAt: true },
+            },
+          },
+        },
+      },
+    });
+    const other = part?.conversation.participants[0];
+    const companyOk = part
+      ? portfolio
+        ? (await this.policy.companyScope(actor)).includes(part.conversation.companyId)
+        : part.conversation.companyId === actor.companyId
+      : false;
+    if (!part || !companyOk || !other) {
+      throw new NotFoundException('Conversation introuvable.');
+    }
+    return { otherId: other.userId, peer: toPeer(other) };
+  }
+
+  // ─── Accusés de réception ──────────────────────────────────────────────────
+  /** Je viens de récupérer les messages d'UNE conversation → « reçu » pour l'expéditeur. */
+  private async markDelivered(actor: ChatActor, conversationId: string, otherId: string) {
+    const res = await this.prisma.chatParticipant.updateMany({
+      where: { conversationId, userId: actor.id, unreadCount: { gt: 0 } },
+      data: { lastDeliveredAt: new Date() },
+    });
+    if (res.count > 0) this.signals.bump(otherId);
+  }
+
+  /**
+   * Mon app est ouverte et il y a du nouveau : tous mes messages en attente sont « reçus ».
+   * Une seule requête SQL ; ne touche que les lignes qui changent réellement.
+   */
+  private async deliverPending(actor: ChatActor) {
+    const now = new Date();
+    const rows = await this.prisma.$queryRaw<{ conversationId: string }[]>(Prisma.sql`
+      UPDATE "chat_participants" cp
+         SET "lastDeliveredAt" = ${now}::timestamptz
+        FROM "chat_conversations" c
+       WHERE cp."conversationId" = c."id"
+         AND cp."userId" = ${actor.id}::uuid
+         AND c."companyId" = ${actor.companyId}::uuid
+         AND cp."unreadCount" > 0
+         AND c."lastMessageAt" IS NOT NULL
+         AND (cp."lastDeliveredAt" IS NULL OR cp."lastDeliveredAt" < c."lastMessageAt")
+      RETURNING cp."conversationId"`);
+    if (rows.length === 0) return;
+    const others = await this.prisma.chatParticipant.findMany({
+      where: { conversationId: { in: rows.map((r) => r.conversationId) }, userId: { not: actor.id } },
+      select: { userId: true },
+    });
+    for (const uid of new Set(others.map((o) => o.userId))) this.signals.bump(uid);
+  }
+
+  /** Accusés modifiés depuis `since`, pour mes conversations récentes (2 requêtes indexées, jamais de scan de table). */
+  private async receiptsSince(actor: ChatActor, since: Date) {
+    const mine = await this.prisma.chatParticipant.findMany({
+      where: {
+        userId: actor.id,
+        conversation: { companyId: actor.companyId, lastMessageAt: { gt: new Date(Date.now() - 14 * 86_400_000) } },
+      },
+      select: { conversationId: true },
+      take: 100,
+    });
+    if (mine.length === 0) return [];
+    const peers = await this.prisma.chatParticipant.findMany({
+      where: {
+        conversationId: { in: mine.map((m) => m.conversationId) },
+        userId: { not: actor.id },
+        OR: [{ lastReadAt: { gt: since } }, { lastDeliveredAt: { gt: since } }],
+      },
+      select: { conversationId: true, lastReadAt: true, lastDeliveredAt: true },
+      take: 50,
+    });
+    return peers.map((p) => ({ conversationId: p.conversationId, ...toPeer(p) }));
+  }
+
+  private cleanBody(raw: string): string {
+    // retire les caractères de contrôle (sauf \n et \t), normalise les retours à la ligne
+    const body = String(raw ?? '')
+      .replace(/\r\n?/g, '\n')
+      // eslint-disable-next-line no-control-regex
+      .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '')
+      .trim();
+    if (!body) throw new BadRequestException('Message vide.');
+    if (body.length > MAX_BODY_LENGTH) throw new BadRequestException(`Message trop long (max ${MAX_BODY_LENGTH} caractères).`);
+    return body;
+  }
+
+  private assertReady() {
+    if (!isChatCryptoReady()) throw new ServiceUnavailableException('Messagerie momentanément indisponible.');
+  }
+
+  private tooMany(): never {
+    throw new HttpException('Trop de requêtes, ralentissez un instant.', 429);
+  }
+
+  private async pushToRecipient(sender: ChatActor, recipientId: string, conversationId: string, preview: string) {
+    try {
+      if (!this.push) return;
+      if (!this.signals.shouldPush(recipientId, conversationId)) return;
+
+      const s = await this.prisma.user.findUnique({
+        where: { id: sender.id },
+        select: { firstName: true, lastName: true },
+      });
+      const showPreview = process.env.CHAT_PUSH_PREVIEW !== 'false';
+      await this.push.send(recipientId, {
+        title: s ? `${s.firstName} ${s.lastName}`.trim() : 'Nouveau message',
+        body: showPreview ? preview : 'Vous avez reçu un nouveau message',
+        url: `/messages?c=${conversationId}`,
+        tag: `chat-${conversationId}`,
+      });
+    } catch (e) {
+      this.logger.warn(`Push chat non envoyé : ${(e as Error).message}`);
+    }
+  }
+}

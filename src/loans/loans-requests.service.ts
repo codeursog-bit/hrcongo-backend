@@ -1,0 +1,589 @@
+// ============================================================================
+// 📁 loans-requests.service.ts
+// ✅ Cycle de vie des demandes : création (SANS restriction de montant —
+//    plus de plafond SMIC/ratio/durée, demande explicite), listing, édition,
+//    suppression, annulation. Ne contient PAS la logique de décision
+//    (→ loans-decision.service.ts) ni le remboursement
+//    (→ loans-repayment.service.ts).
+// ============================================================================
+
+import { Injectable, NotFoundException, BadRequestException, ForbiddenException, Logger } from '@nestjs/common';
+import { PrismaService } from '../prisma/prisma.service';
+import { CreateLoanDto } from './dto/create-loan.dto';
+import { CreateAdvanceDto } from './dto/create-advance.dto';
+import { UpdateLoanDto } from './dto/update-loan.dto';
+import { UpdateAdvanceDto } from './dto/update-advance.dto';
+import { SubscriptionGuard } from '../subscriptions/guards/subscription.guard';
+import { NotificationsService } from '../notifications/notifications.service';
+import { NotificationType } from '@prisma/client';
+import { LoansCommonService } from './loans-common.service';
+// ✅ LOT B — avis demandé aux titulaires de fonctions (aucun effet sans circuit actif)
+import { ApprovalNotifierService } from '../approvals/core/approval-notifier.service';
+import { FULL_ADMIN_ROLES, DRH_ROLES, FINANCE_ROLES } from './loans.constants';
+
+@Injectable()
+export class LoansRequestsService {
+  private readonly logger = new Logger(LoansRequestsService.name);
+
+  constructor(
+    private prisma: PrismaService,
+    private common: LoansCommonService,
+    private subscriptionGuard: SubscriptionGuard,
+    private notificationsService: NotificationsService,
+    private approvalNotifier: ApprovalNotifierService,
+  ) {}
+
+  // ============================================================================
+  // 💳 PRÊTS (argent / marchandise / autre)
+  // ============================================================================
+
+  async createLoan(data: CreateLoanDto, userId: string, overrideCompanyId?: string) {
+    const user = await this.common.getVerifiedUser(userId);
+    this.common.applyCompanyOverride(user, overrideCompanyId);
+    await this.subscriptionGuard.assertActionAllowed(user.companyId, user.role);
+    await this.subscriptionGuard.checkFeatureAccess(user.companyId, 'hasLoansAndAdvances');
+
+    const { employee, isOnBehalf } = await this.common.resolveTargetEmployee(data.employeeId, user);
+
+    // ── Workflow (validation PARALLÈLE) ─────────────────────────────────────
+    // - Employé (self-service, si l'app lui est ouverte) → PENDING, la demande
+    //   part en même temps vers DRH_ROLES (ADMIN/SUPER_ADMIN/HR_MANAGER) ;
+    //   le premier présent tranche, plus de circuit séquentiel.
+    // - ADMIN / SUPER_ADMIN / HR_MANAGER qui crée pour un employé → cette
+    //   personne EST déjà une autorité de décision valide (elle est présente
+    //   et signe l'opération) → prêt directement ACTIVE, les deux cases de
+    //   la fiche imprimable (DRH/DG) sont cochées avec sa décision.
+    const autoApprove = isOnBehalf && DRH_ROLES.includes(user.role);
+    const status = autoApprove ? 'ACTIVE' : 'PENDING';
+
+    const loan = await this.prisma.loan.create({
+      data: {
+        employeeId: employee.id,
+        type: data.type ?? 'ARGENT',
+        nature: data.nature,
+        attachmentUrl: data.attachmentUrl,
+        amount: data.amount,
+        monthlyRepayment: data.monthlyRepayment,
+        remainingBalance: data.amount,
+        startDate: new Date(data.startDate),
+        endDate: new Date(data.endDate),
+        status,
+        reason: data.reason,
+        requestedByUserId: userId,
+        drhDecision: autoApprove ? 'OUI' : undefined,
+        drhDecidedBy: autoApprove ? userId : undefined,
+        drhDecidedAt: autoApprove ? new Date() : undefined,
+        dgDecision: autoApprove ? 'OUI' : undefined,
+        dgDecidedBy: autoApprove ? userId : undefined,
+        dgDecidedAt: autoApprove ? new Date() : undefined,
+        decidedByRole: autoApprove ? (user.role === 'HR_MANAGER' ? 'DRH' : 'DG') : undefined,
+        recoverViaPayroll: autoApprove ? (data.recoverViaPayroll ?? true) : undefined,
+        approvedBy: autoApprove ? userId : undefined,
+        approvedAt: autoApprove ? new Date() : undefined,
+      },
+    });
+
+    this.logger.log(`📝 ${autoApprove ? 'Prêt créé et finalisé directement' : 'Demande de prêt créée'} : ${data.amount.toLocaleString()} FCFA (${loan.status})`);
+
+    if (!autoApprove) {
+      // Parallèle : tout le groupe habilité à décider est notifié en même temps.
+      await this.notificationsService.createForGroup(employee.companyId, DRH_ROLES, {
+        type: 'LOAN_REQUEST' as NotificationType,
+        title: '💳 Nouvelle demande de prêt',
+        message: `${employee.firstName} ${employee.lastName} demande un prêt (${(data.type ?? 'ARGENT').toLowerCase()}) de ${data.amount.toLocaleString()} FCFA`,
+        link: '/loans',
+        metadata: { loanId: loan.id, employeeId: employee.id },
+      });
+      // ✅ LOT B — si un circuit d'avis est actif, les titulaires de fonctions sont aussi prévenus.
+      void this.approvalNotifier.notifyOpinionRequested({
+        companyId: employee.companyId,
+        type: 'LOAN',
+        requestId: loan.id,
+        employeeName: `${employee.firstName} ${employee.lastName}`,
+        amount: Number(data.amount),
+      });
+    }
+
+    return loan;
+  }
+
+  async findAllLoans(userId: string, status?: string) {
+    const user = await this.common.getVerifiedUser(userId);
+    this.common.requireFinanceAccess(user.role);
+
+    const whereClause: any = { employee: { companyId: user.companyId } };
+    if (status) whereClause.status = status;
+
+    return this.prisma.loan.findMany({
+      where: whereClause,
+      include: {
+        employee: { select: this.common.employeeSelect },
+        // ✅ Sans ça, le frontend (Suivi des dettes, Relevé, Vue d'ensemble)
+        // ne peut jamais calculer "remboursé ce mois-ci" — repaymentLogs
+        // restait toujours vide côté client, donc le total tombait à 0 peu
+        // importe les vrais remboursements en base.
+        repaymentLogs: { orderBy: [{ year: 'desc' }, { month: 'desc' }] },
+        amendments: { orderBy: { createdAt: 'desc' } },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+  }
+
+  async findMyLoans(userId: string) {
+    const user = await this.common.getVerifiedUser(userId);
+    const employee = await this.prisma.employee.findFirst({ where: { email: user.email ?? undefined, companyId: user.companyId } });
+    if (!employee) throw new NotFoundException("Aucun dossier employé associé à ce compte.");
+
+    return this.prisma.loan.findMany({
+      where: { employeeId: employee.id },
+      include: {
+        repaymentLogs: { orderBy: [{ year: 'desc' }, { month: 'desc' }] },
+        amendments: { orderBy: { createdAt: 'desc' } },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+  }
+
+  async findOneLoan(id: string, userId: string, overrideCompanyId?: string) {
+    const user = await this.common.getVerifiedUser(userId);
+    this.common.applyCompanyOverride(user, overrideCompanyId);
+    const loan = await this.prisma.loan.findUnique({
+      where: { id },
+      include: {
+        employee: { select: { ...this.common.employeeSelect, hireDate: true } },
+        repaymentLogs: { orderBy: [{ year: 'desc' }, { month: 'desc' }] },
+        amendments: { orderBy: { createdAt: 'desc' } },
+      },
+    });
+    if (!loan) throw new NotFoundException('Prêt introuvable');
+
+    const empCompany = await this.prisma.employee.findUnique({ where: { id: loan.employeeId }, select: { companyId: true } });
+    if (empCompany?.companyId !== user.companyId) throw new ForbiddenException('Accès refusé');
+    if (!FINANCE_ROLES.includes(user.role)) {
+      const selfEmployee = await this.prisma.employee.findFirst({ where: { email: user.email ?? undefined, companyId: user.companyId } });
+      if (!selfEmployee || selfEmployee.id !== loan.employeeId) throw new ForbiddenException('Accès refusé');
+    }
+
+    const company = await this.prisma.company.findUnique({
+      where: { id: user.companyId },
+      select: { legalName: true, tradeName: true, logo: true, rccmNumber: true, taxNumber: true, address: true, phone: true },
+    });
+
+    return { ...loan, company };
+  }
+
+  /**
+   * Édition — l'ADMIN/SUPER_ADMIN peut modifier à tout moment (CRUD complet).
+   * Le HR_MANAGER ne peut modifier que tant qu'aucune décision n'a été prise.
+   */
+  async updateLoan(id: string, dto: UpdateLoanDto, userId: string, overrideCompanyId?: string) {
+    const user = await this.common.getVerifiedUser(userId);
+    this.common.applyCompanyOverride(user, overrideCompanyId);
+    this.common.requireFinanceAccess(user.role);
+    const loan = await this.common.getOwnedLoanOrThrow(id, user.companyId);
+
+    // Règle de protection (employé ET RH) : une demande n'est modifiable que
+    // tant qu'elle est en attente — dès qu'une décision est prise, le montant
+    // et les conditions sont figés, pour TOUS les rôles, admin compris.
+    if (!['PENDING', 'PENDING_DG'].includes(loan.status)) {
+      throw new BadRequestException('Ce prêt a déjà été traité : il ne peut plus être modifié. Seule une demande en attente peut l\u2019être.');
+    }
+
+    const oldAmount = Number(loan.amount);
+    const oldMonthly = Number(loan.monthlyRepayment);
+    const amountChanged = dto.amount !== undefined && dto.amount !== oldAmount;
+    const monthlyChanged = dto.monthlyRepayment !== undefined && dto.monthlyRepayment !== oldMonthly;
+
+    // ⚠️ Ne jamais écraser remainingBalance par le nouveau montant brut : ça
+    // effacerait les remboursements déjà enregistrés. On repart de ce qui a
+    // RÉELLEMENT été remboursé (somme des logs, ou écart amount - solde si
+    // plus grand) et on recalcule le solde : nouveau montant - déjà remboursé.
+    let remainingBalance: number | undefined = undefined;
+    let newStatus: 'ACTIVE' | 'PAID' | undefined = undefined;
+    if (amountChanged) {
+      const alreadyRepaid = await this.getAlreadyRepaid('loan', loan.id, loan.status, oldAmount, Number(loan.remainingBalance));
+      remainingBalance = Math.max(0, dto.amount! - alreadyRepaid);
+      // Ne recalculer le statut que si le prêt a déjà été décaissé (ACTIVE/PAID) —
+      // ne jamais faire passer un prêt encore PENDING/REJECTED à ACTIVE via une simple édition de montant.
+      if (['ACTIVE', 'PAID'].includes(loan.status)) {
+        newStatus = remainingBalance === 0 ? 'PAID' : 'ACTIVE';
+      }
+    }
+
+    // La mensualité ne peut jamais dépasser le montant retenu.
+    const effectiveAmount = dto.amount ?? oldAmount;
+    const monthlyRepayment = dto.monthlyRepayment !== undefined
+      ? Math.min(dto.monthlyRepayment, effectiveAmount)
+      : (amountChanged && oldMonthly > effectiveAmount ? effectiveAmount : undefined);
+
+    const traceChanged = amountChanged || monthlyChanged || (monthlyRepayment !== undefined && monthlyRepayment !== oldMonthly);
+
+    await this.prisma.loan.update({
+      where: { id },
+      data: {
+        amount: dto.amount,
+        monthlyRepayment,
+        remainingBalance,
+        status: newStatus,
+        startDate: dto.startDate ? new Date(dto.startDate) : undefined,
+        endDate: dto.endDate ? new Date(dto.endDate) : undefined,
+        reason: dto.reason,
+        nature: dto.nature,
+        attachmentUrl: dto.attachmentUrl,
+        // Valeur d'origine conservée UNE seule fois (1ʳᵉ modification).
+        ...(traceChanged
+          ? {
+              requestedAmount: loan.requestedAmount ?? loan.amount,
+              requestedMonthlyRepayment: loan.requestedMonthlyRepayment ?? loan.monthlyRepayment,
+              amountModifiedBy: userId,
+              amountModifiedAt: new Date(),
+            }
+          : {}),
+      },
+    });
+
+    if (traceChanged) {
+      await this.recordAmendment(user, {
+        loanId: id,
+        oldAmount, newAmount: dto.amount ?? oldAmount,
+        oldMonthlyRepayment: oldMonthly, newMonthlyRepayment: monthlyRepayment ?? oldMonthly,
+      });
+      await this.notifyRequesterOfChange(user, loan.requestedByUserId, 'prêt', oldAmount, dto.amount ?? oldAmount);
+    }
+
+    return this.prisma.loan.findUnique({ where: { id }, include: { amendments: { orderBy: { createdAt: 'desc' } } } });
+  }
+
+  // ── Traçabilité des modifications ─────────────────────────────────────────
+
+  /** Montant déjà remboursé — source de vérité : logs de remboursement (paie + espèces). */
+  private async getAlreadyRepaid(kind: 'loan' | 'advance', id: string, status: string, amount: number, storedRemaining: number): Promise<number> {
+    if (status === 'PENDING' || status === 'PENDING_DG') return 0;
+    const agg = kind === 'loan'
+      ? await this.prisma.loanRepaymentLog.aggregate({ where: { loanId: id }, _sum: { amount: true } })
+      : await this.prisma.advanceRepaymentLog.aggregate({ where: { advanceId: id }, _sum: { amount: true } });
+    const fromLogs = Number(agg._sum.amount ?? 0);
+    // Un solde stocké à 0 sur une avance APPROVED est une ancienne ligne (colonne ajoutée avec défaut 0) : on ne s'y fie pas.
+    const fromBalance = storedRemaining > 0 || ['PAID', 'DEDUCTED'].includes(status) ? Math.max(0, amount - storedRemaining) : 0;
+    return Math.min(amount, Math.max(fromLogs, fromBalance));
+  }
+
+  private async recordAmendment(
+    user: { id: string; role: string },
+    d: {
+      loanId?: string; advanceId?: string;
+      oldAmount?: number; newAmount?: number;
+      oldMonthlyRepayment?: number; newMonthlyRepayment?: number;
+      oldDeductMonth?: number; newDeductMonth?: number;
+      oldDeductYear?: number; newDeductYear?: number;
+    },
+  ) {
+    const u = await this.prisma.user.findUnique({ where: { id: user.id }, select: { firstName: true, lastName: true } });
+    await this.prisma.debtAmendment.create({
+      data: {
+        ...d,
+        modifiedBy: user.id,
+        modifiedByName: u ? `${u.firstName} ${u.lastName}`.trim() : null,
+        modifiedByRole: user.role,
+      },
+    });
+  }
+
+  /** Prévient le demandeur quand RH/Admin change le montant de SA demande. */
+  private async notifyRequesterOfChange(user: { id: string }, requesterUserId: string | null, label: string, oldAmount: number, newAmount: number) {
+    if (!requesterUserId || requesterUserId === user.id || oldAmount === newAmount) return;
+    try {
+      await this.notificationsService.create({
+        userId: requesterUserId,
+        type: 'LOAN_REQUEST' as NotificationType,
+        title: `✏️ Montant de votre ${label} modifié`,
+        message: `Le montant de votre ${label} a été ajusté par les RH : ${oldAmount.toLocaleString('fr-FR')} → ${newAmount.toLocaleString('fr-FR')} FCFA.`,
+        link: '/loans/mon-espace',
+        metadata: { oldAmount, newAmount },
+      });
+    } catch (e) {
+      this.logger.warn(`Notification de modification non envoyée : ${(e as Error).message}`);
+    }
+  }
+
+  /**
+   * Suppression — l'ADMIN/SUPER_ADMIN peut supprimer à tout moment (CRUD complet).
+   * Le HR_MANAGER est limité aux statuts qui n'ont jamais touché la paie
+   * (pour un prêt actif/soldé, utiliser `cancelLoan` à la place).
+   */
+  async deleteLoan(id: string, userId: string, overrideCompanyId?: string) {
+    const user = await this.common.getVerifiedUser(userId);
+    this.common.applyCompanyOverride(user, overrideCompanyId);
+    this.common.requireFinanceAccess(user.role);
+    const loan = await this.common.getOwnedLoanOrThrow(id, user.companyId);
+
+    if (!FULL_ADMIN_ROLES.includes(user.role) && !['PENDING', 'PENDING_DG', 'REJECTED', 'CANCELLED'].includes(loan.status)) {
+      throw new BadRequestException("Ce prêt est actif ou soldé — utilisez plutôt l'annulation pour préserver l'historique de paie, ou demandez à un administrateur.");
+    }
+
+    await this.prisma.loan.delete({ where: { id } });
+    return { success: true };
+  }
+
+  /**
+   * Annulation d'un prêt ACTIF — conserve l'historique de remboursement déjà effectué, arrête les futures déductions.
+   * ✅ RH/Admin : peuvent annuler à tout moment (comme avant).
+   * ✅ Employé : peut annuler UNIQUEMENT sa propre demande, et UNIQUEMENT
+   *    tant qu'elle est encore en attente (PENDING/PENDING_DG) — une fois
+   *    validée, seul RH/Admin peut agir dessus (pour ne pas fausser la paie).
+   */
+  async cancelLoan(id: string, userId: string, overrideCompanyId?: string) {
+    const user = await this.common.getVerifiedUser(userId);
+    this.common.applyCompanyOverride(user, overrideCompanyId);
+    const loan = await this.common.getOwnedLoanOrThrow(id, user.companyId);
+
+    const isFinance = FINANCE_ROLES.includes(user.role);
+    const isOwnerCancellingPending = loan.requestedByUserId === userId && ['PENDING', 'PENDING_DG'].includes(loan.status);
+
+    if (!isFinance && !isOwnerCancellingPending) {
+      throw new ForbiddenException(
+        loan.requestedByUserId === userId
+          ? 'Cette demande a déjà été traitée — seuls un administrateur ou les RH peuvent encore agir dessus.'
+          : "La gestion des prêts et avances est réservée à l'administration et aux RH.",
+      );
+    }
+    if (loan.status === 'PAID' && !FULL_ADMIN_ROLES.includes(user.role)) throw new BadRequestException('Ce prêt est déjà soldé');
+
+    return this.prisma.loan.update({ where: { id }, data: { status: 'CANCELLED' } });
+  }
+
+  /**
+   * 🔧 Bascule directe de statut — réservée ADMIN/SUPER_ADMIN. Permet de tout
+   * corriger/forcer manuellement (ex : entreprise sans employés sur l'app,
+   * ou correction d'une erreur de saisie), sans repasser par le circuit normal.
+   */
+  async forceLoanStatus(id: string, userId: string, status: string, recoverViaPayroll?: boolean, overrideCompanyId?: string) {
+    const user = await this.common.getVerifiedUser(userId);
+    this.common.applyCompanyOverride(user, overrideCompanyId);
+    if (!FULL_ADMIN_ROLES.includes(user.role)) throw new ForbiddenException('Réservé aux administrateurs');
+    await this.common.getOwnedLoanOrThrow(id, user.companyId);
+
+    return this.prisma.loan.update({
+      where: { id },
+      data: {
+        status: status as any,
+        recoverViaPayroll: recoverViaPayroll,
+        approvedBy: status === 'ACTIVE' ? userId : undefined,
+        approvedAt: status === 'ACTIVE' ? new Date() : undefined,
+      },
+    });
+  }
+
+  // ============================================================================
+  // 💵 AVANCES SUR SALAIRE
+  // ============================================================================
+
+  async createAdvance(data: CreateAdvanceDto, userId: string, overrideCompanyId?: string) {
+    const user = await this.common.getVerifiedUser(userId);
+    this.common.applyCompanyOverride(user, overrideCompanyId);
+    await this.subscriptionGuard.assertActionAllowed(user.companyId, user.role);
+    await this.subscriptionGuard.checkFeatureAccess(user.companyId, 'hasLoansAndAdvances');
+
+    const { employee, isOnBehalf } = await this.common.resolveTargetEmployee(data.employeeId, user);
+
+    // ADMIN/SUPER_ADMIN/HR_MANAGER qui crée pour un employé = déjà décidé (autorité RH complète sur les avances, un seul niveau).
+    const autoApprove = isOnBehalf && DRH_ROLES.includes(user.role);
+
+    const advance = await this.prisma.advance.create({
+      data: {
+        employeeId: employee.id,
+        amount: data.amount,
+        remainingBalance: data.amount,
+        month: data.month && data.month >= 1 && data.month <= 12 ? data.month : new Date().getMonth() + 1,
+        year: data.year ?? new Date().getFullYear(),
+        deductMonth: data.deductMonth,
+        deductYear: data.deductYear,
+        status: autoApprove ? 'APPROVED' : 'PENDING',
+        recoverViaPayroll: autoApprove ? (data.recoverViaPayroll ?? true) : undefined,
+        approvedBy: autoApprove ? userId : undefined,
+        approvedAt: autoApprove ? new Date() : undefined,
+        requestedByUserId: userId,
+        reason: data.reason,
+      },
+    });
+
+    if (!autoApprove) {
+      await this.notificationsService.createForGroup(employee.companyId, DRH_ROLES, {
+        type: 'ADVANCE_REQUEST' as NotificationType,
+        title: '💵 Nouvelle demande d\u2019avance',
+        message: `${employee.firstName} ${employee.lastName} demande une avance de ${data.amount.toLocaleString()} FCFA`,
+        link: '/loans',
+        metadata: { advanceId: advance.id, employeeId: employee.id },
+      });
+      // ✅ LOT B — si un circuit d'avis est actif, les titulaires de fonctions sont aussi prévenus.
+      void this.approvalNotifier.notifyOpinionRequested({
+        companyId: employee.companyId,
+        type: 'ADVANCE',
+        requestId: advance.id,
+        employeeName: `${employee.firstName} ${employee.lastName}`,
+        amount: Number(data.amount),
+      });
+    }
+
+    return advance;
+  }
+
+  async findAllAdvances(userId: string, status?: string) {
+    const user = await this.common.getVerifiedUser(userId);
+    this.common.requireFinanceAccess(user.role);
+
+    const whereClause: any = { employee: { companyId: user.companyId } };
+    if (status) whereClause.status = status;
+
+    return this.prisma.advance.findMany({
+      where: whereClause,
+      include: {
+        employee: { select: this.common.employeeSelect },
+        repaymentLogs: { orderBy: [{ year: 'desc' }, { month: 'desc' }] },
+        amendments: { orderBy: { createdAt: 'desc' } },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+  }
+
+  async findMyAdvances(userId: string) {
+    const user = await this.common.getVerifiedUser(userId);
+    const employee = await this.prisma.employee.findFirst({ where: { email: user.email ?? undefined, companyId: user.companyId } });
+    if (!employee) throw new NotFoundException("Aucun dossier employé associé à ce compte.");
+    return this.prisma.advance.findMany({ where: { employeeId: employee.id }, include: { amendments: { orderBy: { createdAt: 'desc' } } }, orderBy: { createdAt: 'desc' } });
+  }
+
+  async findOneAdvance(id: string, userId: string, overrideCompanyId?: string) {
+    const user = await this.common.getVerifiedUser(userId);
+    this.common.applyCompanyOverride(user, overrideCompanyId);
+    const advance = await this.prisma.advance.findUnique({
+      where: { id },
+      include: {
+        employee: { select: { ...this.common.employeeSelect, hireDate: true } },
+        amendments: { orderBy: { createdAt: 'desc' } },
+      },
+    });
+    if (!advance) throw new NotFoundException('Avance introuvable');
+
+    const empCompany = await this.prisma.employee.findUnique({ where: { id: advance.employeeId }, select: { companyId: true } });
+    if (empCompany?.companyId !== user.companyId) throw new ForbiddenException('Accès refusé');
+    if (!FINANCE_ROLES.includes(user.role)) {
+      const selfEmployee = await this.prisma.employee.findFirst({ where: { email: user.email ?? undefined, companyId: user.companyId } });
+      if (!selfEmployee || selfEmployee.id !== advance.employeeId) throw new ForbiddenException('Accès refusé');
+    }
+
+    const company = await this.prisma.company.findUnique({
+      where: { id: user.companyId },
+      select: { legalName: true, tradeName: true, logo: true, rccmNumber: true, taxNumber: true, address: true, phone: true },
+    });
+
+    return { ...advance, company };
+  }
+
+  /** ADMIN/SUPER_ADMIN : CRUD complet, à tout moment. HR_MANAGER : uniquement tant que PENDING. */
+  async updateAdvance(id: string, dto: UpdateAdvanceDto, userId: string, overrideCompanyId?: string) {
+    const user = await this.common.getVerifiedUser(userId);
+    this.common.applyCompanyOverride(user, overrideCompanyId);
+    this.common.requireFinanceAccess(user.role);
+    const advance = await this.common.getOwnedAdvanceOrThrow(id, user.companyId);
+
+    // Même règle de protection que pour les prêts : modifiable uniquement en attente, pour tous les rôles.
+    if (advance.status !== 'PENDING') {
+      throw new BadRequestException('Cette avance a déjà été traitée : elle ne peut plus être modifiée. Seule une demande en attente peut l\u2019être.');
+    }
+
+    const oldAmount = Number(advance.amount);
+    const amountChanged = dto.amount !== undefined && dto.amount !== oldAmount;
+    const scheduleChanged =
+      (dto.deductMonth !== undefined && dto.deductMonth !== advance.deductMonth) ||
+      (dto.deductYear !== undefined && dto.deductYear !== advance.deductYear);
+
+    // Même principe que pour les prêts : on repart du montant réellement
+    // remboursé (logs), jamais de `remainingBalance` seul — il vaut 0 sur les
+    // anciennes avances, ce qui faisait passer l'avance à « soldée » dès
+    // qu'on baissait son montant.
+    let remainingBalance: number | undefined = undefined;
+    let newStatus: 'APPROVED' | 'PAID' | undefined = undefined;
+    if (amountChanged) {
+      const alreadyRepaid = await this.getAlreadyRepaid('advance', advance.id, advance.status, oldAmount, Number(advance.remainingBalance ?? 0));
+      remainingBalance = Math.max(0, dto.amount! - alreadyRepaid);
+      if (['APPROVED', 'PAID'].includes(advance.status)) {
+        newStatus = remainingBalance === 0 ? 'PAID' : 'APPROVED';
+      }
+    }
+
+    const traceChanged = amountChanged || scheduleChanged;
+
+    await this.prisma.advance.update({
+      where: { id },
+      data: {
+        amount: dto.amount,
+        deductMonth: dto.deductMonth,
+        deductYear: dto.deductYear,
+        reason: dto.reason,
+        remainingBalance,
+        status: newStatus,
+        ...(traceChanged
+          ? {
+              requestedAmount: advance.requestedAmount ?? advance.amount,
+              amountModifiedBy: userId,
+              amountModifiedAt: new Date(),
+            }
+          : {}),
+      },
+    });
+
+    if (traceChanged) {
+      await this.recordAmendment(user, {
+        advanceId: id,
+        oldAmount, newAmount: dto.amount ?? oldAmount,
+        oldDeductMonth: advance.deductMonth, newDeductMonth: dto.deductMonth ?? advance.deductMonth,
+        oldDeductYear: advance.deductYear, newDeductYear: dto.deductYear ?? advance.deductYear,
+      });
+      await this.notifyRequesterOfChange(user, advance.requestedByUserId, 'avance', oldAmount, dto.amount ?? oldAmount);
+    }
+
+    return this.prisma.advance.findUnique({
+      where: { id },
+      include: { amendments: { orderBy: { createdAt: 'desc' } } },
+    });
+  }
+
+  async deleteAdvance(id: string, userId: string, overrideCompanyId?: string) {
+    const user = await this.common.getVerifiedUser(userId);
+    this.common.applyCompanyOverride(user, overrideCompanyId);
+    this.common.requireFinanceAccess(user.role);
+    const advance = await this.common.getOwnedAdvanceOrThrow(id, user.companyId);
+
+    if (!FULL_ADMIN_ROLES.includes(user.role) && !['PENDING', 'REJECTED', 'CANCELLED'].includes(advance.status)) {
+      throw new BadRequestException("Cette avance est déjà validée ou déduite — utilisez plutôt l'annulation, ou demandez à un administrateur.");
+    }
+    await this.prisma.advance.delete({ where: { id } });
+    return { success: true };
+  }
+
+  /**
+   * Même règle que cancelLoan : RH/Admin à tout moment, ou l'employé
+   * lui-même mais seulement sur sa propre demande encore PENDING.
+   */
+  async cancelAdvance(id: string, userId: string, overrideCompanyId?: string) {
+    const user = await this.common.getVerifiedUser(userId);
+    this.common.applyCompanyOverride(user, overrideCompanyId);
+    const advance = await this.common.getOwnedAdvanceOrThrow(id, user.companyId);
+
+    const isFinance = FINANCE_ROLES.includes(user.role);
+    const isOwnerCancellingPending = advance.requestedByUserId === userId && advance.status === 'PENDING';
+
+    if (!isFinance && !isOwnerCancellingPending) {
+      throw new ForbiddenException(
+        advance.requestedByUserId === userId
+          ? 'Cette demande a déjà été traitée — seuls un administrateur ou les RH peuvent encore agir dessus.'
+          : "La gestion des prêts et avances est réservée à l'administration et aux RH.",
+      );
+    }
+    if (['DEDUCTED', 'PAID'].includes(advance.status) && !FULL_ADMIN_ROLES.includes(user.role)) {
+      throw new BadRequestException('Cette avance a déjà été traitée sur la paie');
+    }
+    return this.prisma.advance.update({ where: { id }, data: { status: 'CANCELLED' } });
+  }
+}
