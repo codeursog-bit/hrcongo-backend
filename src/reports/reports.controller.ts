@@ -151,8 +151,8 @@ export class ReportsController {
    * GET /reports/overview?companyId=xxx (optionnel, pour cabinet)
    */
   @Get('overview')
-  getOverview(@Request() req, @Query('companyId') companyId?: string) {
-    return this.reportsService.getOverview(req.user.userId, companyId);
+  getOverview(@Request() req, @Query('companyId') companyId?: string,@Query('month') month?:string,@Query('year') year?:string) {
+    return this.reportsService.getOverview(req.user.userId, companyId,month?parseInt(month,10):undefined,year?parseInt(year,10):undefined);
   }
 
   /**
@@ -444,10 +444,12 @@ export class ReportsController {
   getDepartmentTraceability(
     @Request() req,
     @Query('companyId') companyId?: string,
+    @Query('year') year?:string,
   ) {
     return this.reportsService.getDepartmentTraceability(
       req.user.userId,
       companyId,
+      year?parseInt(year,10):undefined,
     );
   }
 

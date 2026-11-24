@@ -5,6 +5,7 @@ import {
   Logger,
 } from '@nestjs/common';
 import { PrismaClient } from '@prisma/client';
+import { employeeRecordFilter } from './employee-record-filter';
 
 @Injectable()
 export class PrismaService
@@ -25,6 +26,7 @@ export class PrismaService
           ? ['query', 'error', 'warn']
           : ['error'],
     });
+    this.$use(employeeRecordFilter);
   }
 
   async onModuleInit() {

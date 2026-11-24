@@ -12,6 +12,8 @@ import {
 } from '../conventions/conventions.service';
 import { classifyFiscalCategory } from './payroll-recap.service';
 import { resolveVerifiedCompanyId } from '../common/resolve-verified-company.util';
+import { buildWorkforceLedger } from '../employees/workforce-ledger';
+import { payrollReportingWhere, reportMonthStart, REPORT_PAYROLL_STATUS } from './reporting-policy';
 
 // 🆕 Export nommé pour workforce-movement-export.service.ts
 export interface WorkforceMovementDept {
@@ -28,6 +30,8 @@ export interface WorkforceMovement {
   periodLabel: string;
   departments: WorkforceMovementDept[];
   totals: { initial: number; hires: number; departures: number; final: number };
+  deletions?:number;
+  unconfirmedDepartures?:number;
 }
 
 @Injectable()
@@ -38,6 +42,14 @@ export class ReportsService {
     private prisma: PrismaService,
     private conventionsService: ConventionsService,
   ) {}
+
+  private async workforceLedger(companyId:string,where:any={}) {
+    const [records,ruptures]=await Promise.all([
+      this.prisma.employee.findMany({where:{...where,companyId,recordDeletedAt:{}},select:{id:true,firstName:true,lastName:true,employeeNumber:true,gender:true,dateOfBirth:true,hireDate:true,terminationDate:true,terminationReason:true,trialStatus:true,recordDeletedAt:true,recordDeletedStatus:true,status:true,position:true,departmentId:true,department:{select:{id:true,name:true}},contractType:true,nationality:true,professionalCategory:true}}),
+      this.prisma.contractRupture.findMany({where:{companyId,status:{in:['VALIDE','PAYE','CONTESTE','ARCHIVE']}},select:{employeeId:true,ruptureDate:true,ruptureType:true,status:true}}),
+    ]);
+    return buildWorkforceLedger(records,ruptures);
+  }
 
   // 🔒 CORRECTIF SÉCURITÉ (audit) : overrideCompanyId était accepté tel quel
   // dès que isCabinet était vrai, jamais vérifié contre
@@ -58,40 +70,44 @@ export class ReportsService {
   // ============================================================
   // VUE D'ENSEMBLE
   // ============================================================
-  async getOverview(userId: string, overrideCompanyId?: string) {
+  async getOverview(userId: string, overrideCompanyId?: string,month?:number,year?:number) {
     const companyId = await this.resolveCompanyId(userId, overrideCompanyId);
     if (!companyId) return {};
 
-    const currentYear = new Date().getFullYear();
-    const currentMonth = new Date().getMonth() + 1;
+    const currentYear = year ?? new Date().getFullYear();
+    const currentMonth = month ?? new Date().getMonth() + 1;
 
-    const headcount = await this.prisma.employee.count({
+    const referenceEnd=new Date(currentYear,currentMonth,0,23,59,59,999);
+    const historical=referenceEnd<new Date();
+    const ledger=historical?await this.workforceLedger(companyId):null;
+    const headcount = ledger ? ledger.headcountAt(referenceEnd) : await this.prisma.employee.count({
       where: { companyId, status: 'ACTIVE' },
     });
 
     const payrollSum = await this.prisma.payroll.aggregate({
-      where: { companyId, month: currentMonth, year: currentYear },
+      where: payrollReportingWhere(companyId,currentMonth,currentYear),
       _sum: { grossSalary: true, netSalary: true, totalEmployerCost: true },
     });
 
+    const asOfDate=new Date(new Date(Math.min(referenceEnd.getTime(),Date.now())+3600000).toISOString().slice(0,10));
     const activeLeaves = await this.prisma.leave.count({
-      where: { companyId, status: 'APPROVED' },
+      where: { companyId, status: 'APPROVED',startDate:{lte:asOfDate},endDate:{gte:asOfDate} },
     });
 
     const departments = await this.prisma.department.findMany({
       where: { companyId },
-      include: { _count: { select: { employees: true } } },
+      include: { _count: { select: { employees: {where:{status:'ACTIVE'}} } } },
     });
 
     const deptDistribution = departments.map((d) => ({
       name: d.name,
-      value: d._count.employees,
+      value: ledger ? ledger.employment.filter(record=>record.department?.id===d.id&&new Date(record.hireDate)<=referenceEnd&&(!record.exitDate||record.exitDate>referenceEnd)).length : d._count.employees,
       color: d.color || '#' + Math.floor(Math.random() * 16777215).toString(16),
     }));
 
     const trend = await this.prisma.payroll.groupBy({
       by: ['month'],
-      where: { companyId, year: currentYear },
+      where: payrollReportingWhere(companyId,undefined,currentYear),
       _sum: { grossSalary: true, netSalary: true, totalEmployerCost: true },
       orderBy: { month: 'asc' },
       take: 6,
@@ -165,8 +181,7 @@ export class ReportsService {
         _sum: {
           grossSalary: true,
           netSalary: true,
-          cnssSalarial: true,
-          its: true,
+          totalDeductions: true,
           totalEmployerCost: true,
         },
       });
@@ -182,7 +197,7 @@ export class ReportsService {
       const brut = Number(agg._sum.grossSalary || 0);
       const net = Number(agg._sum.netSalary || 0);
       const coutTotalEmployeur = Number(agg._sum.totalEmployerCost || 0);
-      const chargesSalariales = Number(agg._sum.cnssSalarial || 0) + Number(agg._sum.its || 0);
+      const chargesSalariales = Number(agg._sum.totalDeductions || 0);
       const chargesPatronales = coutTotalEmployeur - brut;
 
       years.push({
@@ -216,7 +231,7 @@ export class ReportsService {
     const currentMonth = month ?? now.getMonth() + 1;
 
     const totalPayroll = await this.prisma.payroll.aggregate({
-      where: { companyId, month: currentMonth, year: currentYear },
+      where: payrollReportingWhere(companyId,currentMonth,currentYear),
       _sum: {
         grossSalary: true,
         netSalary: true,
@@ -229,7 +244,7 @@ export class ReportsService {
 
     const trendData = await this.prisma.payroll.groupBy({
       by: ['month'],
-      where: { companyId, year: currentYear },
+      where: payrollReportingWhere(companyId,undefined,currentYear),
       _sum: { grossSalary: true, netSalary: true, totalEmployerCost: true },
       orderBy: { month: 'asc' },
       take: 12,
@@ -247,44 +262,9 @@ export class ReportsService {
         1_000_000,
     }));
 
-    const depts = await this.prisma.department.findMany({
-      where: { companyId },
-      include: {
-        employees: {
-          where: { status: 'ACTIVE' },
-          include: {
-            payrolls: {
-              where: { month: currentMonth, year: currentYear },
-              take: 1,
-              orderBy: { createdAt: 'desc' },
-            },
-          },
-        },
-      },
-    });
-
-    const departments = depts
-      .map((d) => {
-        const employeesWithPayroll = d.employees.filter(
-          (emp) => emp.payrolls.length > 0,
-        );
-        const mass = employeesWithPayroll.reduce(
-          (acc, emp) => acc + Number(emp.payrolls[0]?.grossSalary || 0),
-          0,
-        );
-        return {
-          name: d.name,
-          headcount: employeesWithPayroll.length,
-          mass,
-          avg:
-            employeesWithPayroll.length > 0
-              ? mass / employeesWithPayroll.length
-              : 0,
-          color:
-            d.color || '#' + Math.floor(Math.random() * 16777215).toString(16),
-        };
-      })
-      .filter((d) => d.mass > 0);
+    const departmentDetails=await this.getDepartmentAnalysis(userId,companyId,currentMonth,currentYear);
+    const departments=departmentDetails.filter(row=>row.payrollCount>0).map(row=>({name:row.name,headcount:row.payrollCount,mass:row.totalGross,avg:row.avgSalary,color:row.color}));
+    const fiscal=departmentDetails.reduce((sum,row)=>({its:sum.its+row.totalItsReel,bnc10:sum.bnc10+row.totalBnc10,bnc20:sum.bnc20+row.totalBnc20}),{its:0,bnc10:0,bnc20:0});
 
     return {
       summary: [
@@ -295,28 +275,32 @@ export class ReportsService {
           trend: `${new Date(0, currentMonth - 1).toLocaleString('fr-FR', { month: 'long' })} ${currentYear}`,
         },
         {
-          label: 'CNSS Patronale (20,28%)',
+          label: 'CNSS patronale',
           value: (totalPayroll._sum.cnssEmployer || 0).toLocaleString(),
           currency: 'FCFA',
           sub: 'Charges Employeur',
         },
         {
-          label: 'Salaires Nets Versés',
+          label: 'Salaires nets calculés',
           value: (totalPayroll._sum.netSalary || 0).toLocaleString(),
           currency: 'FCFA',
         },
         {
           label: 'Total ITS Collecté',
-          value: (totalPayroll._sum.its || 0).toLocaleString(),
+          value: fiscal.its.toLocaleString('fr-FR'),
           currency: 'FCFA',
         },
         {
           label: 'Coût Employeur Totale',
           value: (totalPayroll._sum.totalEmployerCost || 0).toLocaleString(),
           currency: 'FCFA',
-          sub: 'Brut + CNSS (20,28%)',
+          sub: 'Montant enregistré sur les bulletins, toutes charges incluses',
         },
+        {label:'Retenue BNC — résidents',value:fiscal.bnc10.toLocaleString('fr-FR'),currency:'FCFA'},
+        {label:'Retenue BNC — non-résidents',value:fiscal.bnc20.toLocaleString('fr-FR'),currency:'FCFA'},
       ],
+      fiscalBreakdown:fiscal,
+      scope:{month:currentMonth,year:currentYear,statuses:'HORS_ANNULATION'},
       trend:
         trend.length > 0
           ? trend
@@ -348,6 +332,7 @@ export class ReportsService {
   }
 
   private readonly RUPTURE_LABELS: Record<string, string> = {
+    AUTRE_DEPART_CONFIRME:'Départ confirmé',
     DEMISSION: 'Démission',
     LICENCIEMENT_FAUTE_SIMPLE: 'Licenciement (faute simple)',
     LICENCIEMENT_FAUTE_GRAVE: 'Licenciement (faute grave)',
@@ -441,12 +426,13 @@ export class ReportsService {
     const companyId = await this.resolveCompanyId(userId, overrideCompanyId);
     if (!companyId) return {};
 
-    const now = new Date();
+    const actualNow = new Date();
+    const now = filters?.year && filters.year < actualNow.getFullYear() ? new Date(filters.year,11,31,23,59,59,999) : actualNow;
     const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
     const yearAgo = new Date(
-      now.getFullYear() - 1,
-      now.getMonth(),
-      now.getDate(),
+      now.getFullYear(),
+      now.getMonth()-11,
+      1,
     );
 
     // 🆕 Filtres du rapport — département, type de contrat, nationalité
@@ -464,40 +450,20 @@ export class ReportsService {
         filters.nationality === 'Non renseigné' ? null : filters.nationality;
     }
 
-    // Un seul aller-retour DB : on récupère tout le monde (actifs + partis) pour calculer historique
-    const all = await this.prisma.employee.findMany({
-      where: whereClause,
-      select: {
-        id: true,
-        firstName: true,
-        lastName: true,
-        gender: true,
-        dateOfBirth: true,
-        hireDate: true,
-        terminationDate: true,
-        status: true,
-        position: true,
-        department: { select: { name: true } },
-        contractType: true,
-        nationality: true,
-        professionalCategory: true,
-      },
-    });
-
-    const isCurrentlyIn = (e: (typeof all)[number]) =>
-      !['TERMINATED', 'RETIRED'].includes(e.status);
-    const current = all.filter(isCurrentlyIn);
+    const ledger=await this.workforceLedger(companyId,whereClause);
+    const all = ledger.employment.map(record=>({...record,terminationDate:record.exitDate}));
+    const current = now===actualNow ? all.filter(record=>record.isCurrent) : all.filter(record=>new Date(record.hireDate)<=now&&(!record.exitDate||record.exitDate>now));
     const totalActive = current.length;
 
     // ── Nouveaux / départs du mois + turnover annualisé (12 derniers mois) ──
     const hiresThisMonth = all.filter(
-      (e) => e.hireDate && new Date(e.hireDate) >= monthStart,
+      (e) => e.hireDate && new Date(e.hireDate) >= monthStart && new Date(e.hireDate)<=now,
     ).length;
     const departuresThisMonth = all.filter(
-      (e) => e.terminationDate && new Date(e.terminationDate) >= monthStart,
+      (e) => e.terminationDate && new Date(e.terminationDate) >= monthStart && new Date(e.terminationDate)<=now,
     ).length;
     const departures12mo = all.filter(
-      (e) => e.terminationDate && new Date(e.terminationDate) >= yearAgo,
+      (e) => e.terminationDate && new Date(e.terminationDate) >= yearAgo && new Date(e.terminationDate)<=now,
     ).length;
     // Effectif moyen sur 12 mois ≈ moyenne (effectif il y a 1 an, effectif actuel)
     const headcountAt = (date: Date) =>
@@ -523,10 +489,10 @@ export class ReportsService {
       const lastMonth = year === now.getFullYear() ? now.getMonth() : 11; // pas de mois futurs pour l'année en cours
       const out: { month: string; total: number }[] = [];
       for (let m = 0; m <= lastMonth; m++) {
-        const monthEnd = new Date(year, m + 1, 0);
+        const monthEnd = new Date(year, m + 1, 0, 23, 59, 59, 999);
         out.push({
           month: monthEnd.toLocaleDateString('fr-FR', { month: 'short' }),
-          total: headcountAt(monthEnd),
+          total: headcountAt(monthEnd > now ? now : monthEnd),
         });
       }
       return out;
@@ -539,7 +505,7 @@ export class ReportsService {
     // descend d'une année sur l'autre.
     const yearlyHeadcount: { year: number; total: number }[] = [];
     for (let y = targetYear - 4; y <= targetYear; y++) {
-      const refDate = y === now.getFullYear() ? now : new Date(y, 11, 31);
+      const refDate = y === now.getFullYear() ? now : new Date(y, 11, 31, 23, 59, 59, 999);
       yearlyHeadcount.push({ year: y, total: headcountAt(refDate) });
     }
 
@@ -567,8 +533,8 @@ export class ReportsService {
       const inBucket = current.filter(
         (e) =>
           e.dateOfBirth &&
-          this.ageInYears(new Date(e.dateOfBirth)) >= b.min &&
-          this.ageInYears(new Date(e.dateOfBirth)) <= b.max,
+          this.ageInYears(new Date(e.dateOfBirth), now) >= b.min &&
+          this.ageInYears(new Date(e.dateOfBirth), now) <= b.max,
       );
       return {
         label: b.label,
@@ -589,8 +555,8 @@ export class ReportsService {
       const inBucket = current.filter(
         (e) =>
           e.hireDate &&
-          this.tenureInYears(new Date(e.hireDate)) >= b.min &&
-          this.tenureInYears(new Date(e.hireDate)) < b.max,
+          this.tenureInYears(new Date(e.hireDate), now) >= b.min &&
+          this.tenureInYears(new Date(e.hireDate), now) < b.max,
       );
       return {
         label: b.label,
@@ -605,7 +571,7 @@ export class ReportsService {
     const retirementCandidates = current
       .filter((e) => e.dateOfBirth)
       .map((e) => {
-        const age = this.ageInYears(new Date(e.dateOfBirth));
+        const age = this.ageInYears(new Date(e.dateOfBirth), now);
         const yearsRemaining = this.LEGAL_RETIREMENT_AGE - age;
         return {
           id: e.id,
@@ -727,7 +693,8 @@ export class ReportsService {
     for (let i = 11; i >= 0; i--) {
       const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
       const mStart = new Date(d.getFullYear(), d.getMonth(), 1);
-      const mEnd = new Date(d.getFullYear(), d.getMonth() + 1, 0);
+      const monthEnd = new Date(d.getFullYear(), d.getMonth() + 1, 0, 23, 59, 59, 999);
+      const mEnd = monthEnd > now ? now : monthEnd;
       const departuresInMonth = all.filter(
         (e) =>
           e.terminationDate &&
@@ -743,14 +710,7 @@ export class ReportsService {
     }
 
     // ── Turnover par motif de rupture (12 derniers mois, source = ContractRupture) ─
-    const ruptures12mo = await this.prisma.contractRupture.findMany({
-      where: {
-        companyId,
-        ruptureDate: { gte: yearAgo },
-        status: { in: ['VALIDE', 'PAYE', 'CONTESTE', 'ARCHIVE'] },
-      },
-      select: { ruptureType: true, employeeId: true },
-    });
+    const ruptures12mo = ledger.departures.filter(record=>record.exitDate!>=yearAgo&&record.exitDate!<=now).map(record=>({employeeId:record.id,ruptureType:record.exitType||'AUTRE_DEPART_CONFIRME'}));
     const motifCounts = new Map<string, number>();
     for (const r of ruptures12mo)
       motifCounts.set(r.ruptureType, (motifCounts.get(r.ruptureType) || 0) + 1);
@@ -776,6 +736,9 @@ export class ReportsService {
       .sort((a, b) => b.count - a.count);
 
     const turnoverDetail = {
+      deletions:ledger.deletions.filter(record=>new Date(record.recordDeletedAt!)>=yearAgo&&new Date(record.recordDeletedAt!)<=now).length,
+      unconfirmedDepartures:ledger.unconfirmedDepartures.length,
+      definition:'Départs effectifs confirmés / effectif moyen × 100 ; suppressions de fiches exclues.',
       recordedRuptures: ruptures12mo.length, // motifs réellement enregistrés (peut être < total départs si certaines fins de contrat n'ont pas été saisies via le module rupture)
       monthly: turnoverMonthly,
       byMotif: turnoverByMotif,
@@ -1008,25 +971,18 @@ export class ReportsService {
 
     const periodStart =
       mode === 'ANNEE'
-        ? new Date(targetYear, 0, 1)
-        : new Date(targetYear, targetMonth - 1, 1);
+        ? reportMonthStart(targetYear,1)
+        : reportMonthStart(targetYear,targetMonth);
     const periodEnd =
       mode === 'ANNEE'
-        ? new Date(targetYear, 11, 31, 23, 59, 59)
-        : new Date(targetYear, targetMonth, 0, 23, 59, 59);
+        ? new Date(reportMonthStart(targetYear+1,1).getTime()-1)
+        : new Date(reportMonthStart(targetYear,targetMonth+1).getTime()-1);
     // Effectif "initial" = effectif à la toute fin de la veille du début
     // de période (donc juste avant qu'une entrée du jour J ne compte).
     const dayBeforeStart = new Date(periodStart.getTime() - 1);
 
-    const employees = await this.prisma.employee.findMany({
-      where: { companyId },
-      select: {
-        id: true,
-        hireDate: true,
-        terminationDate: true,
-        department: { select: { id: true, name: true } },
-      },
-    });
+    const ledger=await this.workforceLedger(companyId);
+    const employees=ledger.employment.map(record=>({...record,terminationDate:record.exitDate}));
 
     const headcountAt = (list: typeof employees, date: Date) =>
       list.filter(
@@ -1052,7 +1008,7 @@ export class ReportsService {
           (e) =>
             e.hireDate &&
             new Date(e.hireDate) >= periodStart &&
-            new Date(e.hireDate) <= periodEnd,
+            new Date(e.hireDate) <= periodEnd && new Date(e.hireDate)<=now,
         ).length;
         const departures = list.filter(
           (e) =>
@@ -1060,7 +1016,7 @@ export class ReportsService {
             new Date(e.terminationDate) >= periodStart &&
             new Date(e.terminationDate) <= periodEnd,
         ).length;
-        const final = headcountAt(list, periodEnd);
+        const final = headcountAt(list, periodEnd>now?now:periodEnd);
         return { name, initial, hires, departures, final };
       })
       // ✅ On n'affiche pas les départements totalement inactifs sur la
@@ -1082,9 +1038,10 @@ export class ReportsService {
     const periodLabel =
       mode === 'ANNEE'
         ? `Année ${targetYear}`
-        : periodStart.toLocaleDateString('fr-FR', { month: 'long', year: 'numeric' });
+        : periodStart.toLocaleDateString('fr-FR', { month: 'long', year: 'numeric',timeZone:'Africa/Brazzaville' });
 
-    return { mode, month: targetMonth, year: targetYear, periodLabel, departments, totals };
+    const deletions=ledger.deletions.filter(record=>new Date(record.recordDeletedAt!)>=periodStart&&new Date(record.recordDeletedAt!)<=periodEnd).length;
+    return { mode, month: targetMonth, year: targetYear, periodLabel, departments, totals, deletions,unconfirmedDepartures:ledger.unconfirmedDepartures.length };
   }
 
   /**
@@ -1105,7 +1062,7 @@ export class ReportsService {
     const employees = await this.prisma.employee.findMany({
       where: {
         companyId,
-        status: { notIn: ['TERMINATED', 'RETIRED'] },
+        status: 'ACTIVE',
         nationality: isUnspecified ? null : nationality,
       },
       select: {
@@ -1177,9 +1134,10 @@ export class ReportsService {
 
     const andConditions: any[] = [
       { companyId },
-      { hireDate: { lte: refDate } },
-      { OR: [{ terminationDate: null }, { terminationDate: { gt: refDate } }] },
     ];
+    const ledger=await this.workforceLedger(companyId);
+    const eligible=ledger.employment.filter(record=>new Date(record.hireDate)<=refDate&&(!record.exitDate||record.exitDate>refDate));
+    andConditions.push({id:{in:eligible.map(record=>record.id)}});
     if (options.department && options.department !== 'Tous') {
       andConditions.push({ department: { name: options.department } });
     }
@@ -1202,7 +1160,7 @@ export class ReportsService {
         ],
       });
     }
-    const whereClause = { AND: andConditions };
+    const whereClause = { recordDeletedAt:{},AND: andConditions };
 
     const [total, employees] = await Promise.all([
       this.prisma.employee.count({ where: whereClause }),
@@ -1357,12 +1315,12 @@ export class ReportsService {
     const seasonal: { month: string; Annual: number; Sick: number }[] = [];
     for (let m = 0; m <= 11; m++) {
       const mStart = new Date(targetYear, m, 1);
-      const mEnd = new Date(targetYear, m + 1, 0);
+      const mEnd = new Date(targetYear, m + 1, 1);
       const inMonth = leaves12mo.filter(
-        (l) => new Date(l.startDate) >= mStart && new Date(l.startDate) <= mEnd,
+        (l) => new Date(l.startDate) >= mStart && new Date(l.startDate) < mEnd,
       );
       seasonal.push({
-        month: mEnd.toLocaleDateString('fr-FR', { month: 'short' }),
+        month: mStart.toLocaleDateString('fr-FR', { month: 'short' }),
         Annual: inMonth.filter((l) => l.type === 'ANNUAL').length,
         Sick: inMonth.filter((l) => l.type === 'SICK').length,
       });
@@ -1546,17 +1504,17 @@ export class ReportsService {
     const targetYear = year ?? now.getFullYear();
     // ✅ Année choisie : fenêtre calendaire pleine, plus figée sur "les 6
     // derniers mois glissants".
-    const yearStart = new Date(targetYear, 0, 1);
-    const yearEnd = new Date(targetYear, 11, 31, 23, 59, 59);
+    const yearStart = reportMonthStart(targetYear,1);
+    const nextYear = reportMonthStart(targetYear+1,1);
 
     const [offers, candidates] = await Promise.all([
       this.prisma.jobOffer.findMany({
-        where: { companyId },
+        where: { companyId,createdAt:{gte:yearStart,lt:nextYear} },
         select: { status: true },
       }),
       this.prisma.candidate.findMany({
-        where: { jobOffer: { companyId }, createdAt: { gte: yearStart, lte: yearEnd } },
-        select: { hrDecision: true, aiSuggestion: true, createdAt: true },
+        where: { jobOffer: { companyId }, createdAt: { gte: yearStart, lt: nextYear } },
+        select: { hrDecision: true, aiSuggestion: true, createdAt: true,status:true },
       }),
     ]);
 
@@ -1585,7 +1543,7 @@ export class ReportsService {
     };
     const candidatesByDecision = Object.entries(
       candidates.reduce((acc: Record<string, number>, c) => {
-        const key = c.hrDecision || c.aiSuggestion || 'EN_ATTENTE';
+        const key = c.hrDecision || 'EN_ATTENTE';
         acc[key] = (acc[key] || 0) + 1;
         return acc;
       }, {}),
@@ -1598,20 +1556,22 @@ export class ReportsService {
     // ── Candidatures reçues — les 12 mois de l'année choisie ─────────────
     const candidatesTrend: { month: string; count: number }[] = [];
     for (let m = 0; m <= 11; m++) {
-      const mStart = new Date(targetYear, m, 1);
-      const mEnd = new Date(targetYear, m + 1, 0);
+      const mStart = reportMonthStart(targetYear,m+1);
+      const mEnd = reportMonthStart(targetYear,m+2);
       candidatesTrend.push({
-        month: mEnd.toLocaleDateString('fr-FR', { month: 'short' }),
+        month: mStart.toLocaleDateString('fr-FR', { month: 'short',timeZone:'Africa/Brazzaville' }),
         count: candidates.filter(
           (c) =>
-            new Date(c.createdAt) >= mStart && new Date(c.createdAt) <= mEnd,
+            new Date(c.createdAt) >= mStart && new Date(c.createdAt) < mEnd,
         ).length,
       });
     }
 
     return {
       totalOffers: offers.length,
+      period:{year:targetYear,start:yearStart.toISOString(),endExclusive:nextYear.toISOString()},
       totalCandidates: candidates.length,
+      hiredCount:candidates.filter(candidate=>candidate.status==='HIRED').length,
       offersByStatus,
       candidatesByDecision,
       candidatesTrend,
@@ -1722,7 +1682,7 @@ export class ReportsService {
     );
 
     const payrolls = await this.prisma.payroll.findMany({
-      where: { companyId, month, year },
+      where: payrollReportingWhere(companyId,month,year),
       include: {
         employee: {
           select: {
@@ -1792,126 +1752,45 @@ export class ReportsService {
   // ============================================================
   // ANALYSE PAR DÉPARTEMENT
   // ============================================================
-  async getDepartmentAnalysis(
-    userId: string,
-    overrideCompanyId?: string,
-    month?: number,
-    year?: number,
-  ) {
-    const companyId = await this.resolveCompanyId(userId, overrideCompanyId);
-    if (!companyId) return [];
-
-    const currentMonth = month ?? new Date().getMonth() + 1;
-    const currentYear = year ?? new Date().getFullYear();
-
-    const departments = await this.prisma.department.findMany({
-      where: { companyId },
-      include: {
-        employees: {
-          where: { status: 'ACTIVE' },
-          include: {
-            payrolls: {
-              where: { month: currentMonth, year: currentYear },
-              orderBy: { createdAt: 'desc' },
-            },
-            leaves: { where: { status: 'APPROVED' } },
-          },
-        },
-      },
+  async getDepartmentAnalysis(userId:string,overrideCompanyId?:string,month?:number,year?:number,periods?:{month:number;year:number}[]) {
+    const companyId=await this.resolveCompanyId(userId,overrideCompanyId);if(!companyId)return [];
+    const currentMonth=month??new Date().getMonth()+1,currentYear=year??new Date().getFullYear();
+    const [departments,payrolls,leaves]=await Promise.all([
+      this.prisma.department.findMany({where:{companyId},include:{employees:{where:{status:'ACTIVE',recordDeletedAt:null},select:{id:true}}}}),
+      this.prisma.payroll.findMany({where:periods?{...payrollReportingWhere(companyId),OR:periods}:payrollReportingWhere(companyId,currentMonth,currentYear),include:{employee:{select:{id:true,departmentId:true,contractType:true,isResident:true}}}}),
+      this.prisma.leave.findMany({where:{companyId,status:'APPROVED',startDate:{lte:new Date(currentYear,currentMonth,0,23,59,59,999)},endDate:{gte:new Date(currentYear,currentMonth-1,1)}},select:{employee:{select:{departmentId:true}}}}),
+    ]);
+    return departments.map(dept=>{
+      const rows=payrolls.filter(row=>row.employee.departmentId===dept.id);
+      const sum=(key:string)=>rows.reduce((total,row)=>total+Number((row as any)[key]||0),0);
+      const payrollCount=new Set(rows.map(row=>row.employeeId)).size;
+      const fiscal={ITS:0,BNC_10:0,BNC_20:0,EXONERE:0,AGENCE:0};
+      for(const row of rows)fiscal[classifyFiscalCategory(row.employee.contractType,row.employee.isResident)]+=Number(row.its||0);
+      return {id:dept.id,name:dept.name,color:dept.color,headcount:dept.employees.length,payrollCount,
+        totalGross:sum('grossSalary'),totalNet:sum('netSalary'),totalCNSS:sum('cnssEmployer'),totalITS:sum('its'),
+        totalItsReel:fiscal.ITS,totalBnc10:fiscal.BNC_10,totalBnc20:fiscal.BNC_20,
+        totalEmployerCost:sum('totalEmployerCost'),totalDeductions:sum('totalDeductions'),
+        avgSalary:payrollCount?sum('grossSalary')/payrollCount:0,
+        totalOvertime:sum('overtimeHours10')+sum('overtimeHours25')+sum('overtimeHours50')+sum('overtimeHours100'),
+        totalLeaves:leaves.filter(leave=>leave.employee.departmentId===dept.id).length};
     });
-
-    return departments
-      .map((dept) => {
-        const employeesWithPayroll = dept.employees.filter(
-          (emp) => emp.payrolls.length > 0,
-        );
-        const totalGross = employeesWithPayroll.reduce(
-          (sum, emp) => sum + Number(emp.payrolls[0]?.grossSalary || 0),
-          0,
-        );
-        const totalNet = employeesWithPayroll.reduce(
-          (sum, emp) => sum + Number(emp.payrolls[0]?.netSalary || 0),
-          0,
-        );
-        const totalCNSS = employeesWithPayroll.reduce(
-          (sum, emp) => sum + Number(emp.payrolls[0]?.cnssEmployer || 0),
-          0,
-        );
-        const totalITS = employeesWithPayroll.reduce(
-          (sum, emp) => sum + Number(emp.payrolls[0]?.its || 0),
-          0,
-        );
-        // ✅ "its" mélange ITS réel et BNC 10%/20% selon le type de contrat
-        // (voir payroll-calculator.service.ts) — cette page inclut TOUS les
-        // salariés actifs, prestataires compris. On reventile le même total
-        // en 3 sous-totaux distincts pour ne jamais laisser un chiffre
-        // unique faire croire à un ITS pur. totalITS ci-dessus reste calculé
-        // pour compatibilité mais NE DOIT PLUS être affiché seul.
-        let totalItsReel = 0;
-        let totalBnc10 = 0;
-        let totalBnc20 = 0;
-        for (const emp of employeesWithPayroll) {
-          const amount = Number(emp.payrolls[0]?.its || 0);
-          const category = classifyFiscalCategory(
-            (emp as any).contractType,
-            (emp as any).isResident,
-          );
-          if (category === 'ITS') totalItsReel += amount;
-          else if (category === 'BNC_10') totalBnc10 += amount;
-          else if (category === 'BNC_20') totalBnc20 += amount;
-        }
-        const totalLeaves = dept.employees.reduce(
-          (sum, emp) => sum + emp.leaves.length,
-          0,
-        );
-
-        const totalOvertime = employeesWithPayroll.reduce((sum, emp) => {
-          const p = emp.payrolls[0] as any;
-          if (!p) return sum;
-          return (
-            sum +
-            Number(p.overtimeHours10 || 0) +
-            Number(p.overtimeHours25 || 0) +
-            Number(p.overtimeHours50 || 0) +
-            Number(p.overtimeHours100 || 0)
-          );
-        }, 0);
-
-        return {
-          id: dept.id,
-          name: dept.name,
-          headcount: employeesWithPayroll.length,
-          totalGross,
-          totalNet,
-          totalCNSS,
-          totalITS,
-          totalItsReel,
-          totalBnc10,
-          totalBnc20,
-          totalEmployerCost: totalGross + totalCNSS,
-          avgSalary:
-            employeesWithPayroll.length > 0
-              ? totalGross / employeesWithPayroll.length
-              : 0,
-          totalOvertime: parseFloat(totalOvertime.toFixed(2)),
-          totalLeaves,
-          color: dept.color,
-        };
-      })
-      .filter((d) => d.totalGross > 0);
   }
 
   // ============================================================
   // 🆕 VUE DÉPARTEMENT UNIFIÉE — coût + effectif + absences + retards + turnover
   // ============================================================
-  async getDepartmentTraceability(userId: string, overrideCompanyId?: string) {
+  async getDepartmentTraceability(userId: string, overrideCompanyId?: string,year?:number) {
     const companyId = await this.resolveCompanyId(userId, overrideCompanyId);
     if (!companyId) return { departments: [], period: { start: '', end: '' } };
 
-    const now = new Date();
-    const periodStart = new Date(now.getFullYear(), now.getMonth() - 2, 1); // 3 derniers mois glissants
+    const actualNow=new Date();
+    const now = year&&year<actualNow.getFullYear()?new Date(reportMonthStart(year+1,1).getTime()-1):actualNow;
+    const periodStart = year?reportMonthStart(year,1):reportMonthStart(now.getFullYear(),now.getMonth()-1);
     const periodStartStr = periodStart.toISOString().slice(0, 10);
     const periodEndStr = now.toISOString().slice(0, 10);
+    const workforce=await this.workforceLedger(companyId);
+    const costPeriods:{month:number;year:number}[]=[];
+    for(let point=new Date(periodStart.getTime()+3600000);point.getTime()<=now.getTime()+3600000;point=new Date(Date.UTC(point.getUTCFullYear(),point.getUTCMonth()+1,1)))costPeriods.push({year:point.getUTCFullYear(),month:point.getUTCMonth()+1});
 
     const [
       departments,
@@ -1925,11 +1804,8 @@ export class ReportsService {
         where: { companyId },
         select: { id: true, name: true, color: true },
       }),
-      this.getDepartmentAnalysis(userId, companyId),
-      this.prisma.employee.findMany({
-        where: { companyId, status: 'ACTIVE' },
-        select: { id: true, departmentId: true },
-      }),
+      this.getDepartmentAnalysis(userId, companyId,now.getMonth()+1,now.getFullYear(),costPeriods),
+      Promise.resolve(workforce.employment.filter(record=>new Date(record.hireDate)<=now&&(!record.exitDate||record.exitDate>now))),
       this.prisma.attendance.findMany({
         where: {
           companyId,
@@ -1942,22 +1818,15 @@ export class ReportsService {
         where: {
           companyId,
           status: 'APPROVED',
-          startDate: { gte: periodStart },
+          startDate: { gte: periodStart,lte:now },
         },
         select: { employeeId: true, type: true, workingDays: true },
       }),
-      this.prisma.contractRupture.findMany({
-        where: {
-          companyId,
-          ruptureDate: { gte: periodStart },
-          status: { in: ['VALIDE', 'PAYE', 'CONTESTE', 'ARCHIVE'] },
-        },
-        select: { employeeId: true },
-      }),
+      Promise.resolve(workforce.departures.filter(record=>record.exitDate!>=periodStart&&record.exitDate!<=now).map(record=>({employeeId:record.id}))),
     ]);
 
     const deptIdByEmployeeId = new Map(
-      employees.map((e) => [e.id, e.departmentId]),
+      workforce.employment.map((e) => [e.id, e.departmentId]),
     );
     const headcountByDept = new Map<string, number>();
     for (const e of employees)
@@ -2071,7 +1940,7 @@ export class ReportsService {
       period: {
         start: periodStartStr,
         end: periodEndStr,
-        label: '3 derniers mois',
+        label: year?`Année ${year}`:'3 derniers mois',
       },
       companyAverages: {
         lateRatePer10: Math.round(avgLateRate * 10) / 10,
@@ -2113,7 +1982,7 @@ export class ReportsService {
           hireDate: true,
           department: { select: { name: true } },
           payrolls: {
-            where: { month: currentMonth, year: currentYear },
+            where: { month: currentMonth, year: currentYear, status: REPORT_PAYROLL_STATUS },
             orderBy: { createdAt: 'desc' },
             take: 1,
           },
@@ -2254,12 +2123,12 @@ export class ReportsService {
 
     const [current, previous] = await Promise.all([
       this.prisma.payroll.aggregate({
-        where: { companyId, month: currentMonth, year: currentYear },
+        where: payrollReportingWhere(companyId,currentMonth,currentYear),
         _sum: { grossSalary: true, netSalary: true, totalEmployerCost: true },
         _count: true,
       }),
       this.prisma.payroll.aggregate({
-        where: { companyId, month: prevMonth, year: prevYear },
+        where: payrollReportingWhere(companyId,prevMonth,prevYear),
         _sum: { grossSalary: true, netSalary: true, totalEmployerCost: true },
         _count: true,
       }),

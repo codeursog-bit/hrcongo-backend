@@ -146,6 +146,7 @@ export class AdminCompaniesService {
       tradeName: company.tradeName,
       logo: this.generateInitials(company.legalName),
       rccmNumber: company.rccmNumber,
+      documentTemplate: company.documentTemplate,
       email: company.email,
       phone: company.phone,
       city: company.city,

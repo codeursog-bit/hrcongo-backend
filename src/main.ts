@@ -84,6 +84,7 @@ async function bootstrap() {
     app.use('/auth', bodyParser.json({ limit: '50kb' }));
     app.use('/employees', bodyParser.json({ limit: '500kb' }));
     app.use('/contract-templates', bodyParser.json({ limit: '1mb' }));
+    app.use('/document-layouts', bodyParser.json({ limit: '40kb' }));
     app.use((req: any, res: any, next: any) => {
       if (isUploadRoute(req.path)) return next(); // laisser Multer gérer
       bodyParser.json({

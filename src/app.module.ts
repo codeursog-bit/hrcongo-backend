@@ -34,6 +34,7 @@ import { PerformanceModule } from './performance/performance.module';
 import { TrainingModule } from './training/training.module';
 import { OnboardingModule } from './onboarding/onboarding.module';
 import { DocumentsModule } from './documents/documents.module';
+import { DocumentLayoutsModule } from './document-layouts/document-layouts.module';
 import { AssetsModule } from './assets/assets.module';
 import { ReportsModule } from './reports/reports.module';
 import { MailModule } from './mail/mail.module';
@@ -167,6 +168,7 @@ import { ContractTemplatesModule } from './contract-templates/contract-templates
     TrainingModule,
     OnboardingModule,
     DocumentsModule,
+    DocumentLayoutsModule,
     AssetsModule,
     ReportsModule,
     CompanyDeductionsModule,

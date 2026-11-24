@@ -1986,6 +1986,7 @@ export class PayrollsService {
             lastName: true,
             employeeNumber: true,
             position: true,
+            contractType: true,
             department: { select: { name: true } },
           },
         },

@@ -1006,7 +1006,7 @@ export class RecruitmentProService {
       let employeeNumber = '';
       for (let i = 0; i < 6; i++) {
         employeeNumber = `EMP-${Date.now().toString().slice(-6)}${i ? Math.floor(Math.random() * 90 + 10) : ''}`;
-        const clash = await tx.employee.findFirst({ where: { employeeNumber, companyId }, select: { id: true } });
+        const clash = await tx.employee.findFirst({ where: { employeeNumber, companyId,recordDeletedAt:{} }, select: { id: true } });
         if (!clash) break;
         if (i === 5) throw new BadRequestException('Impossible de générer un matricule, réessayez.');
       }

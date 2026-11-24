@@ -384,6 +384,7 @@ model Company {
   // 🆕 RELATION ABONNEMENT (One-to-One)
   subscription               Subscription?
   bulletinTemplate           BulletinTemplate?
+  documentLayouts            DocumentLayout[]
 
 leaveAppliesToContractors Boolean @default(false)
   // 🆕 RELATION PAIEMENTS (One-to-Many - accès direct)
@@ -493,8 +494,26 @@ enum DocumentTemplate {
   ORCA
   STANDARD // ← ajouté
   MODERN // Modèle 3
+  CUSTOM
 
   @@map("document_template")
+}
+
+model DocumentLayout {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId  String   @db.Uuid
+  company    Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  docType    String
+  name       String   @default("Mon modèle")
+  basePreset String?
+  config     Json
+  version    Int      @default(1)
+  createdAt  DateTime @default(now()) @db.Timestamptz
+  updatedAt  DateTime @updatedAt @db.Timestamptz
+
+  @@unique([companyId, docType])
+  @@index([companyId])
+  @@map("document_layouts")
 }
 
 // ═══════════════════════════════════════════════════════
@@ -701,6 +720,9 @@ model Employee {
   status            EmployeeStatus @default(ACTIVE)
   terminationDate   DateTime?      @db.Date
   terminationReason String?        @db.Text
+  recordDeletedAt DateTime? @db.Timestamptz
+  recordDeletedBy String? @db.Uuid
+  recordDeletedStatus EmployeeStatus?
 
   companyId String  @db.Uuid
   company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
@@ -792,6 +814,7 @@ model Employee {
   // ✅ SUPPRIMÉ : @@index([nationalIdNumber]) car maintenant optionnel
   @@index([isSubjectToIrpp])
   @@index([isSubjectToCnss])
+  @@index([companyId,recordDeletedAt])
   @@index([companyId])
   @@index([departmentId])
   @@index([employeeNumber])

@@ -10,6 +10,7 @@ import {
   IsOptional,
   IsString,
   Min,
+  ValidateIf,
 } from 'class-validator';
 
 // ── Entreprises ─────────────────────────────────────────────────────────────
@@ -57,6 +58,10 @@ export class UpdateCompanyDto {
   @IsOptional()
   @IsString()
   website?: string;
+
+  @ValidateIf((_, value) => value !== undefined)
+  @IsIn(['ORCA', 'STANDARD'])
+  documentTemplate?: 'ORCA' | 'STANDARD';
 }
 
 // ── Abonnements ──────────────────────────────────────────────────────────────

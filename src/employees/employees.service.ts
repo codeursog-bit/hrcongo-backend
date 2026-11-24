@@ -1005,7 +1005,7 @@ export class EmployeesService {
     if (createEmployeeDto.employeeNumber?.trim()) {
       const customNumber = createEmployeeDto.employeeNumber.trim();
       const existing = await this.prisma.employee.findFirst({
-        where: { employeeNumber: customNumber, companyId: user.companyId },
+        where: { employeeNumber: customNumber, companyId: user.companyId,recordDeletedAt:{} },
       });
       if (existing) {
         throw new ConflictException(
@@ -1018,12 +1018,12 @@ export class EmployeesService {
       let attempt = 0;
       while (!isUnique && attempt < 50) {
         const count = await this.prisma.employee.count({
-          where: { companyId: user.companyId },
+          where: { companyId: user.companyId,recordDeletedAt:{} },
         });
         const sequence = (count + 1 + attempt).toString().padStart(3, '0');
         employeeNumber = `EMP-${year}-${sequence}`;
         const existing = await this.prisma.employee.findFirst({
-          where: { employeeNumber, companyId: user.companyId },
+          where: { employeeNumber, companyId: user.companyId,recordDeletedAt:{} },
         });
         if (!existing) isUnique = true;
         else attempt++;
@@ -1983,7 +1983,7 @@ export class EmployeesService {
 
     const employee = await this.prisma.employee.findUnique({
       where: { id },
-      select: { id: true, companyId: true, departmentId: true, email: true },
+      select: { id: true, companyId: true, departmentId: true, email: true,status:true },
     });
     if (!employee) throw new NotFoundException('Employé introuvable.');
 
@@ -1991,8 +1991,10 @@ export class EmployeesService {
       throw new ForbiddenException("Vous n'avez pas accès à cet employé.");
     }
 
+    return this.prisma.$transaction(async tx=>{
+    const deletedAt=new Date();
     if (employee.email) {
-      const linkedUser = await this.prisma.user.findFirst({
+      const linkedUser = await tx.user.findFirst({
         where: {
           email: employee.email,
           companyId: user.companyId,
@@ -2002,16 +2004,19 @@ export class EmployeesService {
       });
 
       if (linkedUser) {
-        await this.prisma.user.delete({ where: { id: linkedUser.id } });
+        await tx.user.update({ where: { id: linkedUser.id },data:{isActive:false} });
+        await tx.userSession.updateMany({where:{userId:linkedUser.id,revokedAt:null},data:{revokedAt:deletedAt}});
       }
     }
 
-    return this.prisma.employee.update({
+    return tx.employee.update({
       where: { id },
       data: {
-        status: 'TERMINATED',
-        terminationDate: new Date(),
+        recordDeletedAt: deletedAt,
+        recordDeletedBy: userId,
+        recordDeletedStatus: employee.status,
       },
+    });
     });
   }
 }

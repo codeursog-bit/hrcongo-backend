@@ -128,7 +128,7 @@ export class Das1DeclarationService {
     const employeeIds = annualRecap.rows.map((r) => r.employeeId).filter((id) => id !== 'TOTAL');
     const employeesRaw = employeeIds.length
       ? await this.prisma.employee.findMany({
-          where: { id: { in: employeeIds } },
+          where: { id: { in: employeeIds },companyId,recordDeletedAt:{} },
           select: {
             id: true,
             firstName: true,

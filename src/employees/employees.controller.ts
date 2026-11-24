@@ -518,7 +518,7 @@ export class EmployeesController {
 
   // ==========================================================================
   // DELETE /employees/:id — Soft delete (ADMIN, SUPER_ADMIN uniquement)
-  // Passe le statut à TERMINATED, ne supprime pas physiquement
+  // Retire la fiche des listes sans inventer de fin d'emploi ; historique conservé.
   // ==========================================================================
   @Delete(':id')
   async remove(

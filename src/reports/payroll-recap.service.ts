@@ -440,8 +440,9 @@ export class PayrollRecapService {
       where: {
         companyId,
         contractType: { not: 'INTERIM' },
-        hireDate: { lte: monthEnd },
-        OR: [{ terminationDate: null }, { terminationDate: { gte: monthStart } }],
+        recordDeletedAt:{},
+        OR:[{recordDeletedAt:null,hireDate:{lte:monthEnd},OR:[{terminationDate:null},{terminationDate:{gte:monthStart}}]},
+          {payrolls:{some:{companyId,month,year,status:{not:'CANCELLED'}}}}],
       },
       select: { id: true, firstName: true, lastName: true, employeeNumber: true },
       orderBy: { lastName: 'asc' },
@@ -534,8 +535,9 @@ export class PayrollRecapService {
       where: {
         companyId,
         contractType: { not: 'INTERIM' },
-        hireDate: { lte: yearEnd },
-        OR: [{ terminationDate: null }, { terminationDate: { gte: yearStart } }],
+        recordDeletedAt:{},
+        OR:[{recordDeletedAt:null,hireDate:{lte:yearEnd},OR:[{terminationDate:null},{terminationDate:{gte:yearStart}}]},
+          {payrolls:{some:{companyId,year,status:{in:['VALIDATED','TO_PAY','PAID']}}}}],
       },
       select: {
         id: true,
@@ -703,8 +705,8 @@ export class PayrollRecapService {
     const employees = await this.prisma.employee.findMany({
       where: {
         companyId,
-        hireDate: { lte: yearEnd },
-        OR: [{ terminationDate: null }, { terminationDate: { gte: yearStart } }],
+        recordDeletedAt:{},
+        payrolls:{some:{companyId,year,status:{in:['VALIDATED','TO_PAY','PAID']}}},
       },
       select: {
         id: true,
