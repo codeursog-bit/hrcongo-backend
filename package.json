@@ -116,5 +116,8 @@
     "tsconfig-paths": "^4.2.0",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.20.0"
+  },
+  "overrides": {
+    "@react-pdf/textkit": "7.0.1"
   }
 }
