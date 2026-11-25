@@ -1,4 +1,5 @@
 export function payrollItemRank(item: { code: string; label: string; type: string }): number {
+  if (item.code === 'SALARY_ROUNDING') return 6;
   if (item.code === 'SAL_BASE') return 0;
   if (item.code === 'ABS_DEDUCT') return 1;
   if (item.type !== 'GAIN') return 5;

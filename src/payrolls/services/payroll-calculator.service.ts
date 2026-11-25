@@ -365,9 +365,13 @@ export class PayrollCalculatorService {
     // 12. Totaux finaux
     const totalDeductions =
       cnssSalarial + its + employeeCustomTaxTotal + totalOtherDeductions;
-    const netSalary = Math.floor(
+    const unroundedNetSalary = Math.floor(
       grossSalary - totalDeductions + nonTaxableBonuses,
     );
+    const salaryRoundingAmount = settings?.salaryRoundingEnabled && unroundedNetSalary > 0
+      ? Math.floor(unroundedNetSalary / 50) * 50 - unroundedNetSalary
+      : 0;
+    const netSalary = unroundedNetSalary + salaryRoundingAmount;
     const totalEmployerCost =
       grossSalary + nonTaxableBonuses + cnssEmployer + tusTotal + employerCustomTaxTotal;
 
@@ -378,9 +382,10 @@ export class PayrollCalculatorService {
     return {
       grossSalary,
       netSalary,
+      salaryRoundingAmount,
       cnssSalarial,
       its,
-      totalDeductions,
+      totalDeductions: totalDeductions - salaryRoundingAmount,
       cnssEmployer,
       totalEmployerCost,
       totalBonuses,

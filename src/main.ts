@@ -11,6 +11,9 @@ import * as bodyParser from 'body-parser';
 import { PrismaService } from './prisma/prisma.service';
 import { ActivityTrackingInterceptor } from './user-activity/activity-tracking.interceptor';
 import { GlobalExceptionFilter } from './filters/global-exception.filter';
+import { IncidentsService } from './incidents/incidents.service';
+import { safeIncidentText } from './incidents/incident-privacy';
+let processIncidents: IncidentsService | undefined;
 
 async function bootstrap() {
   const logger = new Logger('Bootstrap');
@@ -81,6 +84,7 @@ async function bootstrap() {
     const isUploadRoute = (path: string) =>
       path.includes('/import/parse') || path.includes('/upload');
 
+    app.use('/client-errors', bodyParser.json({ limit: '16kb' }));
     app.use('/auth', bodyParser.json({ limit: '50kb' }));
     app.use('/employees', bodyParser.json({ limit: '500kb' }));
     app.use('/contract-templates', bodyParser.json({ limit: '1mb' }));
@@ -178,7 +182,8 @@ async function bootstrap() {
     // 🔍 GLOBAL EXCEPTION FILTER
     // ════════════════════════════════════════════════════════════════════════
     const prismaForFilter = app.get(PrismaService);
-    app.useGlobalFilters(new GlobalExceptionFilter(prismaForFilter));
+    processIncidents = app.get(IncidentsService);
+    app.useGlobalFilters(new GlobalExceptionFilter(prismaForFilter, processIncidents));
 
     // ════════════════════════════════════════════════════════════════════════
     // 👀 TRACKING PRÉSENCE / TEMPS ACTIF (super admin → "en ligne maintenant")
@@ -271,7 +276,8 @@ function describeError(e: unknown): string {
 }
 
 function registerFatal(kind: string, e: unknown) {
-  safetyLogger.error(`${kind} : ${describeError(e)}`);
+  safetyLogger.error(`${kind} : ${safeIncidentText(describeError(e),6000)}`);
+  processIncidents?.capture({source:'BACK',code:kind,message:e instanceof Error?e.message:String(e),stack:e instanceof Error?e.stack:undefined,path:'/process',severity:'CRITICAL',version:process.env.APP_VERSION});
   const now = Date.now();
   recentFatals = recentFatals.filter((t) => now - t < FATAL_WINDOW_MS);
   recentFatals.push(now);

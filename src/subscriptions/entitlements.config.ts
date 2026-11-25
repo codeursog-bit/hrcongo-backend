@@ -41,6 +41,7 @@ export function catalogLimits(plan: string): EffectiveLimits {
     hasAnnualPayroll:rank>=4, hasContractAlerts:rank>=1, hasContractGeneration:rank>=3,
     hasAppearanceCustomization:rank>=3, hasWhiteLabel:rank>=3, hasTemplateCustomization:rank>=3,
     hasInternalMessaging:rank>=3, hasAssetManagement:rank>=2,
+    canCustomizeDocuments:rank>=3, canBuildDocumentsFromScratch:rank===4,
   };
 }
 
@@ -54,6 +55,7 @@ export function resolveLimits(plan: string, overrides: unknown, now=Date.now()):
     if(typeof limits[key]==='boolean' && typeof entry.value==='boolean') limits[key]=entry.value;
     if(typeof limits[key]==='number' && typeof entry.value==='number' && Number.isInteger(entry.value) && entry.value>=-1) limits[key]=entry.value;
   }
+  limits.canCustomizeDocuments = limits.hasTemplateCustomization;
   return limits;
 }
 

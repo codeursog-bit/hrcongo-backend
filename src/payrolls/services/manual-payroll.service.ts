@@ -16,6 +16,8 @@ import { PayrollSettingsService } from '../../payroll/settings/settings.service'
 import { CompanyTaxService } from '../../company-taxes/company-tax.service';
 import { LeavesService } from '../../leaves/leaves.service';
 import { resolveCycleWindow } from '../../leaves/leaves-common.util';
+import { payrollLeavePeriod, payrollLeaveOverride } from './payroll-leave-period';
+import { alignSalaryRounding } from './payroll-salary-rounding';
 import { YtdCheckpointService } from './ytd-checkpoint.service';
 import { AttendanceSummaryService } from '../../attendance/attendance-summary.service';
 import { PayrollBonusesService } from './payroll-bonuses.service';
@@ -30,6 +32,7 @@ import {
 export interface ManualBonus {
   bonusType: string;
   amount: number;
+  isNature?: boolean;
   base?: number;
   rate?: number;
   isTaxable?: boolean;
@@ -266,7 +269,7 @@ export class ManualPayrollService {
 
   private buildCalculatedBonuses(manualBonuses: ManualBonus[] = []): any[] {
     return manualBonuses
-      .filter((b) => b.amount > 0)
+      .filter((b) => Number(b.amount) !== 0)
       .map((b, i) => {
         let isTaxable = b.isTaxable ?? true;
         let isCnss = b.isCnss ?? true;
@@ -278,6 +281,7 @@ export class ManualPayrollService {
           id: `manual-${i}-${Date.now()}`,
           bonusType: b.bonusType || 'Prime',
           amount: Number(b.amount),
+          isNature: b.isNature === true,
           base:
             b.base != null && Number(b.base) > 0 ? Number(b.base) : undefined,
           rate:
@@ -429,6 +433,8 @@ export class ManualPayrollService {
       company,
       companyTaxes,
     );
+
+    alignSalaryRounding(calc, settings.salaryRoundingEnabled, manualDeductionTotal);
 
     const totalLoanDeduction = loans.reduce(
       (s, l) => s + Number(l.monthlyRepayment),
@@ -673,6 +679,8 @@ export class ManualPayrollService {
       companyTaxes,
     );
 
+    alignSalaryRounding(calc, settings.salaryRoundingEnabled, manualDeductionTotal);
+
     warnings.forEach((w) => this.logger.warn(w));
 
     const fakeSummary = {
@@ -749,14 +757,9 @@ export class ManualPayrollService {
         // getOrCreateLeaveBalance — si aucune ligne n'existait encore pour
         // l'employé (1er bulletin jamais généré), lbSnap valait null et
         // droits/pris/solde retombaient tous à 0.
-        const lbSnap = await this.leavesService
-          .getTotalLeaveBalanceSummary(employee.id)
-          .catch(() => null);
-        const leaveSnapshot = {
-          droits: dto.congesDroits ?? Number(lbSnap?.annualEntitled ?? 0),
-          pris: dto.congesPris ?? Number(lbSnap?.annualTaken ?? 0),
-          solde: dto.congesSolde ?? Number(lbSnap?.annualRemaining ?? 0),
-        };
+        const leaveSnapshot = payrollLeaveOverride(
+          await payrollLeavePeriod(tx, employee.id, dto.month, dto.year), dto,
+        );
 
         await this.itemsService.create(
           tx,
@@ -843,48 +846,8 @@ export class ManualPayrollService {
           hasCongesPaies,
         );
 
-        if (hasCongesPaies) {
-          // Déduire les jours du LeaveBalance
-          const joursPris = dto.joursCongesPris ?? dto.congesPris ?? 0;
-          if (joursPris > 0) {
-            const balance = await tx.leaveBalance.findFirst({
-              where: { employeeId: employee.id },
-              orderBy: { cycleStartDate: 'desc' },
-            });
-            if (balance) {
-              const newTaken = Number(balance.annualTaken) + joursPris;
-              const newRemaining = Number(balance.annualRemaining) - joursPris;
-              await tx.leaveBalance.update({
-                where: { id: balance.id },
-                data: {
-                  annualTaken: newTaken,
-                  annualRemaining: Math.max(0, newRemaining),
-                  lastCalculated: new Date(),
-                },
-              });
-              this.logger.log(
-                `✅ LeaveBalance — pris +${joursPris}j, remaining: ${Math.max(0, newRemaining)}j`,
-              );
-            }
-          }
-        } else {
-          // Mois normal — accumulation mensuelle 2,16j (idempotent par
-          // mois/année du bulletin — voir accrueMonthlyLeaveForEmployee)
-          try {
-            await this.leavesService.accrueMonthlyLeaveForEmployee(
-              employee.id,
-              dto.month,
-              dto.year,
-            );
-            this.logger.log(
-              `✅ Accumulation congés +2,16j — ${employee.firstName} ${employee.lastName}`,
-            );
-          } catch (e: any) {
-            this.logger.warn(
-              `⚠️ Accumulation congés échouée : ${e?.message ?? String(e)}`,
-            );
-          }
-        }
+        // Le paiement d'une indemnité ne consomme aucun jour. Seul le congé
+        // réellement commencé est débité par le registre des congés approuvés.
 
         // ── Override manuel LeaveBalance si saisi ─────────────────────────────
         if (dto.congesDroits != null || dto.congesPris != null) {

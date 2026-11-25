@@ -618,6 +618,7 @@ private async getUserWithCompany(userId: string, overrideCompanyId?: string): Pr
         },
         company: {
           select: {
+            id: true,
             legalName: true,
             tradeName: true,
             rccmNumber: true,
@@ -647,13 +648,25 @@ private async getUserWithCompany(userId: string, overrideCompanyId?: string): Pr
     // Catalogue calculé depuis la convention (pas de table à lire) — la
     // ligne cochée est retrouvée en comparant le motif texte enregistré
     // (= le libellé exact de la convention au moment de la demande).
-    const catalog = ['STANDARD', 'MODERN'].includes(request.company?.documentTemplate as string)
+    const selectedLayout = await this.prisma.documentLayout.findUnique({
+      where: { companyId_docType: { companyId: request.companyId, docType: 'ABSENCE' } },
+      select: { basePreset: true, config: true },
+    });
+    const savedConfig = selectedLayout?.config && typeof selectedLayout.config === 'object'
+      && !Array.isArray(selectedLayout.config) ? selectedLayout.config : null;
+    const defaultTemplate = request.company?.documentTemplate;
+    const requestedOriginal = savedConfig?.useOriginal === true ? selectedLayout?.basePreset?.replace('HIST_', '') : undefined;
+    const template = selectedLayout && (savedConfig?.independent === true || defaultTemplate === 'CUSTOM')
+      ? requestedOriginal === 'ORCA' && defaultTemplate !== 'ORCA' ? defaultTemplate : requestedOriginal ?? 'CUSTOM'
+      : defaultTemplate;
+    const catalog = ['STANDARD', 'MODERN', 'CUSTOM'].includes(template ?? '')
       ? getMotifsForCompany(request.company?.collectiveAgreement)
       : [];
     const motifKey = catalog.find((m) => m.label === request.reason)?.key;
     // 🆕 Motif « Autre » saisi librement : n'est pas dans le catalogue → exposé à part
     //    pour que le document coche la ligne « Autre (précisez) ».
-    const otherReason = !motifKey && request.subType === 'AUTRE' ? request.reason : undefined;
+    const otherReason = !motifKey && (request.subType === 'AUTRE' || template === 'CUSTOM')
+      ? request.reason : undefined;
 
     // 🆕 Reprise réelle (≠ dernier jour d'absence) — même calcul que la liste et le détail
     const [withReturn] = await this.attachReturnDates(request.companyId, [request]);

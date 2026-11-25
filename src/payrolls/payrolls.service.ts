@@ -1,3 +1,6 @@
+import { payrollReturnCheckpoint } from './services/payroll-leave-return';
+import { payrollLeavePeriod, payrollLeaveOverride } from './services/payroll-leave-period';
+import { alignSalaryRounding } from './services/payroll-salary-rounding';
 import { legalNow } from '../legal-parameters/legal-parameters.core';
 // import { PrismaService } from '../prisma/prisma.service';
 // import { Prisma } from '@prisma/client';
@@ -1335,11 +1338,13 @@ export class PayrollsService {
   private async getYtdWindow(employeeId: string, year: number, month: number) {
     const targetDate = new Date(`${year}-${String(month).padStart(2, '0')}-01`);
 
-    const checkpoint = await this.prisma.ytdCheckpoint.findFirst({
+    const storedCheckpoint = await this.prisma.ytdCheckpoint.findFirst({
       where: { employeeId, effectiveDate: { lte: targetDate } },
       orderBy: { effectiveDate: 'desc' },
     });
 
+    const returned = await payrollReturnCheckpoint(this.prisma, employeeId, year, month);
+    const checkpoint = returned && (!storedCheckpoint || returned.effectiveDate > storedCheckpoint.effectiveDate) ? returned : storedCheckpoint;
     if (checkpoint) {
       const d = checkpoint.effectiveDate;
       return {
@@ -1641,7 +1646,7 @@ export class PayrollsService {
       // (findFirst orderBy desc), donc sous-évalué pour un employé avec
       // plusieurs cycles non soldés (même correctif que Provision). Solde
       // TOTAL réel désormais (somme de tous les cycles).
-      this.leavesService.getTotalLeaveBalanceSummary(employeeId).catch(() => null),
+      payrollLeavePeriod(this.prisma, employeeId, monthNum, year),
     ]);
 
     const leaveIndemnity = leaveImpact?.leaveIndemnity ?? 0;
@@ -2493,6 +2498,7 @@ export class PayrollsService {
         rate: b.rate != null ? Number(b.rate) : null,
         isTaxable: b.isTaxable ?? true,
         isCnss: b.isCnss ?? true,
+        isNature: b.isNature === true,
         fiscalType:
           b.fiscalType ?? (b.isTaxable ? 'TAXABLE_CNSS' : 'NON_TAXABLE'),
         source: 'MANUAL',
@@ -2619,6 +2625,8 @@ export class PayrollsService {
       { leaveIndemnity: leaveImpact?.leaveIndemnity ?? 0, isPaidLeave: leaveImpact?.isPaid ?? false },
     );
 
+    alignSalaryRounding(calc, settings.salaryRoundingEnabled, manualDeductionTotal);
+
     return this.prisma.$transaction(
       async (tx) => {
         // ✅ Mettre à jour le bulletin avec les nouvelles valeurs calculées
@@ -2676,18 +2684,10 @@ export class PayrollsService {
           daysHoliday: 0,
         };
 
-        const lbSnap = await tx.leaveBalance
-          .findFirst({
-            where: { employeeId: payroll.employeeId },
-            orderBy: { cycleStartDate: 'desc' },
-          })
-          .catch(() => null);
-        const leaveSnapshot = {
-          droits:
-            overrides?.congesDroits ?? Number(lbSnap?.annualEntitled ?? 0),
-          pris: overrides?.congesPris ?? Number(lbSnap?.annualTaken ?? 0),
-          solde: overrides?.congesSolde ?? Number(lbSnap?.annualRemaining ?? 0),
-        };
+        const leaveSnapshot = payrollLeaveOverride(
+          await payrollLeavePeriod(tx, payroll.employeeId, payroll.month, payroll.year),
+          overrides,
+        );
 
         const employeeForItems = {
           ...employee,
@@ -2885,7 +2885,7 @@ export class PayrollsService {
         // ⚠️ On repasse par `tx` (pas this.prisma / getYtdWindow) pour voir
         // les valeurs du bulletin qu'on vient tout juste de mettre à jour
         // ci-dessus, encore non commitées hors de cette transaction.
-        const checkpointTx = await tx.ytdCheckpoint.findFirst({
+        const storedCheckpointTx = await tx.ytdCheckpoint.findFirst({
           where: {
             employeeId: payroll.employeeId,
             effectiveDate: {
@@ -2894,6 +2894,8 @@ export class PayrollsService {
           },
           orderBy: { effectiveDate: 'desc' },
         });
+        const returned = await payrollReturnCheckpoint(tx, payroll.employeeId, payroll.year, payroll.month);
+        const checkpointTx = returned && (!storedCheckpointTx || returned.effectiveDate > storedCheckpointTx.effectiveDate) ? returned : storedCheckpointTx;
         const empCarry = checkpointTx
           ? null
           : await tx.employee.findUnique({
@@ -3186,6 +3188,7 @@ export class PayrollsService {
         amount: Number(b.amount),
         isTaxable: b.isTaxable ?? true,
         isCnss: b.isCnss ?? true,
+        isNature: b.isNature === true,
         source: 'MANUAL',
         isRecurring: true,
       }));
@@ -3241,7 +3244,7 @@ export class PayrollsService {
       // manuelle (front) lisait sim.ytd.soldeConge, qui restait toujours
       // undefined→0. Solde TOTAL réel (tous cycles non soldés, pas
       // seulement le dernier — même correctif que Provision).
-      this.leavesService.getTotalLeaveBalanceSummary(employeeId).catch(() => null),
+      payrollLeavePeriod(this.prisma, employeeId, monthNum, year),
     ]);
 
     const leaveIndemnity = leaveImpact?.leaveIndemnity ?? 0;
@@ -3312,6 +3315,11 @@ export class PayrollsService {
       { leaveIndemnity, isPaidLeave },
     );
 
+    const simManualDeductionTotal = (overrides?.manualDeductions ?? [])
+      .filter((d) => Number(d?.amount) > 0)
+      .reduce((sum, d) => sum + Number(d.amount), 0);
+    alignSalaryRounding(calc, settings.salaryRoundingEnabled, simManualDeductionTotal);
+
     const totalLoanDeduction = loans.reduce(
       (s, l) => s + Number(l.monthlyRepayment),
       0,
@@ -3324,10 +3332,6 @@ export class PayrollsService {
     const simManualDeductions = (overrides?.manualDeductions ?? [])
       .filter((d) => Number(d?.amount) > 0)
       .map((d) => ({ label: d.label || 'Retenue', amount: Number(d.amount) }));
-    const simManualDeductionTotal = simManualDeductions.reduce(
-      (s, d) => s + d.amount,
-      0,
-    );
 
     return {
       employee: {
@@ -3574,13 +3578,14 @@ export class PayrollsService {
     const daysToPay = workedDays ?? settings.workDaysPerMonth;
 
     const calculatedBonuses = manualBonuses
-      .filter((b: any) => b.bonusType && b.amount > 0)
+      .filter((b: any) => b.bonusType && Number(b.amount) !== 0)
       .map((b: any, i: number) => ({
         id: `free-bonus-${i}`,
         bonusType: b.bonusType,
         amount: Number(b.amount),
         isTaxable: b.isTaxable ?? true,
         isCnss: b.isCnss ?? true,
+        isNature: b.isNature === true,
         fiscalType: b.fiscalType ?? null,
         source: 'MANUAL',
         isRecurring: true,

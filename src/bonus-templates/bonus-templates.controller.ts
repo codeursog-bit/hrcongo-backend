@@ -59,6 +59,8 @@ import {
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { GetUser } from '../auth/get-user.decorator';
 import { BonusTemplatesService } from './bonus-templates.service';
+import { RolesGuard } from '../auth/guards/roles.guard';
+import { Roles } from '../auth/decorators/roles.decorator';
 
 @Controller('bonus-templates')
 @UseGuards(JwtAuthGuard)
@@ -105,6 +107,8 @@ export class BonusTemplatesController {
    * Body: { names?: string[] }  — si vide, importe tous les presets
    */
   @Post('presets/import')
+  @UseGuards(RolesGuard)
+  @Roles('ADMIN', 'SUPER_ADMIN', 'HR_MANAGER')
   importPresets(@Req() req: any, @Body() body: { names?: string[] }) {
     return this.service.importPresets(req.user.companyId, body.names ?? []);
   }

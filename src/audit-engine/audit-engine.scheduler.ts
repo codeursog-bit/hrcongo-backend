@@ -4,7 +4,7 @@
 // Verrou en base (CronLockService) : un seul exécutant même en multi-instances.
 // ============================================================================
 import { Injectable, Logger } from '@nestjs/common';
-import { Cron } from '@nestjs/schedule';
+import { IncidentCron as Cron } from '../incidents/incident-cron.decorator';
 import { PrismaService } from '../prisma/prisma.service';
 import { CronLockService } from '../cron-lock/cron-lock.service';
 import { AuditEngineService } from './audit-engine.service';

@@ -28,6 +28,8 @@ import { PayrollJournalService } from './payroll-journal.service';
 import { PayrollForeignPayService } from './payroll-foreign-pay.service';
 import { PayrollJournalExportService } from './payroll-journal-export.service';
 import { UpsertForeignPayDto } from './dto/foreign-pay.dto';
+import { PayrollCostReportService } from './payroll-cost-report.service';
+import { PayrollCostQueryDto, PayrollCostEmployeesQueryDto } from './dto/payroll-cost-query.dto';
 
 const PAYROLL_ROLES = [
   'ADMIN',
@@ -44,7 +46,18 @@ export class PayrollJournalController {
     private readonly journalService: PayrollJournalService,
     private readonly foreignPayService: PayrollForeignPayService,
     private readonly exportService: PayrollJournalExportService,
+    private readonly costReportService: PayrollCostReportService,
   ) {}
+
+  @Get('costs')
+  getCosts(@Request() req: any, @Query() query: PayrollCostQueryDto) {
+    return this.costReportService.overview(req.user.userId, query);
+  }
+
+  @Get('costs/employees')
+  getCostEmployees(@Request() req: any, @Query() query: PayrollCostEmployeesQueryDto) {
+    return this.costReportService.employees(req.user.userId, query);
+  }
 
   @Get()
   getJournal(

@@ -1,3 +1,5 @@
+import { PayrollCostSummaryService } from './payroll-cost-summary.service';
+import { PayrollCostReportService } from './payroll-cost-report.service';
 // ============================================================================
 // 📁 src/payroll-journal/payroll-journal.module.ts
 // Module AUTONOME : ne touche à aucun module existant (paie, reports...).
@@ -14,6 +16,8 @@ import { PayrollJournalExportService } from './payroll-journal-export.service';
   controllers: [PayrollJournalController],
   providers: [
     PayrollJournalService,
+    PayrollCostSummaryService,
+    PayrollCostReportService,
     PayrollForeignPayService,
     PayrollJournalExportService,
   ],

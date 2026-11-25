@@ -4,7 +4,7 @@
 // Une seule requête DELETE toutes les 6 h, indexée, sur une table minuscule : aucun impact serveur.
 // ============================================================================
 import { Injectable, Logger } from '@nestjs/common';
-import { Cron } from '@nestjs/schedule';
+import { IncidentCron as Cron } from '../incidents/incident-cron.decorator';
 import { CompanySiteService } from './company-site.service';
 
 @Injectable()

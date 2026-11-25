@@ -75,7 +75,6 @@ export class MotekiWebhooksController {
     @Body() payload: any,
   ) {
     this.logger.log('🔔 Webhook Moteki reçu');
-    this.logger.log(`📦 Payload: ${JSON.stringify(payload, null, 2)}`);
 
     // 🔒 CORRECTIF SÉCURITÉ (audit) : signature désormais OBLIGATOIRE — même
     // faille que sur le webhook YabetooPay corrigé précédemment. Avant,

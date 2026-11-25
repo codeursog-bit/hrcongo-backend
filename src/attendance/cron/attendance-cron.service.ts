@@ -5,7 +5,7 @@
 
 import { atCongoTime, congoDayOfWeek } from '../../common/utils/congo-time';
 import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
-import { Cron } from '@nestjs/schedule';
+import { IncidentCron as Cron } from '../../incidents/incident-cron.decorator';
 import { PrismaService } from '../../prisma/prisma.service';
 import { PushNotificationsService } from '../../notifications/push-notifications.service';
 import { NotificationsService } from '../../notifications/notifications.service';

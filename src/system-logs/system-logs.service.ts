@@ -7,6 +7,7 @@
 
 import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { captureIncident } from '../incidents/incident-sink';
 
 export type SystemLogLevel = 'INFO' | 'WARNING' | 'ERROR' | 'ALERT';
 
@@ -42,6 +43,7 @@ export class SystemLogsService {
    * logging ne doit jamais faire planter le cron/job appelant.
    */
   async log(entry: SystemLogEntry): Promise<void> {
+    if (entry.level === 'ERROR' || entry.level === 'ALERT') captureIncident({source:/cron|reminder|rappel/i.test(entry.source)?'CRON':'THIRD_PARTY',code:'SYSTEM_TASK_FAILURE',message:`${entry.source}: ${entry.message}`,path:`/tasks/${entry.source}`,companyId:entry.companyId,severity:entry.level==='ALERT'||/payroll|paie|cnss|backup/i.test(entry.source)?'CRITICAL':'ERROR',context:{durationMs:entry.durationMs}});
     try {
       await this.prisma.systemLog.create({
         data: {

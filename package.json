@@ -24,6 +24,7 @@
     "check-support": "node scripts/check-support.cjs"
   },
   "dependencies": {
+    "@jridgewell/trace-mapping": "0.3.31",
     "@google/generative-ai": "^0.24.1",
     "@mistralai/mistralai": "^1.13.0",
     "@nestjs/common": "^11.0.1",

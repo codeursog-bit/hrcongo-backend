@@ -90,7 +90,7 @@ export class BonusQuantityService {
         `La prime "${bonus.bonusType}" n'est pas en mode quantité libre (mode actuel: ${quantityMode ?? 'FIXE'}).`,
       );
     }
-    if (unitAmount <= 0) {
+    if (unitAmount === 0) {
       throw new BadRequestException(
         `La prime "${bonus.bonusType}" n'a pas de montant unitaire défini.`,
       );

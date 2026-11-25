@@ -495,14 +495,15 @@ export class AuthService {
     const session = await this.prisma.userSession.findUnique({
       where: { jti: payload.jti },
     });
-    if (!session || session.userId !== payload.sub || session.revokedAt)
+    if (!session || session.userId !== payload.sub || session.revokedAt || session.expiresAt <= new Date())
       throw new UnauthorizedException(
         'Session invalide ou révoquée. Reconnectez-vous.',
       );
-    await this.prisma.userSession.update({
-      where: { jti: payload.jti },
+    const consumed = await this.prisma.userSession.updateMany({
+      where: { jti: payload.jti, userId: payload.sub, revokedAt: null, expiresAt: { gt: new Date() } },
       data: { revokedAt: new Date() },
     });
+    if (consumed.count !== 1) throw new UnauthorizedException('Session déjà renouvelée ou révoquée.');
     const user = await this.prisma.user.findUnique({
       where: { id: payload.sub },
     });

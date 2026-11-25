@@ -40,6 +40,7 @@ export interface CalculatedBonus {
   frequency?: string | null;
   isInLeaveBase: boolean;
   bonusCategory: string;
+  isNature?: boolean;
   // ✅ base et rate — pour affichage bulletin (base journalière/salariale, taux %)
   base?: number | null;
   rate?: number | null;
@@ -188,7 +189,7 @@ export class PayrollBonusesService {
       } else if (b.calculationType === 'PERCENTAGE' && b.percentage !== null) {
         amount = Math.round((Number(b.percentage) / 100) * baseSalary);
       }
-      if (amount <= 0) continue;
+      if (amount === 0) continue;
 
       // ── Ancienneté manuelle : exclure si mode AUTO pour éviter doublons ──
       const isSeniorityBonus = b.bonusType.toLowerCase().includes('anciennet');
@@ -265,6 +266,7 @@ export class PayrollBonusesService {
         frequency: b.frequency ?? null,
         isInLeaveBase: (b as any).isInLeaveBase ?? true,
         bonusCategory: (b as any).bonusCategory ?? 'PERFORMANCE',
+        isNature: b.isNature ?? false,
         // ✅ Mode quantité libre — pour affichage "unitAmount × quantité" sur le bulletin
         quantityMode: quantityModeField,
         unitAmount:

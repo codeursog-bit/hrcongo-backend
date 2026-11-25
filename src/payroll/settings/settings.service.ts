@@ -110,7 +110,11 @@ export class PayrollSettingsService {
       return this.formatSettings(updated);
     }
 
-    return this.createDefaultSettings(user.companyId);
+    const created = await this.createDefaultSettings(user.companyId);
+    const updated = await this.prisma.payrollSettings.update({
+      where: { id: created.id }, data,
+    });
+    return this.formatSettings(updated);
   }
 
   async getAttendanceSettings(companyId: string) {
@@ -291,6 +295,8 @@ export class PayrollSettingsService {
       data.apprenticeshipTax = dto.apprenticeshipTax;
     if (dto.fonerTax !== undefined) data.fonerTax = dto.fonerTax;
     if (dto.cnssRounding !== undefined) data.cnssRounding = dto.cnssRounding;
+    if (dto.salaryRoundingEnabled !== undefined)
+      data.salaryRoundingEnabled = dto.salaryRoundingEnabled;
     if (dto.itsRounding !== undefined) data.itsRounding = dto.itsRounding;
     if (dto.taxBrackets !== undefined) data.taxBrackets = dto.taxBrackets;
     // ✅ Mode fiscal

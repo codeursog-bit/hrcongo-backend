@@ -18,6 +18,7 @@ import { ThrottlerModule } from '@nestjs/throttler';
 import { AppThrottlerGuard } from './common/app-throttler.guard';
 import { ConfigModule } from '@nestjs/config';
 import { ScheduleModule } from '@nestjs/schedule';
+import { IncidentsModule } from './incidents/incidents.module';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { PrismaModule } from './prisma/prisma.module';
@@ -96,6 +97,7 @@ import { ContractTemplatesModule } from './contract-templates/contract-templates
     RealtimeModule,
     ConfigModule.forRoot({ isGlobal: true }),
     ScheduleModule.forRoot(),
+    IncidentsModule,
 
     // ── SÉCURITÉ — CHIFFREMENT & AUDIT ──────────────────────────────────────
     CryptoModule, // Chiffrement AES-256-GCM des données sensibles (global)

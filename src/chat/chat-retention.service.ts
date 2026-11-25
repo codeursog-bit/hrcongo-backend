@@ -10,7 +10,7 @@
 // existant (table cron_locks) comme pour tes autres tâches planifiées.
 // ============================================================================
 import { Injectable, Logger } from '@nestjs/common';
-import { Cron } from '@nestjs/schedule';
+import { IncidentCron as Cron } from '../incidents/incident-cron.decorator';
 // ⚠️ ADAPTER le chemin si besoin
 import { PrismaService } from '../prisma/prisma.service';
 

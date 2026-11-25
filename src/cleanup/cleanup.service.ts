@@ -12,7 +12,7 @@
 //                                   system_logs, activité quotidienne
 // ============================================================================
 import { Injectable, Logger } from '@nestjs/common';
-import { Cron } from '@nestjs/schedule';
+import { IncidentCron as Cron } from '../incidents/incident-cron.decorator';
 import { PrismaService } from '../prisma/prisma.service';
 
 @Injectable()
@@ -72,6 +72,7 @@ export class CleanupService {
       });
 
       const total = r1.count + r2.count + r3.count + r4.count;
+      if (process.env.INCIDENTS_ENABLED === 'true') await this.prisma.errorGroup.deleteMany({where:{firstSeen:{lt:d90}}});
       this.logger.log(
         `✅ app_errors nettoyées : ${total} lignes supprimées` +
           ` (4xx résolus +7j: ${r1.count}, 4xx anciens: ${r2.count},` +

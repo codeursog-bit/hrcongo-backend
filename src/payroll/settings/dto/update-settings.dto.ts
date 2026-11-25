@@ -153,6 +153,10 @@ export class UpdatePayrollSettingsDto {
   cnssRounding?: string;
 
   @IsOptional()
+  @IsBoolean()
+  salaryRoundingEnabled?: boolean;
+
+  @IsOptional()
   @IsString()
   itsRounding?: string;
 

@@ -5,7 +5,7 @@
 //    Verrou CronLockService : sûr même avec plusieurs instances du serveur.
 // ============================================================================
 import { Injectable, Logger } from '@nestjs/common';
-import { Cron } from '@nestjs/schedule';
+import { IncidentCron as Cron } from '../incidents/incident-cron.decorator';
 import { CronLockService } from '../cron-lock/cron-lock.service';
 import { DeviceSyncService } from './device-sync.service';
 

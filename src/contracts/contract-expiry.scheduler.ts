@@ -2,7 +2,7 @@
 // 📁 src/contracts/contract-expiry.scheduler.ts
 // ============================================================================
 import { Injectable, Logger } from '@nestjs/common';
-import { Cron } from '@nestjs/schedule';
+import { IncidentCron as Cron } from '../incidents/incident-cron.decorator';
 import { ContractExpiryService } from './contract-expiry.service';
 
 @Injectable()

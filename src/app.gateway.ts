@@ -30,10 +30,6 @@ const allowedOrigins: string[] = process.env.CORS_ORIGINS
 
       if (allowedOrigins.includes(origin)) return callback(null, true);
 
-      const isVercelPreview = origin.endsWith('.vercel.app') && origin.includes('nathan-devs-projects');
-      const isRenderPreview = origin.endsWith('.onrender.com');
-      if (isVercelPreview || isRenderPreview) return callback(null, true);
-
       callback(new Error('Not allowed by CORS (Socket.IO)'));
     },
     credentials: true,
@@ -118,9 +114,15 @@ export class AppGateway implements OnGatewayConnection, OnGatewayDisconnect {
         // 🔒 Plus de secret de repli codé en dur : main.ts refuse déjà de démarrer sans JWT_SECRET.
         secret: process.env.JWT_SECRET as string,
       });
-      await validateAccessSession(this.prisma, payload);
+      const actor = await validateAccessSession(this.prisma, payload);
+      if (actor.role === 'SUPER_ADMIN') {
+        client.join('platform:incidents');
+        client.data.accessPayload = payload;
+        client.data.userId = actor.userId;
+        return;
+      }
 
-      const companyId = payload?.companyId;
+      const companyId = actor.companyId;
       if (!companyId) {
         // Comptes cabinet / support / super-admin : pas d'entreprise active tant qu'aucune n'est ciblée → normal.
         const noCompanyOk = ['SUPER_ADMIN', 'SUPPORT', 'CABINET_ADMIN', 'CABINET_GESTIONNAIRE'].includes(payload?.role);
@@ -138,6 +140,20 @@ export class AppGateway implements OnGatewayConnection, OnGatewayDisconnect {
       this.logger.warn(`Socket ${client.id} : token invalide — déconnexion (${(err as Error).message})`);
       client.disconnect();
     }
+  }
+
+  async sendSuperAdminIncident(payload: {id:string;title:string;message:string;link:string}) {
+    if (!this.server) return;
+    const clients = await this.server.in('platform:incidents').fetchSockets();
+    await Promise.all(clients.map(async client => {
+      try {
+        const token = client.data.accessPayload;
+        if (!token || token.exp * 1000 <= Date.now()) throw new Error('Session expirée');
+        const actor = await validateAccessSession(this.prisma, token);
+        if (actor.role !== 'SUPER_ADMIN') throw new Error('Rôle refusé');
+        client.emit('platform-incident', payload);
+      } catch { client.disconnect(true); }
+    }));
   }
 
   handleDisconnect(client: Socket) {

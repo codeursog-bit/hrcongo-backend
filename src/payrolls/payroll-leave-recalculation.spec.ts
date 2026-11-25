@@ -1,6 +1,14 @@
 
 import { PayrollsService } from './payrolls.service';
 
+jest.mock('./services/payroll-leave-period', () => ({
+  payrollLeavePeriod: jest.fn().mockResolvedValue({ annualEntitled: 0, annualTaken: 0, annualRemaining: 0 }),
+  payrollLeaveOverride: jest.fn().mockReturnValue({ droits: 0, pris: 0, solde: 0 }),
+}));
+jest.mock('./services/payroll-leave-return', () => ({
+  payrollReturnCheckpoint: jest.fn().mockResolvedValue(null),
+}));
+
 describe('Scheduled leave indemnity on recalculation', () => {
   function setup() {
     const payroll = { id: 'pay', employeeId: 'emp', companyId: 'company', month: 10, year: 2026, status: 'DRAFT', baseSalary: 260000, workedDays: 26 };

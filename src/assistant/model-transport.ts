@@ -17,6 +17,7 @@
  * fournisseur n'est conservé ni remonté.
  */
 import { REF_NUM } from './refs';
+import { captureIncident } from '../incidents/incident-sink';
 import { modelConfig, type ModelProvider } from './model-provider';
 import { findLeak, type Bindings, type EmployeeRef } from './pseudonymizer';
 import { PLAN_TOOLS, type ConversationContext } from './tool-plan';
@@ -252,6 +253,8 @@ export async function callModelJson(
     }
     return parseJsonObject(extractText(config.provider, data));
   } catch (e) {
+    const failure=e instanceof ModelError?e.code:timedOut?'timeout':opts.signal?.aborted?'aborted':'unavailable';
+    if(failure!=='aborted')captureIncident({source:'THIRD_PARTY',code:'AI_PROVIDER_FAILURE',message:`Fournisseur IA ${config.provider}: ${failure}`,path:`/third-party/ai/${config.provider}`,severity:failure==='unavailable'||failure==='timeout'?'ERROR':'WARN'});
     if (e instanceof ModelError) throw e;
     throw new ModelError(timedOut ? 'timeout' : opts.signal?.aborted ? 'aborted' : 'unavailable');
   } finally {

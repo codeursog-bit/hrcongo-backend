@@ -293,6 +293,7 @@ export interface CreateEmployeeBonusDto {
   description?: string | null;
   isTaxable?: boolean;
   isCnss?: boolean;
+  isNature?: boolean;
   isProratized?: boolean;
   isInLeaveBase?: boolean;
   bonusTemplateId?: string | null;
@@ -313,6 +314,7 @@ export interface UpdateBonusDto {
   notes?: string | null;
   isTaxable?: boolean;
   isCnss?: boolean;
+  isNature?: boolean;
   isProratized?: boolean; // 🆕
   isInLeaveBase?: boolean;
   bonusCategory?: BonusCategory;
@@ -438,6 +440,7 @@ export class EmployeeBonusesService {
     let resolvedIsCnss = dto.isCnss ?? true;
     let resolvedIsProratized = dto.isProratized ?? false;
     let resolvedIsInLeaveBase = dto.isInLeaveBase ?? true;
+    let resolvedIsNature = dto.isNature ?? false;
     let resolvedCategory = dto.bonusCategory ?? 'PERFORMANCE';
     let resolvedAmount = dto.amount ?? dto.fixedAmount ?? null;
     let resolvedPct = dto.percentage ?? null;
@@ -458,6 +461,7 @@ export class EmployeeBonusesService {
       // Les valeurs du template sont les défauts — le DTO peut les overrider
       if (dto.isTaxable === undefined) resolvedIsTaxable = template.isTaxable;
       if (dto.isCnss === undefined) resolvedIsCnss = template.isCnss;
+      if (dto.isNature === undefined) resolvedIsNature = template.isNature;
       if (dto.isProratized === undefined)
         resolvedIsProratized = (template as any).isProratized ?? false;
       if (dto.isInLeaveBase === undefined)
@@ -500,7 +504,7 @@ export class EmployeeBonusesService {
     }
 
     // 2. Valider montant
-    const hasAmount = resolvedAmount !== null && resolvedAmount > 0;
+    const hasAmount = resolvedAmount !== null && resolvedAmount !== 0;
     const hasPct = resolvedPct !== null && resolvedPct > 0;
     // 🆕 mode quantité libre : seul quantityMode === 'FREE' + unitAmount valide
     // remplace fixedAmount/percentage — le montant réel vient de la saisie
@@ -508,7 +512,7 @@ export class EmployeeBonusesService {
     const hasUnitAmt =
       dto.quantityMode === 'FREE' &&
       dto.unitAmount != null &&
-      dto.unitAmount > 0;
+      dto.unitAmount !== 0;
     if (!hasAmount && !hasPct && !hasUnitAmt)
       throw new BadRequestException(
         'Un montant (fixe, pourcentage ou unitaire) est requis.',
@@ -548,6 +552,7 @@ export class EmployeeBonusesService {
         bonusCategory: resolvedCategory,
         isTaxable: resolvedIsTaxable,
         isCnss: resolvedIsCnss,
+        isNature: resolvedIsNature,
         isProratized: resolvedIsProratized,
         isInLeaveBase: resolvedIsInLeaveBase,
         // 🆕 Système quantité + fiscal
@@ -625,6 +630,7 @@ export class EmployeeBonusesService {
     if (dto.isCnss !== undefined) data.isCnss = dto.isCnss;
     if (dto.isProratized !== undefined) data.isProratized = dto.isProratized; // 🆕
     if (dto.isInLeaveBase !== undefined) data.isInLeaveBase = dto.isInLeaveBase; // 🆕
+    if (dto.isNature !== undefined) data.isNature = dto.isNature;
     if (dto.bonusCategory !== undefined) data.bonusCategory = dto.bonusCategory; // 🆕
     if (dto.isActive !== undefined) data.isActive = dto.isActive;
     if (dto.frequency !== undefined) data.frequency = dto.frequency;

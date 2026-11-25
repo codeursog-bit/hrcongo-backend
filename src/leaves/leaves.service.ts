@@ -3407,6 +3407,7 @@ export class LeavesService {
             cachetUrl: true,
             documentTemplate: true,
             documentFooterText: true,
+            id: true,
           },
         },
       },

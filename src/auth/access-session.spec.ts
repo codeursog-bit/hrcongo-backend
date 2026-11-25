@@ -2,7 +2,7 @@ import { validateAccessSession } from './access-session';
 
 describe('Access session authorization', () => {
   const payload = { type: 'access', sub: 'user', sid: 'session', role: 'SUPER_ADMIN', companyId: 'company' };
-  const session = () => ({ userId: 'user', revokedAt: null, expiresAt: new Date(Date.now() + 60000), user: { isActive: true, role: 'EMPLOYEE', email: 'test@example.com' } });
+  const session = () => ({ userId: 'user', revokedAt: null, expiresAt: new Date(Date.now() + 60000), user: { isActive: true, role: 'EMPLOYEE', email: 'test@example.com', companyId: 'company' } });
   const prisma = (value: any) => ({ userSession: { findUnique: jest.fn().mockResolvedValue(value) } }) as any;
 
   it('uses the current role instead of an old privileged claim', async () => {
@@ -27,6 +27,7 @@ describe('Access session authorization', () => {
     const value = { ...session(), user: { ...session().user, role: 'CABINET_ADMIN' } };
     const db: any = prisma(value);
     db.cabinetUser = { findFirst: jest.fn().mockResolvedValue({ cabinetId: 'cabinet', role: 'GESTIONNAIRE' }) };
+    db.cabinetCompany = { findFirst: jest.fn().mockResolvedValue({id:'link'}) };
     const result = await validateAccessSession(db, { ...payload, cabinetId: 'cabinet' });
     expect(result.role).toBe('CABINET_GESTIONNAIRE');
     expect(db.cabinetUser.findFirst).toHaveBeenCalledWith(expect.objectContaining({ where: { userId: payload.sub, cabinetId: 'cabinet', cabinet: { isActive: true } } }));
@@ -36,5 +37,20 @@ describe('Access session authorization', () => {
     const db: any = prisma(value);
     db.cabinetUser = { findFirst: jest.fn().mockResolvedValue(null) };
     await expect(validateAccessSession(db, payload)).rejects.toThrow();
+  });
+  it('rejette un ancien jeton après transfert vers une autre entreprise',async()=>{
+    const value=session();value.user.companyId='new-company';
+    await expect(validateAccessSession(prisma(value),payload)).rejects.toThrow('Entreprise active modifiée');
+  });
+  it('rejette immédiatement un rattachement portefeuille supprimé',async()=>{
+    const db=prisma({...session(),user:{...session().user,manageMultipleCompanies:true}});
+    db.userCompany={findUnique:jest.fn().mockResolvedValue(null)};
+    await expect(validateAccessSession(db,payload)).rejects.toThrow('portefeuille révoqué');
+  });
+  it('rejette une entreprise retirée du cabinet malgré un JWT encore valide',async()=>{
+    const db=prisma({...session(),user:{...session().user,role:'CABINET_ADMIN'}});
+    db.cabinetUser={findFirst:jest.fn().mockResolvedValue({cabinetId:'cabinet',role:'CABINET_ADMIN'})};
+    db.cabinetCompany={findFirst:jest.fn().mockResolvedValue(null)};
+    await expect(validateAccessSession(db,payload)).rejects.toThrow('cabinet révoqué');
   });
 });

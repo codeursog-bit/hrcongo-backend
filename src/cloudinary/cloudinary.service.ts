@@ -390,6 +390,7 @@
 // src/cloudinary/cloudinary.service.ts
 import { Injectable, BadRequestException } from '@nestjs/common';
 import { v2 as cloudinary } from 'cloudinary';
+import { captureIncident } from '../incidents/incident-sink';
 
 @Injectable()
 export class CloudinaryService {
@@ -493,6 +494,7 @@ export class CloudinaryService {
         },
         (error, result) => {
           if (error) {
+            captureIncident({source:'THIRD_PARTY',code:'CLOUDINARY_FAILURE',message:'Échec du stockage public Cloudinary.',path:'/third-party/cloudinary/public',severity:'ERROR'});
             console.error('❌ Erreur upload Cloudinary:', {
               message: error.message,
               http_code: error.http_code,
@@ -579,6 +581,7 @@ export class CloudinaryService {
         },
         (error, result) => {
           if (error) {
+            captureIncident({source:'THIRD_PARTY',code:'CLOUDINARY_FAILURE',message:'Échec du stockage privé Cloudinary.',path:'/third-party/cloudinary/private',severity:'ERROR'});
             console.error('❌ Erreur upload privé:', error);
             return reject(new BadRequestException(`Erreur: ${error.message}`));
           }

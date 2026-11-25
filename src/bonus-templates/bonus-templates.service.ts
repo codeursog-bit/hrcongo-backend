@@ -485,6 +485,7 @@ export class BonusTemplatesService {
     if (data.isCnss !== undefined) cascade.isCnss = data.isCnss;
     if (data.isInLeaveBase !== undefined)
       cascade.isInLeaveBase = data.isInLeaveBase;
+    if (data.isNature !== undefined) cascade.isNature = data.isNature;
     if (data.bonusCategory !== undefined)
       cascade.bonusCategory = data.bonusCategory;
     if (data.fiscalType !== undefined) cascade.fiscalType = data.fiscalType;

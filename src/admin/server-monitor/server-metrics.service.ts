@@ -8,7 +8,8 @@
 // Désactivable : SERVER_MONITOR_ENABLED=false
 // ============================================================================
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
-import { Cron, CronExpression } from '@nestjs/schedule';
+import { CronExpression } from '@nestjs/schedule';
+import { IncidentCron as Cron } from '../../incidents/incident-cron.decorator';
 import * as os from 'os';
 import * as fsp from 'fs/promises';
 import { readFileSync } from 'fs';

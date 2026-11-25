@@ -4,7 +4,8 @@
 // Fichier: src/subscriptions/cron/subscription.cron.ts
 
 import { Injectable, Logger } from '@nestjs/common';
-import { Cron, CronExpression } from '@nestjs/schedule';
+import { CronExpression } from '@nestjs/schedule';
+import { IncidentCron as Cron } from '../../incidents/incident-cron.decorator';
 import { SubscriptionsService } from '../subscriptions.service';
 
 @Injectable()

@@ -131,6 +131,7 @@ model User {
   // Timestamps
   pushToken        String?  @db.Text
   pushNotifEnabled Boolean  @default(true)
+  incidentEmailAlerts Boolean @default(false)
   createdAt        DateTime @default(now()) @db.Timestamptz
   updatedAt        DateTime @updatedAt @db.Timestamptz
   createdBy        String?  @db.Uuid
@@ -1502,6 +1503,7 @@ model PayrollItem {
 
   isTaxable Boolean @default(true)
   isCnss    Boolean @default(true)
+  isNature  Boolean @default(false)
 
   order     Int      @default(0) @db.SmallInt
   // Affichage bulletin — base journalière/horaire, nb jours/heures, part patronale
@@ -1577,6 +1579,7 @@ model PayrollSettings {
   autoCloseHour         Int     @default(23) @db.SmallInt
 
   // Arrondis
+  salaryRoundingEnabled Boolean @default(false)
   cnssRounding String @default("UP") @db.VarChar(10)
   itsRounding  String @default("UP") @db.VarChar(10)
 
@@ -1868,6 +1871,7 @@ model EmployeeBonus {
 
   // 🤖 ORIGINE
   isAutomatic Boolean @default(false) // true = calculé par convention, false = manuel
+  isNature    Boolean @default(false)
   ruleId      String? @db.Uuid // Lien vers la règle de convention (si auto)
 
   // 🟢 ACTIVATION
@@ -5814,6 +5818,10 @@ model ActivityLog {
 // ─── Erreurs applicatives (Error Tracker) ────────────────────────────────────
 
 model AppError {
+  groupId    String? @db.Uuid
+  group      ErrorGroup? @relation(fields: [groupId], references: [id], onDelete: SetNull)
+  context    Json?
+  occurrences Int @default(1)
   id         String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   errorCode  String    @db.VarChar(100)
   statusCode Int       @db.SmallInt
@@ -5839,7 +5847,38 @@ model AppError {
   @@index([errorCode])
   @@index([createdAt])
   @@index([resolved])
+  @@index([groupId, createdAt])
   @@map("app_errors")
+}
+
+model ErrorGroup {
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  fingerprint String @unique @db.VarChar(64)
+  source String @db.VarChar(20)
+  severity String @db.VarChar(20)
+  status String @default("NEW") @db.VarChar(20)
+  firstSeen DateTime @default(now()) @db.Timestamptz
+  lastSeen DateTime @default(now()) @db.Timestamptz
+  count Int @default(0)
+  companyCount Int @default(0)
+  userCount Int @default(0)
+  version String? @db.VarChar(100)
+  note String? @db.VarChar(2000)
+  errors AppError[]
+  actors ErrorGroupActor[]
+  @@index([status, severity, lastSeen])
+  @@index([source, lastSeen])
+  @@map("error_groups")
+}
+
+model ErrorGroupActor {
+  groupId String @db.Uuid
+  group ErrorGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  kind String @db.VarChar(10)
+  actorId String @db.Uuid
+  @@id([groupId, kind, actorId])
+  @@index([kind, actorId])
+  @@map("error_group_actors")
 }
 
 model SystemLog {

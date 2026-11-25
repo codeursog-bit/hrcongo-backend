@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import { PrismaClient } from '@prisma/client';
 import { employeeRecordFilter } from './employee-record-filter';
+import { captureIncident } from '../incidents/incident-sink';
 
 @Injectable()
 export class PrismaService
@@ -27,6 +28,20 @@ export class PrismaService
           : ['error'],
     });
     this.$use(employeeRecordFilter);
+    this.$use(async (params, next) => {
+      if (['AppError','ErrorGroup','ErrorGroupActor','SystemLog','Notification','NotificationDedupKey','PushDelivery'].includes(params.model || '')) return next(params);
+      const start = Date.now();
+      try {
+        const result = await next(params);
+        const durationMs = Date.now() - start;
+        if (durationMs >= Math.max(100, Number(process.env.INCIDENTS_SLOW_QUERY_MS) || 5000)) captureIncident({source:'BACK',code:'SLOW_QUERY',message:`Requête lente : ${params.model || 'SQL'}.${params.action}`,path:`/database/${params.model || 'SQL'}/${params.action}`,severity:'WARN',context:{durationMs}});
+        return result;
+      } catch (error) {
+        const code = (error as any)?.code || 'DB_ERROR';
+        captureIncident({source:'THIRD_PARTY',code,message:`Base de données : ${code}`,path:`/database/${params.model || 'SQL'}/${params.action}`,severity:/P1001|P1002|P1008|P1017/.test(code)?'CRITICAL':'ERROR',context:{durationMs:Date.now()-start}});
+        throw error;
+      }
+    });
   }
 
   async onModuleInit() {

@@ -21,6 +21,7 @@ import { PayrollBonusesService } from './payroll-bonuses.service';
 import { CompanyTaxService } from '../../company-taxes/company-tax.service';
 import { LeavesService } from '../../leaves/leaves.service'; // 🆕
 import { YtdCheckpointService } from './ytd-checkpoint.service';
+import { payrollLeavePeriod } from './payroll-leave-period';
 import { PayrollNetTargetService } from './payroll-net-target.service'; // 🧮 option « paie sur le net »
 
 // 🆕 Interface pour les données congé passées au calculator
@@ -341,7 +342,7 @@ export class PayrollGeneratorService {
       async (empId) => {
         try {
           leaveBalancesByEmployee[empId] =
-            await this.leavesService.getTotalLeaveBalanceSummary(empId);
+            await payrollLeavePeriod(this.prisma, empId, monthNum, year);
         } catch {
           leaveBalancesByEmployee[empId] = null;
         }

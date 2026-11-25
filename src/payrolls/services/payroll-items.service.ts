@@ -284,7 +284,7 @@ export class PayrollItemsService {
       let bonusBase: number | null = null;
       let bonusRate: number | null = null;
 
-      if (bonus.unitAmount && Number(bonus.unitAmount) > 0) {
+      if (bonus.unitAmount && Number(bonus.unitAmount) !== 0) {
         // Prime à quantité (ex: transport × jours)
         bonusBase = Math.round(Number(bonus.unitAmount));
         bonusRate = null;
@@ -373,6 +373,7 @@ export class PayrollItemsService {
         amount: bonus.amount,
         isTaxable: fiscalType !== 'NON_TAXABLE',
         isCnss: fiscalType === 'TAXABLE_CNSS',
+        isNature: bonus.isNature === true,
         order: ++order,
       });
     }
@@ -736,9 +737,19 @@ export class PayrollItemsService {
       }
     }
 
+    // L'arrondi ajuste uniquement le net payé ; il ne change aucune assiette.
+    if (calc.salaryRoundingAmount) {
+      items.push({
+        payrollId, code: 'SALARY_ROUNDING', label: 'Arrondi sur salaire',
+        type: 'DEDUCTION', amount: -calc.salaryRoundingAmount,
+        base: null, rate: null, quantity: null,
+        isTaxable: false, isCnss: false, order: ++order,
+      });
+    }
+
     // Ancienneté en première prime, congés en dernières lignes de gain.
     items.sort((a, b) => payrollItemRank(a) - payrollItemRank(b) || a.order - b.order);
-    items.forEach((item, index) => { item.order = index + 1; });
+    items.forEach((item, index) => { item.order = item.code === 'SALARY_ROUNDING' ? 999 : index + 1; });
 
     // ─── Persistance ─────────────────────────────────────────────────────────
     if (items.length > 0) {

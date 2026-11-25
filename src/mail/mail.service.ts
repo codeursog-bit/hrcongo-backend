@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Resend } from 'resend';
+import { captureIncident } from '../incidents/incident-sink';
 
 @Injectable()
 export class MailService {
@@ -135,15 +136,24 @@ export class MailService {
         ...(params.replyTo ? ({ replyTo: params.replyTo } as any) : {}),
       });
       if (error) {
+        captureIncident({source:'THIRD_PARTY',code:'MAIL_FAILURE',message:'Le service mail a refusé un message de recrutement.',path:'/third-party/mail',severity:'ERROR'});
         this.logger.error('❌ Resend error:', error);
         return false;
       }
       this.logger.log(`✅ Email recrutement envoyé → ${params.to}`);
       return true;
     } catch (e) {
+      captureIncident({source:'THIRD_PARTY',code:'MAIL_FAILURE',message:'Le service mail de recrutement est indisponible.',path:'/third-party/mail',severity:'ERROR'});
       this.logger.error(`❌ Échec envoi recrutement → ${params.to}:`, e);
       return false;
     }
+  }
+
+  async sendIncidentAlert(to: string, subject: string, message: string, path: string): Promise<boolean> {
+    const escape = (value: string) => value.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]!));
+    const base = process.env.FRONTEND_URL || 'http://localhost:3000';
+    const url = new URL(path, base).toString();
+    return this.send(to, subject, `<h2>${escape(subject)}</h2><pre style="white-space:pre-wrap">${escape(message)}</pre><p><a href="${escape(url)}">Consulter l’incident</a></p>`, `${message}\n${url}`, undefined, false);
   }
 
   private async send(
@@ -152,6 +162,7 @@ export class MailService {
     html: string,
     text: string,
     attachments?: { filename: string; content: Buffer }[],
+    monitorFailure = true,
   ): Promise<boolean> {
     try {
       const { error } = await this.resend.emails.send({
@@ -163,12 +174,14 @@ export class MailService {
         ...(attachments?.length ? { attachments } : {}),
       });
       if (error) {
+        if (monitorFailure) captureIncident({source:'THIRD_PARTY',code:'MAIL_FAILURE',message:'Le service mail a refusé un envoi.',path:'/third-party/mail',severity:'ERROR'});
         this.logger.error('❌ Resend error:', error);
         return false;
       }
       this.logger.log(`✅ Email envoyé → ${to}`);
       return true;
     } catch (e) {
+      if (monitorFailure) captureIncident({source:'THIRD_PARTY',code:'MAIL_FAILURE',message:'Le service mail est indisponible.',path:'/third-party/mail',severity:'ERROR'});
       this.logger.error(`❌ Échec envoi → ${to}:`, e);
       return false;
     }

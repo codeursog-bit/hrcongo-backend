@@ -27,6 +27,7 @@ import {
   resolveCycleWindow,
   isLeaveEligibleContract,
 } from './leaves-common.util';
+import { accruedLeaveDays } from './leave-accrual-math';
 import { CONGO_LEAVE } from './leaves.constants';
 import { LeavesIndemnityService } from './leaves-indemnity.service';
 
@@ -142,9 +143,9 @@ export class LeavesBalanceService {
     )[0];
 
     return {
-      annualEntitled: Math.round(annualEntitled * 10) / 10,
-      annualTaken: Math.round(annualTaken * 10) / 10,
-      annualRemaining: Math.round(annualRemaining * 10) / 10,
+      annualEntitled: Math.round(annualEntitled * 100) / 100,
+      annualTaken: Math.round(annualTaken * 100) / 100,
+      annualRemaining: Math.round(annualRemaining * 100) / 100,
       seniorityDays: Math.round(seniorityDays * 10) / 10,
       carriedForward: Math.round(carriedForward * 10) / 10,
       cyclesCount: rows.length,
@@ -1153,17 +1154,10 @@ export class LeavesBalanceService {
       return;
     }
 
-    // ✅ Déjà crédité pour ce mois/année — évite le double accrual si on
-    // régénère ou re-sauvegarde le même bulletin.
-    if (
-      (balance as any).lastAccrualMonth === month &&
-      (balance as any).lastAccrualYear === year
-    ) {
-      this.logger.log(
-        `⏭️ ${employee.firstName} ${employee.lastName} — Accrual déjà fait pour ${month}/${year}`,
-      );
-      return;
-    }
+    // Une paie ancienne ne doit jamais diminuer les droits déjà acquis.
+    const lastMonth = (balance as any).lastAccrualMonth;
+    const lastYear = (balance as any).lastAccrualYear;
+    if (lastMonth && lastYear && year * 12 + month < lastYear * 12 + lastMonth) return;
 
     // ✅ Nombre de mois pleins écoulés depuis le début du cycle jusqu'au
     // mois du bulletin traité (0-12) — sert à calculer la cible ENTIÈRE
@@ -1178,14 +1172,9 @@ export class LeavesBalanceService {
       ),
     );
 
-    // ✅ Cible ENTIÈRE pour ce nombre de mois — jamais de virgule, et pile
-    // 26 au 12e mois (2, 4, 6, 9, 11, 13, 15, 17, 20, 22, 24, 26).
-    // On FIXE la base (pas un +=) : auto-corrige toute dérive passée
-    // (double accrual d'avant le fix, mois sauté...) au lieu de l'empiler.
-    const targetBase = Math.min(
-      Math.round((monthsElapsed * CONGO_LEAVE.ANNUAL_DAYS) / 12),
-      CONGO_LEAVE.ANNUAL_DAYS,
-    );
+    // Cible cumulée à deux décimales : 2,17 ; 4,33 ; … ; 26.
+    // La répétition du même mois n'ajoute aucun droit supplémentaire.
+    const targetBase = accruedLeaveDays(monthsElapsed, CONGO_LEAVE.ANNUAL_DAYS);
 
     const currentBase =
       Number(balance.annualEntitled) - Number(balance.seniorityDays);

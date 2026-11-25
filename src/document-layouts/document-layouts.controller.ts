@@ -26,6 +26,15 @@ import { FileInterceptor } from '@nestjs/platform-express';
 import { CloudinaryService } from '../cloudinary/cloudinary.service';
 
 type CompanyRequest = Request & { user: { companyId?: string } };
+const supportedTypes = [
+  'PAYSLIP',
+  'CONTRACTOR_INVOICE',
+  'LEAVE',
+  'ABSENCE',
+  'EXIT_PERMISSION',
+  'LOAN',
+  'ADVANCE',
+];
 
 @Controller('document-layouts')
 @UseGuards(AuthGuard('jwt'), RolesGuard)
@@ -70,11 +79,17 @@ export class DocumentLayoutsController {
   }
 
   private supported(docType: string) {
-    if (docType !== 'PAYSLIP')
+    if (!supportedTypes.includes(docType))
       throw new NotFoundException(
         'Ce type de document n’est pas encore disponible.',
       );
     return docType;
+  }
+
+  @Get('rights')
+  @Roles('ADMIN', 'HR_MANAGER')
+  rights(@Req() req: CompanyRequest) {
+    return this.layouts.rights(req.user.companyId);
   }
 
   @Get(':docType')

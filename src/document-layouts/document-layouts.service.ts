@@ -11,6 +11,7 @@ import {
 import type { DocumentLayout } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { validateLayoutBody } from './layout-validation';
+import { effectiveCompanyLimits } from '../subscriptions/entitlements.service';
 
 const selection = {
   id: true,
@@ -85,14 +86,34 @@ export class DocumentLayoutsService {
         'Patientez avant d’enregistrer un autre modèle.',
         429,
       );
-    const draft = validateLayoutBody(body);
+    const draft = validateLayoutBody(body, docType);
     const layout = await this.prisma.$transaction(async (tx) => {
-      // L’écriture de l’entreprise sérialise les activations d’un même tenant.
-      const company = await tx.company.update({
+      const rights = await this.rights(scope.companyId, tx);
+      if (
+        draft.basePreset === 'BLANK' &&
+        !rights.canBuildDocumentsFromScratch
+      ) {
+        throw new ForbiddenException(
+          'La page blanche est réservée au plan Entreprise.',
+        );
+      }
+      if (!rights.canCustomizeDocuments) {
+        throw new ForbiddenException(
+          'La personnalisation est disponible à partir du plan Pro.',
+        );
+      }
+      const company = await tx.company.findUniqueOrThrow({
         where: { id: scope.companyId },
-        data: { documentTemplate: 'CUSTOM' },
-        select: { logo: true },
+        select: { logo: true, documentTemplate: true },
       });
+      if (
+        draft.basePreset === 'HIST_ORCA' &&
+        company.documentTemplate !== 'ORCA'
+      ) {
+        throw new ForbiddenException(
+          'Le gabarit Orca est réservé aux entreprises qui l’utilisent.',
+        );
+      }
       const asset = draft.config.logo?.assetUrl;
       if (asset && asset !== company.logo) {
         const url = new URL(asset);
@@ -107,10 +128,14 @@ export class DocumentLayoutsService {
           );
         }
       }
+      const savedDraft = {
+        ...draft,
+        config: { ...draft.config, independent: true },
+      };
       return tx.documentLayout.upsert({
         where: { companyId_docType: scope },
-        create: { ...scope, ...draft },
-        update: { ...draft, version: { increment: 1 } },
+        create: { ...scope, ...savedDraft },
+        update: { ...savedDraft, version: { increment: 1 } },
         select: selection,
       });
     });
@@ -120,6 +145,11 @@ export class DocumentLayoutsService {
 
   async checkLogoUpload(companyId?: string) {
     const id = this.company(companyId);
+    if (!(await this.rights(id)).canCustomizeDocuments) {
+      throw new ForbiddenException(
+        'La personnalisation est disponible à partir du plan Pro.',
+      );
+    }
     const rate = await this.throttler.increment(
       `document-layout-logos:${id}`,
       60_000,
@@ -130,6 +160,21 @@ export class DocumentLayoutsService {
     if (rate.isBlocked)
       throw new HttpException('Patientez avant d’importer un autre logo.', 429);
     return id;
+  }
+
+  async rights(
+    companyId?: string,
+    client: Pick<PrismaService, 'subscription'> = this.prisma,
+  ) {
+    const limits = await effectiveCompanyLimits(
+      client,
+      this.company(companyId),
+    );
+    return {
+      canCustomizeDocuments: limits.canCustomizeDocuments === true,
+      canBuildDocumentsFromScratch:
+        limits.canBuildDocumentsFromScratch === true,
+    };
   }
 
   async reset(companyId: string | undefined, docType: string) {

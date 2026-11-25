@@ -10,7 +10,7 @@ export async function validateAccessSession(prisma: PrismaService, payload: any)
   }
   const session = await prisma.userSession.findUnique({
     where: { jti: payload.sid },
-    include: { user: { select: { isActive: true, role: true, email: true } } },
+    include: { user: { select: { isActive: true, role: true, email: true, companyId: true, manageMultipleCompanies: true } } },
   });
   if (!session || session.userId !== payload.sub || session.revokedAt ||
       session.expiresAt <= new Date() || !session.user.isActive) {
@@ -18,6 +18,10 @@ export async function validateAccessSession(prisma: PrismaService, payload: any)
   }
   let role = session.user.role;
   let cabinetId = payload.cabinetId ?? null;
+  let companyId = session.user.companyId ?? null;
+  if (role !== 'CABINET_ADMIN' && role !== 'CABINET_GESTIONNAIRE' && (payload.companyId ?? null) !== companyId) {
+    throw new UnauthorizedException('Entreprise active modifiée. Actualisez votre session.');
+  }
   if (role === 'CABINET_ADMIN' || role === 'CABINET_GESTIONNAIRE') {
     const member = await prisma.cabinetUser.findFirst({
       where: { userId: payload.sub, ...(cabinetId ? { cabinetId } : {}), cabinet: { isActive: true } },
@@ -26,14 +30,17 @@ export async function validateAccessSession(prisma: PrismaService, payload: any)
     if (!member) throw new UnauthorizedException('Accès au cabinet révoqué ou cabinet désactivé');
     cabinetId = member.cabinetId;
     role = member.role === 'CABINET_ADMIN' ? 'CABINET_ADMIN' : 'CABINET_GESTIONNAIRE';
+    companyId = payload.companyId ?? null;
+    if (companyId && !await prisma.cabinetCompany.findFirst({where:{cabinetId,companyId,isActive:true},select:{id:true}})) throw new UnauthorizedException('Accès entreprise du cabinet révoqué.');
   }
+  if (session.user.manageMultipleCompanies && companyId && role !== 'SUPER_ADMIN' && !await prisma.userCompany.findUnique({where:{userId_companyId:{userId:payload.sub,companyId}},select:{id:true}})) throw new UnauthorizedException('Rattachement au portefeuille révoqué.');
   return {
     id: payload.sub, // ✅ AJOUT — req.user.id fonctionne partout
     userId: payload.sub,
     sessionId: payload.sid,
     email: session.user.email,
     role,
-    companyId: payload.companyId ?? null,
+    companyId,
     cabinetId,
     managedByCabinet: payload.managedByCabinet ?? false,
   };

@@ -718,9 +718,6 @@ export class YabetooPayService {
         },
       };
 
-      this.logger.log(
-        `📦 Confirm payload: ${JSON.stringify(payload, null, 2)}`,
-      );
 
       const response = await this.apiClient.post<PaymentConfirmationResponse>(
         `/payment-intents/${dto.intentId}/confirm`,
@@ -844,12 +841,7 @@ export class YabetooPayService {
         },
       };
 
-      this.logger.log(
-        `💸 Creating disbursement: ${dto.amount} ${dto.currency} → ${msisdn} via ${operator.toUpperCase()}`,
-      );
-      this.logger.log(
-        `📦 Disbursement payload: ${JSON.stringify(payload, null, 2)}`,
-      );
+      this.logger.log('Création de décaissement auprès du prestataire.');
 
       // Endpoint : POST /v1/disbursements (PLURIEL)
       const response = await this.apiClient.post<DisbursementResponse>(

@@ -5,7 +5,7 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
-import { Cron } from '@nestjs/schedule';
+import { IncidentCron as Cron } from '../incidents/incident-cron.decorator';
 import { randomUUID } from 'node:crypto';
 import { anniversaryMessage } from './anniversary-message';
 import { Prisma } from '@prisma/client';

@@ -67,6 +67,7 @@ export class UpdatePayrollDto {
     rate?: number;
     isTaxable?: boolean;
     isCnss?: boolean;
+    isNature?: boolean;
     fiscalType?: 'TAXABLE_CNSS' | 'TAXABLE_NO_CNSS' | 'NON_TAXABLE';
   }>;
 

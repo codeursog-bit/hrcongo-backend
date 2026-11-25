@@ -1,3 +1,4 @@
+import { PayrollCostSummaryService, PayrollCostSummary } from './payroll-cost-summary.service';
 // ============================================================================
 // 📁 src/payroll-journal/payroll-journal.service.ts
 // ✅ JOURNAL DE PAIE — lecture seule. N'écrit RIEN et ne recalcule RIEN :
@@ -106,6 +107,7 @@ export interface JournalTotals {
 }
 
 export interface PayrollJournal {
+  costSummary: PayrollCostSummary;
   month: number;
   year: number;
   generatedAt: string;
@@ -213,9 +215,9 @@ const pct = (a: number, b: number) => (b > 0 ? Math.round((a / b) * 1000) / 10 :
 
 @Injectable()
 export class PayrollJournalService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly prisma: PrismaService, private readonly costSummaryService: PayrollCostSummaryService) {}
 
-  private async resolveCompanyId(
+  async resolveCompanyId(
     userId: string,
     overrideCompanyId?: string,
   ): Promise<string> {
@@ -664,6 +666,7 @@ export class PayrollJournalService {
       },
       rows,
       totals,
+      costSummary: await this.costSummaryService.get(companyId, month, year),
       summary: {
         headcount: rows.length,
         expatCount: expatRows.length,

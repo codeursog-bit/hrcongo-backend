@@ -66,6 +66,7 @@ export class LoansDocumentsService {
         cachetUrl: true,
         documentTemplate: true,
         documentFooterText: true,
+        id: true,
       },
     });
 
@@ -142,6 +143,7 @@ export class LoansDocumentsService {
         cachetUrl: true,
         documentTemplate: true,
         documentFooterText: true,
+        id: true,
       },
     });
 

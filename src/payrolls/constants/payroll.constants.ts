@@ -64,6 +64,7 @@ export enum SmicProtectionMode {
 export interface CalculatedPayroll {
   grossSalary: number;
   netSalary: number;
+  salaryRoundingAmount?: number;
   cnssSalarial: number;
   its: number;
   totalDeductions: number;

@@ -5,7 +5,7 @@
 // ============================================================================
 
 import { Injectable, Logger } from '@nestjs/common';
-import { Cron } from '@nestjs/schedule';
+import { IncidentCron as Cron } from '../incidents/incident-cron.decorator';
 import { EchelonSuggestionsService } from './echelon-suggestions.service';
 
 @Injectable()

@@ -14,6 +14,8 @@ import {
 } from '@nestjs/common';
 import { Request, Response } from 'express';
 import { PrismaService } from '../prisma/prisma.service';
+import { IncidentsService } from '../incidents/incidents.service';
+import { safeIncidentText, safeIncidentPath } from '../incidents/incident-privacy';
 
 // Champs sensibles à ne jamais logguer (insensible à la casse, à n'importe quel niveau)
 const REDACT = new Set([
@@ -62,7 +64,7 @@ const EXPECTED_CLIENT_ERRORS: Array<{ path: RegExp; statuses: number[] }> = [
 export class GlobalExceptionFilter implements ExceptionFilter {
   private readonly logger = new Logger('ErrorTracker');
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly prisma: PrismaService, private readonly incidents?: IncidentsService) {}
 
   async catch(exception: unknown, host: ArgumentsHost) {
     const ctx = host.switchToHttp();
@@ -125,6 +127,8 @@ export class GlobalExceptionFilter implements ExceptionFilter {
 
     // ── Ne pas stocker certains statuts / chemins ────────────────────────────
     const path = request.path ?? request.url ?? '';
+    if (path.startsWith('/client-errors')) return;
+    if (statusCode === 401 && /\/auth\/login/.test(path)) this.incidents?.capture({source:'BACK',code:'AUTH_FAILURE',message:'Échec d’authentification.',path:'/auth/login',severity:'WARN'});
     if (SKIP_STATUSES.has(statusCode) || SKIP_PATHS_REGEX.test(path)) {
       return;
     }
@@ -133,11 +137,11 @@ export class GlobalExceptionFilter implements ExceptionFilter {
 
     // ── Log console ─────────────────────────────────────────────────────────
     const privateRoute = isDailyPrivateRoute(path);
-    const storedMessage = privateRoute && statusCode >= 500 ? 'Erreur interne du module quotidien.' : message;
+    const storedMessage = privateRoute && statusCode >= 500 ? 'Erreur interne du module quotidien.' : safeIncidentText(message);
     const logLine = `[${statusCode}] ${errorCode} | ${request.method} ${path} | ${storedMessage}`;
     if (statusCode >= 500) {
       this.logger.error(logLine);
-      if (!privateRoute && exception instanceof Error) this.logger.error(exception.stack);
+      if (!privateRoute && exception instanceof Error) this.logger.error(safeIncidentText(exception.stack,6000));
     } else {
       this.logger.warn(logLine);
     }
@@ -146,15 +150,22 @@ export class GlobalExceptionFilter implements ExceptionFilter {
     const user = (request as any).user;
     const userId = user?.userId ?? null;
     const companyId = user?.companyId ?? null;
+    if (statusCode >= 500 && this.incidents?.enabled) {
+      this.incidents.capture({source:'BACK',code:errorCode,message:storedMessage,
+        stack:!privateRoute && exception instanceof Error ? exception.stack : undefined,
+        path,method:request.method,statusCode,severity:/payroll|paie|cnss/i.test(path)?'CRITICAL':'ERROR',userId,companyId,
+        version:process.env.APP_VERSION});
+      return;
+    }
     const ip =
       (request.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() ??
       request.ip ??
       null;
 
-    const sanitizedBody = privateRoute ? { redacted: true } : this.sanitize(request.body);
+    const sanitizedBody = privateRoute ? { redacted: true } : request.body && typeof request.body === 'object' ? {fields:Object.keys(request.body).slice(0,30)} : undefined;
     const sanitizedQuery =
       request.query && Object.keys(request.query).length
-        ? privateRoute ? { redacted: true } : this.sanitize(request.query)
+        ? privateRoute ? { redacted: true } : { fields: Object.keys(request.query).slice(0,30) }
         : undefined;
 
     this.prisma.appError
@@ -165,15 +176,15 @@ export class GlobalExceptionFilter implements ExceptionFilter {
           message: storedMessage,
           stack:
             !privateRoute && statusCode >= 500 && exception instanceof Error
-              ? (exception.stack?.slice(0, 2000) ?? null)
+              ? safeIncidentText(exception.stack,2000)
               : null,
           method: request.method,
-          path,
+          path: safeIncidentPath(path),
           body: sanitizedBody ?? undefined,
           query: sanitizedQuery ?? undefined,
           userId,
           companyId,
-          ip,
+          ip: ip?.includes(':') ? ip.split(':').slice(0,3).join(':')+'::' : ip?.split('.').slice(0,3).join('.')+'.0',
           severity,
         },
       } as any)
