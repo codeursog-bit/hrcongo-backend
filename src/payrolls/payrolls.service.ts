@@ -1173,6 +1173,8 @@ import {
 } from '../exceptions/business.exceptions';
 
 import { validateSimulationInput } from './payroll-simulation-validation';
+import { buildJournalEntries } from '../accounting/payroll-journal-entries';
+import { ACCOUNTABLE_STATUSES } from '../compta-connector/payroll-contract';
 
 export interface SimulatePayrollOverrides {
   baseSalary?: number;
@@ -3716,156 +3718,41 @@ export class PayrollsService {
       user.companyId,
       'hasPayrollAccountingExport',
     );
+    // ✅ Bulletins validés / à payer / payés uniquement (ni brouillon, ni annulés).
     const payrolls = await this.prisma.payroll.findMany({
-      where: { companyId: user.companyId, month, year },
+      where: {
+        companyId: user.companyId,
+        month,
+        year,
+        status: { in: [...ACCOUNTABLE_STATUSES] },
+      } as any,
       include: {
+        items: { orderBy: [{ order: 'asc' }, { id: 'asc' }] },
         employee: {
           select: {
+            id: true,
             employeeNumber: true,
             firstName: true,
             lastName: true,
-            contractType: true,
-            isResident: true,
+            nationality: true,
           },
         },
       },
     });
-    const entries: any[] = [];
-    for (const p of payrolls) {
-      const name = `${p.employee.firstName} ${p.employee.lastName}`;
-      const piece = `PAY-${p.employee.employeeNumber}-${month}-${year}`;
-      entries.push(
-        // ── Écriture 1 : Charge salariale (OHADA classe 6 & 4) ──────────────
-        {
-          date: p.periodEnd,
-          journal: 'PAIE',
-          piece,
-          account: '661100',
-          label: `Salaires bruts - ${name}`,
-          debit: Number(p.grossSalary),
-          credit: 0,
-        },
-        {
-          date: p.periodEnd,
-          journal: 'PAIE',
-          piece,
-          account: '431100',
-          label: `CNSS salarié - ${name}`,
-          debit: 0,
-          credit: Number(p.cnssSalarial),
-        },
-        {
-          date: p.periodEnd,
-          journal: 'PAIE',
-          piece,
-          account: '422100',
-          label: `Rémunération due - ${name}`,
-          debit: 0,
-          credit: Number(p.netSalary),
-        },
-      );
-
-      // ── ✅ ITS ou BNC — jamais le même compte, jamais le même libellé.
-      // p.its contient soit un vrai ITS (CDI/CDD), soit une retenue BNC
-      // 10%/20% (prestataires) selon payroll-calculator.service.ts — on
-      // reclasse ici pour ne jamais les confondre dans le journal.
-      const fiscalCategory = classifyFiscalCategory(
-        (p.employee as any).contractType,
-        (p.employee as any).isResident,
-      );
-      const itsOrBncAmount = Number(p.its);
-      if (itsOrBncAmount > 0) {
-        if (fiscalCategory === 'BNC_10' || fiscalCategory === 'BNC_20') {
-          const rate = fiscalCategory === 'BNC_10' ? '10%' : '20%';
-          entries.push({
-            date: p.periodEnd,
-            journal: 'PAIE',
-            piece,
-            // ⚠️ Compte distinct de l'ITS (447200) — à faire confirmer par
-            // votre comptable si vous avez déjà un compte BNC dédié dans
-            // votre plan comptable, sinon ce sous-compte convient.
-            account: '447450',
-            label: `Retenue BNC ${rate} (prestataire) - ${name}`,
-            debit: 0,
-            credit: itsOrBncAmount,
-          });
-        } else {
-          entries.push({
-            date: p.periodEnd,
-            journal: 'PAIE',
-            piece,
-            account: '447200',
-            label: `ITS/IRPP retenu - ${name}`,
-            debit: 0,
-            credit: itsOrBncAmount,
-          });
-        }
-      }
-      // ── Écriture 2 : Charges patronales (OHADA 664 & 641 & 431) ────────
-      if (Number(p.cnssEmployer) > 0) {
-        entries.push(
-          {
-            date: p.periodEnd,
-            journal: 'PAIE',
-            piece,
-            account: '664100',
-            label: `Charges patronales CNSS - ${name}`,
-            debit: Number(p.cnssEmployer),
-            credit: 0,
-          },
-          {
-            date: p.periodEnd,
-            journal: 'PAIE',
-            piece,
-            account: '431300',
-            label: `CNSS employeur à verser - ${name}`,
-            debit: 0,
-            credit: Number(p.cnssEmployer),
-          },
-        );
-      }
-      if (Number((p as any).tusTotal ?? 0) > 0) {
-        const tusDgi = Number((p as any).tusDgiAmount ?? 0);
-        const tusCnss = Number((p as any).tusCnssAmount ?? 0);
-        const tusTotal = Number((p as any).tusTotal ?? 0);
-        entries.push(
-          {
-            date: p.periodEnd,
-            journal: 'PAIE',
-            piece,
-            account: '641300',
-            label: `TUS (7,5%) - ${name}`,
-            debit: tusTotal,
-            credit: 0,
-          },
-          {
-            date: p.periodEnd,
-            journal: 'PAIE',
-            piece,
-            // ⚠️ Distinct de 447200 (ITS) — les deux étaient confondus sur
-            // le même compte avant, ce qui rendait le TUS-DGI impossible à
-            // isoler de l'ITS dans la balance.
-            account: '447500',
-            label: `TUS-DGI à reverser - ${name}`,
-            debit: 0,
-            credit: tusDgi,
-          },
-          {
-            date: p.periodEnd,
-            journal: 'PAIE',
-            piece,
-            // ⚠️ Distinct de 431300 (CNSS employeur) — même souci que
-            // ci-dessus, les deux passifs étaient mélangés sur un seul
-            // compte.
-            account: '431400',
-            label: `TUS-CNSS à reverser - ${name}`,
-            debit: 0,
-            credit: tusCnss,
-          },
-        );
-      }
+    let mappings: Record<string, string> | null = null;
+    try {
+      const link = await (this.prisma as any).comptaConnector?.findUnique({
+        where: { companyId: user.companyId },
+      });
+      mappings = (link?.mappings as Record<string, string>) ?? null;
+    } catch {
+      mappings = null;
     }
-    return { month, year, totalEntries: entries.length, entries };
+    // ✅ Source unique : plan SYSCOHADA par défaut + affectations de l'entreprise,
+    //    brut ventilé, écritures équilibrées. Un bulletin non comptabilisable est
+    //    listé dans `issues` (jamais d'écriture déséquilibrée).
+    const { entries, issues } = buildJournalEntries(payrolls as any, mappings);
+    return { month, year, totalEntries: entries.length, entries, issues };
   }
 
   // ============================================================================

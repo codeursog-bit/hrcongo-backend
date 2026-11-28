@@ -7,6 +7,10 @@ import {
 } from '../common/working-days.util';
 import { congoDateString } from '../common/utils/congo-time';
 import { planLeaves } from './leave-planner';
+import { splitLeaveDays } from '../leaves/leaves-common.util';
+import { CONGO_LEAVE } from '../leaves/leaves.constants';
+import { buildRequestAdvice, type AdviceCard } from './request-advice';
+import { buildFinanceAdvice } from './finance-advice';
 export const ANALYSIS_TOOLS = [
   'headcount_summary',
   'explain_payroll_variation',
@@ -21,16 +25,27 @@ export const ANALYSIS_TOOLS = [
   'absences_ranking',
   'lateness_ranking',
   'leave_planning',
+  'leave_request_advice',
+  'absence_request_advice',
+  'permission_request_advice',
+  'loan_request_advice',
+  'advance_request_advice',
 ] as const;
 export type AnalysisTool = (typeof ANALYSIS_TOOLS)[number];
 export interface ToolIntent {
   tool: AnalysisTool;
+  /** Fourni uniquement par l'écran de validation, jamais par le modèle. */
+  requestId?: string;
   month: number;
   year: number;
   employeeId?: string;
   days?: number;
 }
 export interface ToolCard {
+  /** Conseil de décision (outils *_request_advice) : verdict + constats codés. */
+  advice?: AdviceCard;
+  /** Demande analysée, pour ouvrir/valider depuis la carte. */
+  requestId?: string;
   title: string;
   period: string;
   source: string;
@@ -51,6 +66,8 @@ export interface ToolCard {
     value?: number;
     unit?: string;
     path?: string;
+    /** Congé proposé (planification) : dates exactes pour créer le congé en un clic. */
+    plan?: { start: string; end: string };
   }[];
 }
 const money = (v: unknown) => new Prisma.Decimal(String(v ?? 0));
@@ -91,6 +108,32 @@ export async function runAnalysisTool(
     unit,
     path: '/employes/' + id,
   });
+  if (i.tool === 'loan_request_advice' || i.tool === 'advance_request_advice') {
+    if (!i.employeeId) return null;
+    return buildFinanceAdvice(tx, companyId, {
+      kind: i.tool === 'loan_request_advice' ? 'LOAN' : 'ADVANCE',
+      employeeId: i.employeeId,
+      requestId: i.requestId,
+    });
+  }
+  if (
+    i.tool === 'leave_request_advice' ||
+    i.tool === 'absence_request_advice' ||
+    i.tool === 'permission_request_advice'
+  ) {
+    if (!i.employeeId) return null;
+    const kind =
+      i.tool === 'leave_request_advice'
+        ? 'LEAVE'
+        : i.tool === 'absence_request_advice'
+          ? 'ABSENCE'
+          : 'PERMISSION';
+    return buildRequestAdvice(tx, companyId, {
+      kind,
+      employeeId: i.employeeId,
+      requestId: i.requestId,
+    });
+  }
   if (i.tool === 'explain_payroll_variation') {
     const previous = {
       month: i.month === 1 ? 12 : i.month - 1,
@@ -521,14 +564,17 @@ export async function runAnalysisTool(
     );
     Object.defineProperty(balance, 'logger', { value: quiet });
     const remainingBy = new Map<string, number>();
+    const seniorityBy = new Map<string, number>();
     let unavailable = 0;
     for (const e of considered) {
       try {
         if (!(await balance.getLeaveEligibility(e.id)).eligible) continue;
         const r = await balance.getTotalLeaveBalanceSummary(e.id);
         const rem = Number(r.annualRemaining);
-        if (Number.isFinite(rem)) remainingBy.set(e.id, rem);
-        else unavailable++;
+        if (Number.isFinite(rem)) {
+          remainingBy.set(e.id, rem);
+          seniorityBy.set(e.id, Number(r.seniorityDays) || 0);
+        } else unavailable++;
       } catch {
         unavailable++;
       }
@@ -580,6 +626,7 @@ export async function runAnalysisTool(
           departmentId: e.departmentId,
           hireDate: e.hireDate,
           remaining: remainingBy.get(e.id)!,
+          seniorityDays: seniorityBy.get(e.id) ?? 0,
           lastReturn: lastReturn.get(e.id) ?? null,
         })),
       leaves: leaves.map((l) => ({
@@ -591,10 +638,12 @@ export async function runAnalysisTool(
       workDays,
       holidays: new Set(holidays.map((h) => String(h.date))),
       deptSize: new Map(deptCounts.map((d) => [d.departmentId, d._count._all])),
+      maxDays: 30,
     });
+    const holidaySet = new Set(holidays.map((h) => String(h.date)));
     const iso = (d: Date) => d.toISOString().slice(0, 10);
     const notes = [
-      'Suggestion indicative, calculée par des règles simples : priorité aux soldes les plus élevés puis à l’ancienneté, au plus 25 % d’un même département absent en même temps, jamais plus de 10 jours ouvrés d’affilée, hors jours fériés. Aucune demande de congé n’est créée : la décision reste à la direction selon l’activité.',
+      'Suggestion indicative, calculée par des règles simples : priorité aux soldes les plus élevés puis à l’ancienneté, au plus 25 % d’un même département absent en même temps, durée limitée au solde restant, hors jours fériés. Aucun congé n’est créé tant que vous ne cliquez pas sur « Planifier ces congés » : la décision reste à la direction selon l’activité.',
     ];
     if (all.length > LIMIT)
       notes.push('Analyse limitée aux ' + LIMIT + ' employés les plus anciens.');
@@ -617,24 +666,42 @@ export async function runAnalysisTool(
         { label: 'Solde insuffisant', value: plan.lowBalance },
         { label: 'Propositions de congé', value: plan.proposals.length },
       ],
-      rows: plan.proposals.map((p, n) => ({
-        ...row(
-          p.employeeId,
-          n,
-          'Du ' +
-            iso(p.start) +
-            ' au ' +
-            iso(p.end) +
-            ' · solde ' +
-            p.remaining +
-            ' j · ancienneté ' +
-            p.seniorityYears +
-            ' an(s)',
-          p.workingDays,
-          'jours ouvrés',
-        ),
-        path: '/conges/planning',
-      })),
+      rows: plan.proposals.map((p, n) => {
+        const fr = (s: string) => s.split('-').reverse().join('/');
+        const split = splitLeaveDays({
+          baseEntitled: CONGO_LEAVE.ANNUAL_DAYS,
+          seniorityEntitled: p.seniorityDays,
+          takenBefore: Math.max(
+            0,
+            CONGO_LEAVE.ANNUAL_DAYS + p.seniorityDays - p.remaining,
+          ),
+          requestedDays: p.workingDays,
+        });
+        const back = nextWorkingDay(p.end, workDays, holidaySet);
+        return {
+          ...row(
+            p.employeeId,
+            n,
+            'Du ' +
+              fr(iso(p.start)) +
+              ' au ' +
+              fr(iso(p.end)) +
+              ' · retour le ' +
+              fr(back) +
+              ' · ' +
+              split.usedBase +
+              ' j de base + ' +
+              split.usedSeniority +
+              ' j d’ancienneté · solde ' +
+              p.remaining +
+              ' j',
+            p.workingDays,
+            'jours ouvrés',
+          ),
+          path: '/conges/planning',
+          plan: { start: iso(p.start), end: iso(p.end) },
+        };
+      }),
     };
   }
   if (i.tool === 'leave_balance' || i.tool === 'leave_allowance') {

@@ -17,6 +17,8 @@ import {
 import { AuthGuard } from '@nestjs/passport';
 import type { Response } from 'express';
 import { AssistantService } from './assistant.service';
+import { AssistantAnalysisService } from './assistant-analysis.service';
+import { BadRequestException, NotFoundException } from '@nestjs/common';
 import {
   AssistantOverrideDto,
   AssistantSettingsDto,
@@ -31,7 +33,65 @@ import {
 @Controller('assistant')
 @UseGuards(AuthGuard('jwt'))
 export class AssistantController {
-  constructor(private readonly service: AssistantService) {}
+  constructor(
+    private readonly service: AssistantService,
+    private readonly analyses: AssistantAnalysisService,
+  ) {}
+  /**
+   * Conseil sur une demande en attente, pour l'écran de validation / de création.
+   * Déterministe : aucun modèle d'IA, aucun crédit consommé. ADMIN et RH uniquement.
+   */
+  @Get('advice/:kind/:id') async advice(
+    @Req() r: any,
+    @Param('kind') kind: string,
+    @Param('id', new ParseUUIDPipe()) id: string,
+  ) {
+    const k = (
+      {
+        leave: 'LEAVE',
+        absence: 'ABSENCE',
+        permission: 'PERMISSION',
+        loan: 'LOAN',
+        advance: 'ADVANCE',
+      } as const
+    )[kind as 'leave' | 'absence' | 'permission' | 'loan' | 'advance'];
+    if (!k) throw new BadRequestException('Type de demande inconnu.');
+    const actor = await this.service.actor(r.user);
+    const card = await this.analyses.adviceForRequest(actor.id, actor.companyId, k, id);
+    if (!card) throw new NotFoundException('Aucun conseil disponible pour cette demande.');
+    return this.service.present(actor, { payload: { card } }).then((x) => x.payload.card);
+  }
+  /**
+   * Simulation d'un prêt ou d'une avance AVANT enregistrement (formulaire de création) :
+   * rien n'est écrit ni envoyé à un modèle d'IA. ADMIN et RH uniquement.
+   */
+  @Post('advice/simulate/:kind') async simulate(
+    @Req() r: any,
+    @Param('kind') kind: string,
+    @Body() body: any,
+  ) {
+    const k = ({ loan: 'LOAN', advance: 'ADVANCE' } as const)[kind as 'loan' | 'advance'];
+    if (!k) throw new BadRequestException('Type de demande inconnu.');
+    const num = (v: unknown, lo: number, hi: number) =>
+      typeof v === 'number' && Number.isFinite(v) && v >= lo && v <= hi ? v : undefined;
+    const amount = num(body?.amount, 1, 1e10);
+    if (
+      !amount ||
+      typeof body?.employeeId !== 'string' ||
+      !/^[0-9a-f-]{36}$/i.test(body.employeeId)
+    )
+      throw new BadRequestException('Employé et montant requis.');
+    const actor = await this.service.actor(r.user);
+    const card = await this.analyses.adviceSimulation(actor.id, actor.companyId, k, {
+      employeeId: body.employeeId,
+      amount,
+      monthlyRepayment: num(body?.monthlyRepayment, 0, 1e10),
+      durationMonths: num(body?.durationMonths, 1, 600),
+      deductMonthsAhead: num(body?.deductMonthsAhead, 0, 24),
+    });
+    if (!card) throw new NotFoundException('Aucun conseil disponible.');
+    return this.service.present(actor, { payload: { card } }).then((x) => x.payload.card);
+  }
   @Get('capabilities') async capabilities(@Req() r: any) {
     return this.service.capabilities(await this.service.actor(r.user));
   }

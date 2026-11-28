@@ -35,6 +35,13 @@ export interface MaskedView {
   }[];
   rows: { ref: string; rank: number; markers: string[] }[];
   departments: { ref: string; markers: string[] }[];
+  /** Conseil de décision : verdict et codes de constats ; valeurs et dates uniquement en marqueurs. */
+  advice?: {
+    kind: string;
+    verdict: string;
+    findings: { code: string; severity: string; markers: Record<string, string> }[];
+    alternative?: { start: string; end: string };
+  };
 }
 export type MaskResult =
   | {
@@ -73,6 +80,10 @@ const KEYS: Record<string, string> = {
   'Allocation calculée': 'allocation',
   'Base de référence du moteur': 'base_ref',
   'Mois utilisés': 'mois_utilises',
+  'Prêts en cours': 'prets_en_cours',
+  'Avances non retenues': 'avances_ouvertes',
+  'Effectif du département': 'effectif_dept',
+  'Plafond d’absents simultanés': 'plafond_absents',
   'Employés actifs': 'actifs',
   'Éligibles à un congé': 'eligibles',
   'Déjà en congé sur la période': 'deja_en_conge',
@@ -178,6 +189,27 @@ export function maskCard(
       }
       view.departments.push({ ref, markers });
     });
+  }
+  if (card.advice) {
+    const a = card.advice;
+    const findings: NonNullable<MaskedView['advice']>['findings'] = [];
+    for (const [i, f] of a.findings.entries()) {
+      const markers: Record<string, string> = {};
+      for (const [k, v] of Object.entries(f.values)) {
+        if (!Number.isFinite(v) || !/^[a-zA-Z]{1,20}$/.test(k)) return { ok: false, reason: 'unsupported' };
+        const m = `[[f${i + 1}.${k}]]`;
+        values.set(m, fmt(v));
+        markers[k] = m;
+      }
+      findings.push({ code: f.code, severity: f.severity, markers });
+    }
+    view.advice = { kind: a.kind, verdict: a.verdict, findings };
+    if (a.alternative) {
+      const fr = (d: string) => d.split('-').reverse().join('/');
+      values.set('[[alt_debut]]', safeData(fr(a.alternative.start)));
+      values.set('[[alt_fin]]', safeData(fr(a.alternative.end)));
+      view.advice.alternative = { start: '[[alt_debut]]', end: '[[alt_fin]]' };
+    }
   }
   return { ok: true, view, values, refs, bindings };
 }

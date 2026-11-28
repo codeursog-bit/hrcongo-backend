@@ -27,6 +27,7 @@ import type { Response } from 'express';
 import { AuthGuard } from '@nestjs/passport';
 import { LeavesService } from './leaves.service';
 import { LeavesHistoryService } from './leaves-history.service';
+import { LeavesMassPlanningService } from './leaves-mass-planning.service';
 import { CreateLeaveDto } from './dto/create-leave.dto';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { RolesGuard } from '../auth/guards/roles.guard';
@@ -37,6 +38,7 @@ export class LeavesController {
   constructor(
     private readonly leavesService: LeavesService,
     private readonly historyService: LeavesHistoryService,
+    private readonly massPlanning: LeavesMassPlanningService,
   ) {}
 
   /**
@@ -87,6 +89,47 @@ export class LeavesController {
       req.user.userId,
       companyId,
     );
+  }
+
+  /**
+   * Suggestion de planification des congés en masse (lecture seule) : date de départ, de retour,
+   * jours de base + ancienneté, décalage si le département serait trop chargé.
+   * ⚠️ Route à segment fixe — doit rester AVANT @Get(':id').
+   */
+  @Get('planning-suggestions')
+  @UseGuards(RolesGuard)
+  @Roles('ADMIN', 'HR_MANAGER', 'SUPER_ADMIN')
+  getPlanningSuggestions(
+    @Query('from') from: string,
+    @Query('months') months: string | undefined,
+    @Query('maxAbsentRatio') maxAbsentRatio: string | undefined,
+    @Request() req,
+    @Query('companyId') companyId?: string,
+  ) {
+    return this.massPlanning.suggest(
+      req.user.userId,
+      {
+        from,
+        months: months ? parseInt(months, 10) : 12,
+        maxAbsentRatio: maxAbsentRatio ? parseFloat(maxAbsentRatio) : undefined,
+      },
+      companyId,
+    );
+  }
+
+  /**
+   * Crée en une fois les congés choisis (APPROVED, mêmes contrôles que la planification
+   * individuelle). Réponse : { created, failed } — un échec n'arrête pas les autres.
+   */
+  @Post('planning-bulk')
+  @UseGuards(RolesGuard)
+  @Roles('ADMIN', 'HR_MANAGER', 'SUPER_ADMIN')
+  planMany(
+    @Body() body: { items: { employeeId: string; startDate: string; endDate: string }[] },
+    @Request() req,
+    @Query('companyId') companyId?: string,
+  ) {
+    return this.massPlanning.apply(req.user.userId, body?.items, companyId);
   }
 
   /**

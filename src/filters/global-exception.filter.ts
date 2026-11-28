@@ -16,6 +16,9 @@ import { Request, Response } from 'express';
 import { PrismaService } from '../prisma/prisma.service';
 import { IncidentsService } from '../incidents/incidents.service';
 import { safeIncidentText, safeIncidentPath } from '../incidents/incident-privacy';
+import * as jwt from 'jsonwebtoken';
+import { pickFreshestCookie } from '../common/utils/cookie.util';
+import { isKnownApiPath } from './known-api-prefixes';
 
 // Champs sensibles à ne jamais logguer (insensible à la casse, à n'importe quel niveau)
 const REDACT = new Set([
@@ -133,6 +136,10 @@ export class GlobalExceptionFilter implements ExceptionFilter {
       return;
     }
     if (statusCode === 404 && BOT_PROBE_REGEX.test(path)) return;
+    // 🧹 404 anonyme hors API : sonde de robot (/config.json, /aws…) → ni stocké, ni logué.
+    // On GARDE tout 404 d'un utilisateur connecté (ex. un appel erroné du front) et tout 404
+    // sous un préfixe réel de l'API (/employees/…, /blog/…).
+    if (statusCode === 404 && !isKnownApiPath(path) && !this.hasValidSession(request)) return;
     if (EXPECTED_CLIENT_ERRORS.some((r) => r.path.test(path) && r.statuses.includes(statusCode))) return;
 
     // ── Log console ─────────────────────────────────────────────────────────
@@ -192,6 +199,36 @@ export class GlobalExceptionFilter implements ExceptionFilter {
   }
 
   // ── Helpers ────────────────────────────────────────────────────────────────
+  // Vrai si la requête porte une session émise par nous (signature vérifiée, expiration ignorée).
+  // Nécessaire : sur une route INEXISTANTE (404 du routeur) aucun guard ne s'exécute, donc
+  // request.user est vide même pour un utilisateur connecté. Aucun accès base de données.
+  private hasValidSession(request: Request): boolean {
+    if ((request as any).user) return true;
+    const secret = process.env.JWT_SECRET;
+    if (!secret) return true; // impossible de vérifier → comportement historique (on stocke)
+    let token: string | null = null;
+    try {
+      token = pickFreshestCookie(request, 'access_token'); // peut lever sur un cookie mal encodé (robots)
+    } catch {
+      token = null;
+    }
+    if (!token) {
+      const auth = request.headers?.authorization;
+      if (typeof auth === 'string' && auth.startsWith('Bearer ')) token = auth.slice(7);
+    }
+    if (!token) {
+      const q = (request.query as any)?.token;
+      if (typeof q === 'string') token = q;
+    }
+    if (!token) return false;
+    try {
+      const payload = jwt.verify(token, secret, { ignoreExpiration: true }) as any;
+      return payload?.type === 'access';
+    } catch {
+      return false;
+    }
+  }
+
   private inferErrorCode(status: number): string {
     const codes: Record<number, string> = {
       400: 'BAD_REQUEST',

@@ -11,6 +11,9 @@ import {
   type ToolCard,
 } from './analysis-tools';
 import { readOnlyClient } from './read-only-client';
+import { buildRequestAdvice } from './request-advice';
+import { buildFinanceAdvice } from './finance-advice';
+import type { RequestKind } from './request-advisor';
 export interface AnalysisCard {
   departments?: ToolCard['departments'];
   title: string;
@@ -163,6 +166,11 @@ export class AssistantAnalysisService {
       'explain_employee_pay',
       'leave_allowance',
       'leave_balance',
+      'leave_request_advice',
+      'absence_request_advice',
+      'permission_request_advice',
+      'loan_request_advice',
+      'advance_request_advice',
     ].includes(intent.tool);
     if (
       (needsEmployee && !intent.employeeId) ||
@@ -210,6 +218,112 @@ export class AssistantAnalysisService {
         timeout: 15000,
         maxWait: 3000,
       },
+    );
+  }
+  /**
+   * Accès commun aux conseils (écrans de validation / de création) : aucun modèle d'IA, aucun
+   * crédit, transaction en lecture seule. Réservé ADMIN / RH de l'entreprise vérifiée.
+   */
+  private async withAdviceAccess<T>(
+    userId: string,
+    companyId: string,
+    run: (client: any) => Promise<T | null>,
+  ): Promise<T | null> {
+    return this.prisma.$transaction(
+      async (tx) => {
+        await tx.$executeRaw(Prisma.sql`SET TRANSACTION READ ONLY`);
+        const user = await tx.user.findUnique({
+          where: { id: userId },
+          select: {
+            id: true,
+            isActive: true,
+            role: true,
+            companyId: true,
+            manageMultipleCompanies: true,
+          },
+        });
+        if (
+          !user?.isActive ||
+          !['ADMIN', 'HR_MANAGER'].includes(user.role) ||
+          (await resolveVerifiedCompanyId(tx as any, user, companyId)) !==
+            companyId
+        )
+          return null;
+        const guarded = readOnlyClient(tx);
+        const card = await run(guarded.client);
+        return guarded.attempted() ? null : card;
+      },
+      {
+        isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead,
+        timeout: 15000,
+        maxWait: 3000,
+      },
+    );
+  }
+
+  /** Conseil pour une demande précise en attente (congé, absence, permission, prêt ou avance). */
+  async adviceForRequest(
+    userId: string,
+    companyId: string,
+    kind: RequestKind | 'LOAN' | 'ADVANCE',
+    requestId: string,
+  ) {
+    return this.withAdviceAccess(userId, companyId, async (client) => {
+      const select = { employeeId: true } as const;
+      if (kind === 'LOAN' || kind === 'ADVANCE') {
+        // Prêts et avances n'ont pas de companyId : l'appartenance passe par l'employé.
+        const where = { id: requestId, employee: { companyId } };
+        const found =
+          kind === 'LOAN'
+            ? await client.loan.findFirst({ where, select })
+            : await client.advance.findFirst({ where, select });
+        if (!found) return null;
+        return buildFinanceAdvice(client, companyId, {
+          kind,
+          employeeId: found.employeeId,
+          requestId,
+        });
+      }
+      const where = { id: requestId, companyId };
+      const found =
+        kind === 'LEAVE'
+          ? await client.leave.findFirst({ where, select })
+          : kind === 'ABSENCE'
+            ? await client.absenceRequest.findFirst({ where, select })
+            : await client.permissionTicket.findFirst({ where, select });
+      if (!found) return null;
+      return buildRequestAdvice(client, companyId, {
+        kind,
+        employeeId: found.employeeId,
+        requestId,
+      });
+    });
+  }
+
+  /** Simulation avant enregistrement (formulaire de création d'un prêt ou d'une avance). */
+  async adviceSimulation(
+    userId: string,
+    companyId: string,
+    kind: 'LOAN' | 'ADVANCE',
+    sim: {
+      employeeId: string;
+      amount: number;
+      monthlyRepayment?: number;
+      durationMonths?: number;
+      deductMonthsAhead?: number;
+    },
+  ) {
+    return this.withAdviceAccess(userId, companyId, (client) =>
+      buildFinanceAdvice(client, companyId, {
+        kind,
+        employeeId: sim.employeeId,
+        simulation: {
+          amount: sim.amount,
+          monthlyRepayment: sim.monthlyRepayment,
+          durationMonths: sim.durationMonths,
+          deductMonthsAhead: sim.deductMonthsAhead,
+        },
+      }),
     );
   }
   /** A dedicated read-only connection is enforced even if an existing report gains side effects later. */

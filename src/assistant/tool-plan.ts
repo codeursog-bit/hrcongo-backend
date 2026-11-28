@@ -29,6 +29,11 @@ export const PLAN_TOOLS = [
   'absences_ranking',
   'lateness_ranking',
   'leave_planning',
+  'leave_request_advice',
+  'absence_request_advice',
+  'permission_request_advice',
+  'loan_request_advice',
+  'advance_request_advice',
 ] as const;
 // Échec de compilation si un outil est ajouté à ANALYSIS_TOOLS sans être décrit ici.
 type MissingTools = Exclude<AnalysisTool, (typeof PLAN_TOOLS)[number]>;
@@ -56,6 +61,11 @@ const NEEDS: Record<
   absences_ranking: { employee: false, days: false, period: true },
   lateness_ranking: { employee: false, days: false, period: true },
   leave_planning: { employee: false, days: false, period: true },
+  leave_request_advice: { employee: true, days: false, period: false },
+  absence_request_advice: { employee: true, days: false, period: false },
+  permission_request_advice: { employee: true, days: false, period: false },
+  loan_request_advice: { employee: true, days: false, period: false },
+  advance_request_advice: { employee: true, days: false, period: false },
 };
 
 export interface RawPlan {

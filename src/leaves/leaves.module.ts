@@ -30,6 +30,7 @@ import { LeavesService } from './leaves.service';
 import { LeavesBalanceService } from './leaves-balance.service';
 import { LeavesIndemnityService } from './leaves-indemnity.service';
 import { LeavesHistoryService } from './leaves-history.service'; // ✅ Historique des départs + diagrammes
+import { LeavesMassPlanningService } from './leaves-mass-planning.service'; // ✅ Planification en masse
 import { LeaveAccrualCron } from './cron/leave-accrual.cron';
 import { PrismaModule } from '../prisma/prisma.module';
 import { NotificationsModule } from '../notifications/notifications.module';
@@ -45,6 +46,7 @@ import { ApprovalsCoreModule } from '../approvals/core/approvals-core.module';
     LeavesService,
     LeavesBalanceService, // ✅ Phase 7 — solde/cycle, extrait de leaves.service.ts
     LeavesHistoryService, // ✅ Historique des départs / demandes / diagrammes
+    LeavesMassPlanningService, // ✅ Suggestion + création de congés en masse
     LeavesIndemnityService, // ✅ Phase 7 — indemnité congé/paie, extrait de leaves.service.ts
     LeaveAccrualCron, // ✅ Cron d'acquisition mensuelle + alertes + rappels de retour
   ],

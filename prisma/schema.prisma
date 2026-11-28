@@ -6865,3 +6865,17 @@ model AssistantCreditPack {
   createdAt DateTime @default(now()) @db.Timestamptz
   updatedAt DateTime @updatedAt @db.Timestamptz
 }
+
+
+model AccountingPlanVersion {
+  id            String   @id @default(uuid())
+  countryCode   String   @default("CG")
+  effectiveFrom DateTime @db.Date
+  accounts      Json
+  note          String?
+  createdById   String?
+  createdByName String?
+  createdAt     DateTime @default(now())
+ 
+  @@index([countryCode, effectiveFrom])
+}

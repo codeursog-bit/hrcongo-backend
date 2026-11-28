@@ -21,6 +21,7 @@ import {
   Res,
 } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
+import { Throttle } from '@nestjs/throttler';
 import type { Response } from 'express';
 
 import { PayrollsService } from './payrolls.service';
@@ -243,6 +244,8 @@ export class PayrollsController {
   // ─────────────────────────────────────────────────────────────────────────
   // POST /payrolls/simulate
   // ─────────────────────────────────────────────────────────────────────────
+  // Simulation = calcul sans écriture, derrière auth + rôles paie : plafond relevé (les 2 compteurs du limiteur global)
+  @Throttle({ short: { limit: 300, ttl: 60_000 }, medium: { limit: 3000, ttl: 900_000 } })
   @Post('simulate')
   @UseGuards(RolesGuard)
   @Roles(...PAYROLL_ROLES)
@@ -307,6 +310,8 @@ export class PayrollsController {
   // ─────────────────────────────────────────────────────────────────────────
   // POST /payrolls/simulate-batch
   // ─────────────────────────────────────────────────────────────────────────
+  // Simulation = calcul sans écriture, derrière auth + rôles paie : plafond relevé (les 2 compteurs du limiteur global)
+  @Throttle({ short: { limit: 300, ttl: 60_000 }, medium: { limit: 3000, ttl: 900_000 } })
   @Post('simulate-batch')
   @UseGuards(RolesGuard)
   @Roles(...PAYROLL_ROLES)

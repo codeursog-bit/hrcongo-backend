@@ -1,5 +1,3 @@
-
-
 // ============================================================================
 // 📁 export.service.ts — VERSION FINALE
 // ✅ Export Excel standard (CNSS, ITS, HS 10/25/50/100, primes, charges)
@@ -15,6 +13,8 @@ import { Injectable, ForbiddenException } from '@nestjs/common';
 import { legalAtPeriod } from '../legal-parameters/legal-parameters.core';
 import * as ExcelJS from 'exceljs';
 import { PrismaService } from '../prisma/prisma.service';
+import { buildJournalEntries, JournalEntry } from '../accounting/payroll-journal-entries';
+import { ACCOUNTABLE_STATUSES } from '../compta-connector/payroll-contract';
 
 @Injectable()
 export class ExportService {
@@ -545,69 +545,73 @@ export class ExportService {
     });
     if (!user?.companyId) throw new Error('Accès refusé');
 
-    const payrolls = await this.prisma.payroll.findMany({
-      where: { companyId: user.companyId, month, year },
-      include: {
-        employee: {
-          select: { employeeNumber: true, firstName: true, lastName: true },
-        },
-      },
+    // ✅ Mêmes écritures que le Journal comptable et Konza Connect (plan SYSCOHADA
+    //    unique, brut ventilé, équilibre garanti, bulletins validés uniquement).
+    const entries = await this.accountableEntries(user.companyId, {
+      month,
+      year,
     });
-
-    // Date Sage : dernier jour du mois au format DD/MM/YYYY
-    const lastDay = new Date(year, month, 0).getDate();
-    const date = `${String(lastDay).padStart(2, '0')}/${String(month).padStart(2, '0')}/${year}`;
-    const journal = 'PAIE';
-    const lines: string[] = [];
-
-    // En-tête Sage
-    lines.push('JNL|DATEPCE|NUMCPTE|LIBELLE|DEBIT|CREDIT|REFPCE|NUMPIECE');
-
-    for (const p of payrolls) {
-      const name = `${p.employee.firstName} ${p.employee.lastName}`;
-      const ref = `PAY-${p.employee.employeeNumber}-${String(month).padStart(2, '0')}-${year}`;
-      const brut = Number(p.grossSalary);
-      const cnssS = Number(p.cnssSalarial);
-      const cnssE = Number(p.cnssEmployer);
-      const its = Number(p.its);
-      const net = Number(p.netSalary);
-      const tus = Math.round(brut * 0.05);
-
-      // Écriture : Salaire brut au débit
+    const fmt = (d: Date) =>
+      `${String(d.getUTCDate()).padStart(2, '0')}/${String(d.getUTCMonth() + 1).padStart(2, '0')}/${d.getUTCFullYear()}`;
+    const lines: string[] = [
+      'JNL|DATEPCE|NUMCPTE|LIBELLE|DEBIT|CREDIT|REFPCE|NUMPIECE',
+    ];
+    for (const e of entries) {
       lines.push(
-        `${journal}|${date}|661100|Salaire brut - ${name}|${brut}|0|${ref}|${ref}`,
-      );
-      // CNSS Salarié au crédit — 4313 Caisse de retraite obligatoire (OHADA)
-      lines.push(
-        `${journal}|${date}|431100|CNSS salarié - ${name}|0|${cnssS}|${ref}|${ref}`,
-      );
-      // ITS/IRPP au crédit — 4472 Impôts sur salaires (OHADA)
-      lines.push(
-        `${journal}|${date}|447200|ITS/IRPP - ${name}|0|${its}|${ref}|${ref}`,
-      );
-      // Net à payer au crédit — 422 Personnel rémunérations dues (OHADA)
-      lines.push(
-        `${journal}|${date}|422100|Rémunération due - ${name}|0|${net}|${ref}|${ref}`,
-      );
-      // CNSS Patronale au débit — 664 Charges sociales (OHADA)
-      lines.push(
-        `${journal}|${date}|664100|Charges patronales CNSS - ${name}|${cnssE}|0|${ref}|${ref}`,
-      );
-      // TUS au débit — 6413 Taxes sur appointements et salaires (OHADA)
-      lines.push(
-        `${journal}|${date}|641300|TUS - ${name}|${tus}|0|${ref}|${ref}`,
-      );
-      // CNSS Patronale au crédit — 4313 (OHADA)
-      lines.push(
-        `${journal}|${date}|431300|CNSS Employeur - ${name}|0|${cnssE}|${ref}|${ref}`,
-      );
-      // TUS à reverser au crédit — 4472 État impôts retenus à la source (OHADA)
-      lines.push(
-        `${journal}|${date}|447200|TUS à reverser - ${name}|0|${tus}|${ref}|${ref}`,
+        `${e.journal}|${fmt(e.date)}|${e.account}|${e.label}|${e.debit}|${e.credit}|${e.piece}|${e.piece}`,
       );
     }
-
     return lines.join('\n');
+  }
+
+  /**
+   * Écritures de paie comptabilisables (bulletins ni brouillon ni annulés).
+   * Si un bulletin ne peut pas être comptabilisé correctement (ex. retenue sans
+   * compte affecté), l'export est refusé avec la liste : jamais de fichier faux.
+   */
+  private async accountableEntries(
+    companyId: string,
+    filter: { month?: number; year?: number; payrollIds?: string[] },
+  ): Promise<JournalEntry[]> {
+    const payrolls = await this.prisma.payroll.findMany({
+      where: {
+        companyId,
+        status: { in: [...ACCOUNTABLE_STATUSES] },
+        ...(filter.payrollIds ? { id: { in: filter.payrollIds } } : {}),
+        ...(filter.month ? { month: filter.month } : {}),
+        ...(filter.year ? { year: filter.year } : {}),
+      } as any,
+      include: {
+        items: { orderBy: [{ order: 'asc' }, { id: 'asc' }] },
+        employee: {
+          select: {
+            id: true,
+            employeeNumber: true,
+            firstName: true,
+            lastName: true,
+            nationality: true,
+          },
+        },
+      },
+      orderBy: { employee: { lastName: 'asc' } },
+    });
+    let mappings: Record<string, string> | null = null;
+    try {
+      const link = await (this.prisma as any).comptaConnector?.findUnique({
+        where: { companyId },
+      });
+      mappings = (link?.mappings as Record<string, string>) ?? null;
+    } catch {
+      mappings = null;
+    }
+    const { entries, issues } = buildJournalEntries(payrolls as any, mappings);
+    if (issues.length) {
+      throw new Error(
+        'Export comptable refusé — bulletins non comptabilisables : ' +
+          issues.map((i) => `${i.piece} (${i.message})`).join(' ; '),
+      );
+    }
+    return entries;
   }
 
   // ═══════════════════════════════════════════════════════════════════════
@@ -615,7 +619,7 @@ export class ExportService {
   // ✅ Format XLSX strict (pas de couleurs, pas de fusion, zéro style)
   // ✅ Colonnes exactes DGI : NIU | Nom | Brut | Base ITS | ITS | TUS
   // ✅ Validation NIU 13 chiffres avant génération
-  // ✅ TUS = Brut × 5% (charge patronale déclarée à la DGI)
+  // ✅ TUS = montant enregistré sur le bulletin (7,5 % du brut)
   // ✅ Nom fichier normalisé : DECLARATION_ITS_MM_YYYY_ENTREPRISE.xlsx
   // ═══════════════════════════════════════════════════════════════════════
   async generateEtaxExport(
@@ -736,8 +740,10 @@ export class ExportService {
       // Base ITS = (Brut - CNSS) × 80% — abattement 20% CGI Congo Art. 41
       const baseIts = Math.round((brut - cnss) * 0.8);
 
-      // TUS = Brut × 5% — charge patronale déclarée à la DGI (CGI Art. 188)
-      const tus = Math.round(brut * 0.05);
+      // TUS = montant enregistré sur le bulletin (part DGI + part CNSS = 7,5 % du brut)
+      const tus = Math.round(
+        Number((p as any).tusDgiAmount || 0) + Number((p as any).tusCnssAmount || 0),
+      );
 
       const niu = ((emp as any).niu || emp.cnssNumber || '').toString().trim();
 
@@ -868,59 +874,13 @@ export class ExportService {
       requestingUserId,
       requestedCompanyId,
     );
-
-    const payrolls = await this.prisma.payroll.findMany({
-      where: { id: { in: payrollIds }, companyId },
-      include: {
-        employee: {
-          select: { employeeNumber: true, firstName: true, lastName: true },
-        },
-      },
-      orderBy: { employee: { lastName: 'asc' } },
-    });
-
-    const lines: string[] = [];
-    lines.push('Journal|Pièce|Date|Compte|Libellé|Débit|Crédit');
-
-    for (const p of payrolls) {
-      const name = `${p.employee.firstName} ${p.employee.lastName}`;
-      const piece = `PAY-${p.employee.employeeNumber}-${p.month}-${p.year}`;
-      const date = `${p.year}-${String(p.month).padStart(2, '0')}-28`;
-
+    const entries = await this.accountableEntries(companyId, { payrollIds });
+    const lines: string[] = ['Journal|Pièce|Date|Compte|Libellé|Débit|Crédit'];
+    for (const e of entries) {
       lines.push(
-        `PAIE|${piece}|${date}|661100|Salaire brut - ${name}|${p.grossSalary}|0`,
+        `${e.journal}|${e.piece}|${e.date.toISOString().slice(0, 10)}|${e.account}|${e.label}|${e.debit}|${e.credit}`,
       );
-      lines.push(
-        `PAIE|${piece}|${date}|431100|CNSS salarié - ${name}|0|${p.cnssSalarial}`,
-      );
-      lines.push(`PAIE|${piece}|${date}|447200|ITS/IRPP - ${name}|0|${p.its}`);
-      lines.push(
-        `PAIE|${piece}|${date}|422100|Rémunération due - ${name}|0|${p.netSalary}`,
-      );
-      if (Number(p.cnssEmployer) > 0) {
-        lines.push(
-          `PAIE|${piece}|${date}|664100|Charges patronales CNSS - ${name}|${p.cnssEmployer}|0`,
-        );
-        lines.push(
-          `PAIE|${piece}|${date}|431300|CNSS employeur crédit - ${name}|0|${p.cnssEmployer}`,
-        );
-      }
-      if (Number((p as any).tusTotal ?? 0) > 0) {
-        const tusDgi = Number((p as any).tusDgiAmount ?? 0);
-        const tusCnss = Number((p as any).tusCnssAmount ?? 0);
-        const tusTotal = Number((p as any).tusTotal ?? 0);
-        lines.push(
-          `PAIE|${piece}|${date}|641300|TUS (7,5%) - ${name}|${tusTotal}|0`,
-        );
-        lines.push(
-          `PAIE|${piece}|${date}|447200|TUS FISC à reverser - ${name}|0|${tusDgi}`,
-        );
-        lines.push(
-          `PAIE|${piece}|${date}|431300|TUS-CNSS à reverser - ${name}|0|${tusCnss}`,
-        );
-      }
     }
-
     return lines.join('\n');
   }
 

@@ -7,6 +7,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { CryptoService } from '../crypto/crypto.service';
 import { assertCompanyAccess } from '../common/resolve-verified-company.util';
 import { buildPayrollEvent, fcfa, payrollLines, payloadHash, canonicalJson } from './payroll-contract';
+import { getPlanForPeriod } from '../accounting/syscohada';
 
 const accepted=new Set(['SUCCEEDED','REPLAYED']);
 const asJson=(value:unknown)=>JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue;
@@ -52,10 +53,10 @@ export class ComptaConnectorService {
  async status(userId:string,companyId?:string){
   const id=await this.scope(userId,companyId);
   const link=await this.db.comptaConnector.findUnique({where:{companyId:id}});
-  const payrolls=await this.db.payroll.findMany({where:{companyId:id,status:'TO_PAY',paid:false},include:{items:{orderBy:[{order:'asc'},{id:'asc'}]},employee:{select:{id:true,firstName:true,lastName:true}}},take:500});
-  const requirements=new Map<string,{key:string;label:string}>();
+  const payrolls=await this.db.payroll.findMany({where:{companyId:id,status:'TO_PAY',paid:false},include:{items:{orderBy:[{order:'asc'},{id:'asc'}]},employee:{select:{id:true,firstName:true,lastName:true,nationality:true}}},take:500});
+  const requirements=new Map<string,{key:string;label:string;defaultAccount:string|null}>();
   const blocked:{payrollId:string;detail:string}[]=[];
-  for(const p of payrolls){try{for(const line of payrollLines(p))requirements.set(line.key,{key:line.key,label:line.label});}catch(e){blocked.push({payrollId:p.id,detail:e instanceof Error?e.message:'Bulletin incohérent.'});}}
+  for(const p of payrolls){try{for(const line of payrollLines(p))requirements.set(line.key,{key:line.key,label:line.label,defaultAccount:getPlanForPeriod(p.year,p.month)[line.key]?.code??null});}catch(e){blocked.push({payrollId:p.id,detail:e instanceof Error?e.message:'Bulletin incohérent.'});}}
   const deliveries=link?await this.db.comptaDelivery.findMany({where:{connectorId:link.id},select:{id:true,externalId:true,payrollId:true,state:true,detail:true,attempts:true,remoteEventId:true,createdAt:true},orderBy:{createdAt:'desc'},take:100}):[];
   return {linked:!!link?.enabled,remoteCompanyName:link?.remoteCompanyName??null,remoteCompanyId:link?.remoteCompanyId??null,lastSyncAt:link?.lastSyncAt??null,lastError:link?.lastError??null,mappings:link?.mappings??{},requirements:[...requirements.values()],blocked,deliveries,pendingPayrolls:payrolls.length,limit:500};
  }
@@ -85,7 +86,7 @@ export class ComptaConnectorService {
   return this.status(userId,id);
  }
  private async collect(link:{id:string;companyId:string;mappings:Prisma.JsonValue}){
-  const rows=await this.db.payroll.findMany({where:{companyId:link.companyId,status:'TO_PAY',paid:false,comptaDeliveries:{none:{connectorId:link.id,externalId:{startsWith:'rh:payroll:'}}}},include:{items:{orderBy:[{order:'asc'},{id:'asc'}]},employee:{select:{id:true,firstName:true,lastName:true}}},orderBy:{id:'asc'},take:500});
+  const rows=await this.db.payroll.findMany({where:{companyId:link.companyId,status:'TO_PAY',paid:false,comptaDeliveries:{none:{connectorId:link.id,externalId:{startsWith:'rh:payroll:'}}}},include:{items:{orderBy:[{order:'asc'},{id:'asc'}]},employee:{select:{id:true,firstName:true,lastName:true,nationality:true}}},orderBy:{id:'asc'},take:500});
   const errors:string[]=[];
   for(const p of rows){
    const externalId='rh:payroll:'+p.id;
@@ -117,7 +118,7 @@ export class ComptaConnectorService {
     await this.db.$transaction(async tx=>{
      await tx.$queryRawUnsafe('SELECT id FROM payrolls WHERE id = $1::uuid AND "companyId" = $2::uuid FOR UPDATE',row.payrollId,link.companyId);
      if(row.externalId.startsWith('rh:payroll:')){
-      const payroll=await tx.payroll.findFirst({where:{id:row.payrollId,companyId:link.companyId},include:{items:{orderBy:[{order:'asc'},{id:'asc'}]},employee:{select:{id:true,firstName:true,lastName:true}}}});
+      const payroll=await tx.payroll.findFirst({where:{id:row.payrollId,companyId:link.companyId},include:{items:{orderBy:[{order:'asc'},{id:'asc'}]},employee:{select:{id:true,firstName:true,lastName:true,nationality:true}}}});
       const configuration=await tx.comptaConnector.findUniqueOrThrow({where:{id:link.id}});
       if(!configuration.enabled)throw new Error('Liaison suspendue.');
       if(!payroll||payloadHash(buildPayrollEvent(payroll,configuration.mappings as Record<string,string>))!==row.payloadHash)throw new Error('BULLETIN_MODIFIE : transmission bloquée, contrôlez la source.');

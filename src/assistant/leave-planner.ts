@@ -16,6 +16,8 @@ export interface PlanEmployee {
   departmentId: string;
   hireDate: Date;
   remaining: number;
+  /** Jours d'ancienneté acquis (dans le solde restant), pour la répartition base / ancienneté. */
+  seniorityDays?: number;
   lastReturn: Date | null;
 }
 export interface PlanLeave {
@@ -43,6 +45,7 @@ export interface PlanProposal {
   end: Date; // dernier jour d'absence, inclus
   workingDays: number;
   remaining: number;
+  seniorityDays: number;
   seniorityYears: number;
 }
 export interface PlanResult {
@@ -133,6 +136,7 @@ export function planLeaves(p: PlanInput): PlanResult {
       end: days[chosen + length - 1],
       workingDays: length,
       remaining: e.remaining,
+      seniorityDays: e.seniorityDays ?? 0,
       seniorityYears: seniorityYears(e.hireDate, p.periodStart),
     });
   }

@@ -49,6 +49,7 @@ import { SubscriptionsModule } from './subscriptions/subscriptions.module';
 import { PayrollSettingsModule } from './payroll/settings/settings.module';
 import { FiscalModule } from './payroll/fiscal/fiscal.module';
 import { LegalParametersModule } from './legal-parameters/legal-parameters.module';
+import { AccountingModule } from './accounting/accounting.module';
 import { PayrollsModule } from './payrolls/payrolls.module';
 import { PayrollJournalModule } from './payroll-journal/payroll-journal.module'
 import { AdminModule } from './admin/admin.module';
@@ -144,6 +145,7 @@ import { ContractTemplatesModule } from './contract-templates/contract-templates
     PayrollSettingsModule,
     FiscalModule,
     LegalParametersModule,
+    AccountingModule,
     PayrollsModule,
     PayrollJournalModule,
     LoansModule,
